@@ -1,0 +1,88 @@
+# ============================================
+# NS-3 Datacenter Project - Git Ignore
+# ============================================
+
+# ---------- 编译产物 ----------
+# 编译对象文件
+*.slo
+*.lo
+*.o
+*.obj
+*.d
+
+# 预编译头文件
+*.gch
+*.pch
+
+# 动态/静态库
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lai
+*.la
+*.a
+*.lib
+
+# 可执行文件
+*.exe
+*.out
+*.app
+
+# ---------- NS-3 构建目录 ----------
+simulator/ns-3.39/build/
+simulator/ns-3.39/cmake-cache/
+simulator/ns-3.39/.lock-ns3_*
+simulator/ns-3.39/.waf*
+simulator/ns-3.39/ns3
+
+# ---------- Python 缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# ---------- 临时文件和日志 ----------
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+.#*
+
+# ---------- 仿真输出 ----------
+results/
+/tmp/*.log
+/tmp/frp_simulation.log
+/tmp/algo_cc*.log
+
+# ---------- IDE 配置 ----------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ---------- OS 文件 ----------
+.DS_Store
+Thumbs.db
+*.un~
+
+# ---------- 大型数据文件 ----------
+*.pcap
+*.pcap-trace
+*.sqlite
+*.sqlite3
+
+# ---------- Bake 构建 ----------
+simulator/bake/build/
+simulator/bake/.lock*
+
+# ---------- NetAnim ----------
+*.xml
+!simulator/ns-3.39/doc/
+!simulator/ns-3.39/src/*/examples/*.xml
