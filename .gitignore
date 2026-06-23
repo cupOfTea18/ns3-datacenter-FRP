@@ -33,8 +33,7 @@
 simulator/ns-3.39/build/
 simulator/ns-3.39/cmake-cache/
 simulator/ns-3.39/.lock-ns3_*
-simulator/ns-3.39/.waf*
-simulator/ns-3.39/ns3
+
 
 # ---------- Python 缓存 ----------
 __pycache__/
@@ -86,3 +85,7 @@ simulator/bake/.lock*
 *.xml
 !simulator/ns-3.39/doc/
 !simulator/ns-3.39/src/*/examples/*.xml
+
+.github/
+docs/
+instructions.md

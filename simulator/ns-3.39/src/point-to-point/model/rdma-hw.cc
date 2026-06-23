@@ -677,9 +677,10 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
 		sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
 	qp->m_nextAvail = Simulator::Now() + sendingTime;
 	
-	// 输出所有流的发送速率（采样，每100次输出一次）
-	static uint32_t debugCounter = 0;
-	if (debugCounter++ % 100 == 0) {
+	// 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
+	static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
+	uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+	if (qpDebugCounters[qpKey]++ % 50 == 0) {
 		std::cout << "[TX RATE] Host " << m_node->GetId() 
 		          << " qp=" << qp->sip << "->" << qp->dip
 		          << " m_rate=" << (qp->m_rate.GetBitRate()/1e6) << "Mbps"

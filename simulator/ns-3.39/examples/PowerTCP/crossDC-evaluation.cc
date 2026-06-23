@@ -88,8 +88,8 @@ uint32_t buffer_size = 16;
 // 网卡处理延迟（纳秒）
 uint64_t nic_delay_ns = 15000;  // 默认15μs = 15000ns
 
-uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 100;
-uint64_t qlen_mon_start = 2000000000, qlen_mon_end = 2100000000;
+uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 100;   
+uint64_t qlen_mon_start = 2000000000, qlen_mon_end = 2100000000;	
 string qlen_mon_file;
 
 unordered_map<uint64_t, uint32_t> rate2kmax, rate2kmin;
@@ -620,7 +620,7 @@ int main(int argc, char *argv[])
 
 	uint32_t algorithm = 3;
 	uint32_t windowCheck = 1;
-	std::string confFile = "/home/vamsi/src/phd/codebase/ns3-datacenter/simulator/ns-3.39/examples/PowerTCP/config-burst.txt";
+	std::string confFile = "/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39/examples/PowerTCP/config-burst.txt";
 	std::cout << confFile;
 	CommandLine cmd;
 	cmd.AddValue("conf", "config file path", confFile);
@@ -1146,8 +1146,8 @@ int main(int argc, char *argv[])
 		nbr2if[dnode][snode].bw = DynamicCast<QbbNetDevice>(d.Get(1))->GetDataRate().GetBitRate();
 
 		// setup PFC trace
-		// DynamicCast<QbbNetDevice>(d.Get(0))->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, pfc_file, DynamicCast<QbbNetDevice>(d.Get(0))));
-		// DynamicCast<QbbNetDevice>(d.Get(1))->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, pfc_file, DynamicCast<QbbNetDevice>(d.Get(1))));
+		DynamicCast<QbbNetDevice>(d.Get(0))->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, pfc_file, DynamicCast<QbbNetDevice>(d.Get(0))));
+		DynamicCast<QbbNetDevice>(d.Get(1))->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, pfc_file, DynamicCast<QbbNetDevice>(d.Get(1))));
 	}
 
 	nic_rate = get_nic_rate(n);
@@ -1455,7 +1455,9 @@ int main(int argc, char *argv[])
 	tracef.close();
 	
 	double delay = 1.5 * minRtt * 1e-9; // 10 micro seconds
-	Simulator::Schedule(Seconds(delay), PrintResults, switchDown, 1, delay);
+	//由于输出在SwitchNotifyDequeue里，这里不用再使用printResults函数
+	//Simulator::Schedule(Seconds(delay), PrintResults, switchDown, 1, delay);
+
 
 	// AsciiTraceHelper ascii;
 	//     qbb.EnableAsciiAll (ascii.CreateFileStream ("eval.tr"));
