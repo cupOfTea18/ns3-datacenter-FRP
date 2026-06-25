@@ -676,12 +676,19 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
 	else
 		sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
 	qp->m_nextAvail = Simulator::Now() + sendingTime;
-	
-	// 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
-	static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
+
+	// 输出所有流的发送速率（按时间周期采样，默认每50us输出一次，与速率解耦）
+	// 采样间隔（ns），与FRP/ROCC 40us反馈周期同量级
+	static const int64_t SAMPLE_INTERVAL_NS = 50000;
+	static std::unordered_map<uint64_t, int64_t> qpNextSampleNs;
 	uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
-	if (qpDebugCounters[qpKey]++ % 50 == 0) {
-		std::cout << "[TX RATE] Host " << m_node->GetId() 
+	int64_t now = Simulator::Now().GetNanoSeconds();
+	int64_t& deadline = qpNextSampleNs[qpKey];
+	if (deadline == 0) {
+		// 首次：设定下次采样截止时间，本次不输出
+		deadline = now + SAMPLE_INTERVAL_NS;
+	} else if (now >= deadline) {
+		std::cout << "[TX RATE] Host " << m_node->GetId()
 		          << " qp=" << qp->sip << "->" << qp->dip
 		          << " m_rate=" << (qp->m_rate.GetBitRate()/1e6) << "Mbps"
 		          << " m_max_rate=" << (qp->m_max_rate.GetBitRate()/1e6) << "Mbps"
@@ -689,8 +696,13 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
 		          << " snd_nxt=" << qp->snd_nxt
 		          << " snd_una=" << qp->snd_una
 		          << " bytesLeft=" << qp->GetBytesLeft()
-		          << " nextAvail=" << qp->m_nextAvail.GetMicroSeconds() << "us"
+		          << " t=" << (now / 1000) << "us"
 		          << std::endl;
+		// 推进截止时间：长空闲追上时重置为 now+interval，否则保持网格步进
+		if (now - deadline > SAMPLE_INTERVAL_NS)
+			deadline = now + SAMPLE_INTERVAL_NS;
+		else
+			deadline += SAMPLE_INTERVAL_NS;
 	}
 }
 

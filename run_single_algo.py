@@ -117,7 +117,7 @@ def run_and_plot(ccMode, algo_name):
         
         # 所有算法（DCQCN/HPCC/TIMELY/FRP/ROCC）都使用TX RATE日志
         if '[TX RATE]' in l:
-            match = re.search(r'\[TX RATE\].*Host (\d+).*m_rate=([\d.]+)Mbps.*nextAvail=(\d+)us', l)
+            match = re.search(r'\[TX RATE\].*Host (\d+).*m_rate=([\d.]+)Mbps.*t=(\d+)us', l)
             if match:
                 host = int(match.group(1))
                 rate_gbps = float(match.group(2)) / 1000
@@ -129,10 +129,7 @@ def run_and_plot(ccMode, algo_name):
                 host_rates[host].append(rate_gbps)
                 host_times[host].append(time_us / 1000.0)
     
-    # 生成时间轴 (线性分布)
-    num_samples = max(len(rates) for rates in host_rates.values()) if host_rates else 0
-    time_axis = np.linspace(0, DURATION * 1000, num_samples) if num_samples > 0 else []
-    
+    # 时间轴：按时间周期采样，直接使用日志中的真实时间戳，不再用 linspace 兜底
     active_hosts = sorted(host_rates.keys())
     print(f"✓ 解析完成: Switch10 {len(sw10_time)} 点, 活跃主机 {len(active_hosts)} 个")
     print(f"  活跃主机列表: {active_hosts}")
@@ -159,7 +156,11 @@ def run_and_plot(ccMode, algo_name):
         if host_rates[h]:
             c = colors[idx % len(colors)]
             rates = host_rates[h]
-            times = host_times[h] if h in host_times and len(host_times[h]) == len(rates) else time_axis[:len(rates)]
+            times = host_times[h]
+            # 长度不一致时截断到较短者，避免绘图错位
+            n = min(len(rates), len(times))
+            rates = rates[:n]
+            times = times[:n]
             print(f"  Flow {h}: {len(rates)} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps, 时间范围 [{min(times):.3f}, {max(times):.3f}] ms")
             ax1.plot(times, rates, 
                     color=c, lw=2, label=f'Flow {h}', alpha=0.85)
