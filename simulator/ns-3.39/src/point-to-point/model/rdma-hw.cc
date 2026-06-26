@@ -354,6 +354,12 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	rxQp->m_milestone_rx = m_ack_interval;
 
 	int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size);
+	// 按序到达时累加接收字节（用于接收侧 goodput 统计）
+	// x==1: 按序+需发ACK; x==5: 按序+无需ACK
+	// x==2/x==4: 乱序(不累加,等重传补洞); x==3: 重复包(不累加)
+	if (x == 1 || x == 5) {
+		rxQp->m_recv_bytes += payload_size;
+	}
 	if (x == 1 || x == 2) { //generate ACK or NACK
 		qbbHeader seqh;
 		seqh.SetSeq(rxQp->ReceiverNextExpectedSeq);
@@ -676,6 +682,19 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
 	else
 		sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
 	qp->m_nextAvail = Simulator::Now() + sendingTime;
+
+	// 输出所有流的发送速率（按时间周期采样，默认每50us输出一次，与速率解耦）
+	// 采样间隔（ns），与FRP/ROCC 40us反馈周期同量级
+	static const int64_t SAMPLE_INTERVAL_NS = 50000;
+	static std::unordered_map<uint64_t, int64_t> qpNextSampleNs;
+	uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+	int64_t now = Simulator::Now().GetNanoSeconds();
+	int64_t& deadline = qpNextSampleNs[qpKey];
+	if (deadline == 0) {
+		// 首次：设定下次采样截止时间，本次不输出
+		deadline = now + SAMPLE_INTERVAL_NS;
+	} else if (now >= deadline) {
+		std::cout << "[TX RATE] Host " << m_node->GetId()
 	
 	// 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
 	static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
@@ -689,8 +708,13 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
 		          << " snd_nxt=" << qp->snd_nxt
 		          << " snd_una=" << qp->snd_una
 		          << " bytesLeft=" << qp->GetBytesLeft()
-		          << " nextAvail=" << qp->m_nextAvail.GetMicroSeconds() << "us"
+		          << " t=" << (now / 1000) << "us"
 		          << std::endl;
+		// 推进截止时间：长空闲追上时重置为 now+interval，否则保持网格步进
+		if (now - deadline > SAMPLE_INTERVAL_NS)
+			deadline = now + SAMPLE_INTERVAL_NS;
+		else
+			deadline += SAMPLE_INTERVAL_NS;
 	}
 }
 
