@@ -88,22 +88,22 @@ def run_and_plot(ccMode, algo_name):
     with open(log_file, 'r') as f:
         lines = f.readlines()
     
-    # 解析队列数据 - 使用Switch 10而不是Switch 13
+    # 解析队列数据 - 监控 Switch 85 Port 1（Switch 85 → Host 53 接入链路，当前 flow.txt 瓶颈点）
     sw10_time, sw10_q = [], []
     for l in lines:
         l = l.strip()
-        # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN，改为Switch 10
+        # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN
         if '[DCQCN_QLEN]' in l and ccMode in [1, 3, 7]:
             parts = l.split()
-            # 监控的是Switch 10的Port 1（连host 4的端口）
-            if len(parts) >= 5 and int(parts[2]) == 10 and int(parts[3]) == 1:
+            # 监控的是Switch 85的Port 1（连host 53的端口）
+            if len(parts) >= 5 and int(parts[2]) == 85 and int(parts[3]) == 1:
                 sw10_time.append(float(parts[1]) / 1e9 * 1000)  # timestep -> ms
                 sw10_q.append(float(parts[4]) / 1024.0)  # Bytes -> KB
         
-        # FRP/ROCC 使用 FRP_DATA_SW，改为Switch 10
+        # FRP/ROCC 使用 FRP_DATA_SW
         if '[FRP_DATA_SW]' in l and ccMode in [13, 14]:
             parts = l.split()
-            if len(parts) >= 8 and int(parts[2]) == 10 and int(parts[3]) == 1:
+            if len(parts) >= 8 and int(parts[2]) == 85 and int(parts[3]) == 1:
                 if int(parts[7]) == ccMode:
                     sw10_time.append(float(parts[1]) * 1000)  # s -> ms
                     sw10_q.append(float(parts[5]))  # KB
@@ -152,51 +152,28 @@ def run_and_plot(ccMode, algo_name):
     # 时间轴：按时间周期采样，直接使用日志中的真实时间戳，不再用 linspace 兜底
     active_hosts = sorted(host_rates.keys())
     active_flows = sorted(flow_tp.keys())
-    print(f"✓ 解析完成: Switch10 {len(sw10_time)} 点, 活跃主机 {len(active_hosts)} 个, 接收侧流 {len(active_flows)} 条")
-    print(f"  活跃主机列表: {active_hosts}")
-    for h in active_hosts:
-        print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
-    for fk in active_flows:
-        print(f"    Flow {fk}: {len(flow_tp[fk]['times'])} 个接收速率数据点")
-    print()
+    print(f"✓ 解析完成: Switch85 {len(sw10_time)} 点, 接收侧流 {len(active_flows)} 条")
+    # print(f"  活跃主机列表: {active_hosts}")
+    # for h in active_hosts:
+    #     print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
+    # for fk in active_flows:
+    #     print(f"    Flow {fk}: {len(flow_tp[fk]['times'])} 个接收速率数据点")
+    # print()
     
     # 5. 绘图
     print("生成图像...")
     plt.rcParams['font.family'] = 'DejaVu Sans'
     plt.rcParams['axes.unicode_minus'] = False
     
-    fig, axes = plt.subplots(3, 1, figsize=(18, 16), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(18, 12), sharex=True)
     fig.suptitle(f'{algo_name} (ccMode={ccMode}) - Burst Traffic Analysis',
                  fontsize=18, fontweight='bold')
     
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'lime', 'brown', 'pink', 'gray',
               'magenta', 'olive', 'teal', 'navy', 'maroon', 'coral', 'gold', 'indigo']
     
-    # 子图1: 发送侧主机速率 (m_rate)
-    ax1 = axes[0]
-    print(f"绘制 {len(active_hosts)} 个流的发送速率...")
-    for idx, h in enumerate(active_hosts[:15]):  # 最多显示15个流
-        if host_rates[h]:
-            c = colors[idx % len(colors)]
-            rates = host_rates[h]
-            times = host_times[h]
-            # 长度不一致时截断到较短者，避免绘图错位
-            n = min(len(rates), len(times))
-            rates = rates[:n]
-            times = times[:n]
-            print(f"  Flow {h}: {len(rates)} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps, 时间范围 [{min(times):.3f}, {max(times):.3f}] ms")
-            ax1.plot(times, rates, 
-                    color=c, lw=2, label=f'Flow {h}', alpha=0.85)
-    
-    ax1.set_ylabel('Sending Rate (Gbps)', fontsize=14, fontweight='bold')
-    ax1.set_title(f'TX Rate - CC m_rate ({len(active_hosts)} flows)', fontsize=15, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=10, ncol=3, framealpha=0.9)
-    ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.set_ylim(0, 110)
-    ax1.tick_params(labelsize=11)
-    
-    # 子图2: 接收侧 per-flow Throughput ([FLOW TP])
-    ax2 = axes[1]
+    # 子图1: 接收侧 per-flow Throughput ([FLOW TP])
+    ax2 = axes[0]
     print(f"绘制 {len(active_flows)} 条流的接收速率...")
     for idx, fk in enumerate(active_flows[:15]):  # 最多显示15条流
         times = flow_tp[fk]['times']
@@ -218,17 +195,17 @@ def run_and_plot(ccMode, algo_name):
     ax2.set_ylim(0, 110)
     ax2.tick_params(labelsize=11)
     
-    # 子图3: 队列长度
-    ax3 = axes[2]
+    # 子图2: 队列长度
+    ax3 = axes[1]
     if sw10_time and sw10_q:
         ax3.fill_between(sw10_time, 0, sw10_q, alpha=0.35, color='purple')
-        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 10 Port 1')
+        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 85 Port 1')
         ax3.axhline(y=500, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 500KB')
         ax3.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
     
     ax3.set_ylabel('Queue Length (KB)', fontsize=14, fontweight='bold')
     ax3.set_xlabel('Time (ms)', fontsize=14, fontweight='bold')
-    ax3.set_title('Switch 10 Queue Length (Port 1 - Bottleneck)', fontsize=15, fontweight='bold')
+    ax3.set_title('Switch 85 Queue Length (Port 1 - Bottleneck, →Host 53)', fontsize=15, fontweight='bold')
     ax3.legend(loc='upper right', fontsize=11, framealpha=0.9)
     ax3.grid(True, alpha=0.3, linestyle='--')
     
@@ -246,7 +223,7 @@ def run_and_plot(ccMode, algo_name):
     print(f"{'='*80}")
     print(f"统计信息 - {algo_name}")
     print(f"{'='*80}")
-    print(f"活跃流数量: {len(active_hosts)}")
+    print(f"活跃流数量: {len(active_flows)}")
     print(f"队列最大值: {max(sw10_q):.0f} KB" if sw10_q else "队列数据: 无")
     print(f"队列均值: {np.mean(sw10_q):.0f} KB" if sw10_q else "")
     print(f"图像文件: {output_file}")
