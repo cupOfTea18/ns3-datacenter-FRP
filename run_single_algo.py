@@ -76,21 +76,22 @@ def run_and_plot(ccMode, algo_name):
     with open(log_file, 'r') as f:
         lines = f.readlines()
     
-    # 解析队列数据 - 使用Switch 10而不是Switch 13
+    # 解析队列数据 - 监控 Switch 85 Port 1（Switch 85 → Host 53 接入链路，当前 flow.txt 瓶颈点）
     sw10_time, sw10_q = [], []
     for l in lines:
         l = l.strip()
-        # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN，改为Switch 10
+        # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN
         if '[DCQCN_QLEN]' in l and ccMode in [1, 3, 7]:
             parts = l.split()
-            if len(parts) >= 5 and int(parts[2]) == 10 and int(parts[3]) == 1:
+            # 监控的是Switch 85的Port 1（连host 53的端口）
+            if len(parts) >= 5 and int(parts[2]) == 85 and int(parts[3]) == 1:
                 sw10_time.append(float(parts[1]) / 1e9 * 1000)  # timestep -> ms
                 sw10_q.append(float(parts[4]) / 1024.0)  # Bytes -> KB
         
-        # FRP/ROCC 使用 FRP_DATA_SW，改为Switch 10
+        # FRP/ROCC 使用 FRP_DATA_SW
         if '[FRP_DATA_SW]' in l and ccMode in [13, 14]:
             parts = l.split()
-            if len(parts) >= 8 and int(parts[2]) == 10 and int(parts[3]) == 1:
+            if len(parts) >= 8 and int(parts[2]) == 85 and int(parts[3]) == 1:
                 if int(parts[7]) == ccMode:
                     sw10_time.append(float(parts[1]) * 1000)  # s -> ms
                     sw10_q.append(float(parts[5]))  # KB
@@ -104,7 +105,7 @@ def run_and_plot(ccMode, algo_name):
         
         # 所有算法（DCQCN/HPCC/TIMELY/FRP/ROCC）都使用TX RATE日志
         if '[TX RATE]' in l:
-            match = re.search(r'\[TX RATE\].*Host (\d+).*m_rate=([\d.]+)Mbps.*nextAvail=(\d+)us', l)
+            match = re.search(r'\[TX RATE\].*Host (\d+).*m_rate=([\d.]+)Mbps.*t=(\d+)us', l)
             if match:
                 host = int(match.group(1))
                 rate_gbps = float(match.group(2)) / 1000
@@ -116,16 +117,36 @@ def run_and_plot(ccMode, algo_name):
                 host_rates[host].append(rate_gbps)
                 host_times[host].append(time_us / 1000.0)
     
-    # 生成时间轴 (线性分布)
-    num_samples = max(len(rates) for rates in host_rates.values()) if host_rates else 0
-    time_axis = np.linspace(0, DURATION * 1000, num_samples) if num_samples > 0 else []
+    # 解析接收侧 per-flow 速率 ([FLOW TP])
+    flow_tp = {}  # key=(src,dst,sport,dport) → {times:[], rates:[]}
+    for l in lines:
+        l = l.strip()
+        m = re.search(
+            r'\[FLOW TP\] Src (\d+) Dst (\d+) pg (\d+) sport (\d+) dport (\d+) '
+            r'throughput ([\d.e+\-]+) time ([\d.e+\-]+) m_recv_bytes (\d+)', l)
+        if m:
+            src = int(m.group(1))
+            dst = int(m.group(2))
+            sport = int(m.group(4))
+            dport = int(m.group(5))
+            tp_bps = float(m.group(6))
+            t_sec = float(m.group(7))
+            key = (src, dst, sport, dport)
+            if key not in flow_tp:
+                flow_tp[key] = {'times': [], 'rates': []}
+            flow_tp[key]['times'].append(t_sec * 1000)  # 转换为 ms
+            flow_tp[key]['rates'].append(tp_bps / 1e9)   # bps → Gbps
     
+    # 时间轴：按时间周期采样，直接使用日志中的真实时间戳，不再用 linspace 兜底
     active_hosts = sorted(host_rates.keys())
-    print(f"✓ 解析完成: Switch10 {len(sw10_time)} 点, 活跃主机 {len(active_hosts)} 个")
-    print(f"  活跃主机列表: {active_hosts}")
-    for h in active_hosts:
-        print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
-    print()
+    active_flows = sorted(flow_tp.keys())
+    print(f"✓ 解析完成: Switch85 {len(sw10_time)} 点, 接收侧流 {len(active_flows)} 条")
+    # print(f"  活跃主机列表: {active_hosts}")
+    # for h in active_hosts:
+    #     print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
+    # for fk in active_flows:
+    #     print(f"    Flow {fk}: {len(flow_tp[fk]['times'])} 个接收速率数据点")
+    # print()
     
     # 5. 绘图
     print("生成图像...")
@@ -139,42 +160,46 @@ def run_and_plot(ccMode, algo_name):
     colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'lime', 'brown', 'pink', 'gray',
               'magenta', 'olive', 'teal', 'navy', 'maroon', 'coral', 'gold', 'indigo']
     
-    # 子图1: 主机速率
-    ax1 = axes[0]
-    print(f"绘制 {len(active_hosts)} 个流的速率...")
-    for idx, h in enumerate(active_hosts[:15]):  # 最多显示15个流
-        if host_rates[h]:
-            c = colors[idx % len(colors)]
-            rates = host_rates[h]
-            times = host_times[h] if h in host_times and len(host_times[h]) == len(rates) else time_axis[:len(rates)]
-            print(f"  Flow {h}: {len(rates)} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps, 时间范围 [{min(times):.3f}, {max(times):.3f}] ms")
-            ax1.plot(times, rates, 
-                    color=c, lw=2, label=f'Flow {h}', alpha=0.85)
+    # 子图1: 接收侧 per-flow Throughput ([FLOW TP])
+    ax2 = axes[0]
+    print(f"绘制 {len(active_flows)} 条流的接收速率...")
+    for idx, fk in enumerate(active_flows[:15]):  # 最多显示15条流
+        times = flow_tp[fk]['times']
+        rates = flow_tp[fk]['rates']
+        n = min(len(rates), len(times))
+        times = times[:n]
+        rates = rates[:n]
+        if n == 0:
+            continue
+        c = colors[idx % len(colors)]
+        print(f"  Flow {fk}: {n} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps, 时间范围 [{min(times):.3f}, {max(times):.3f}] ms")
+        ax2.plot(times, rates,
+                 color=c, lw=2, label=f'Flow {fk[0]}->{fk[1]} (sp={fk[2]})', alpha=0.85)
     
-    ax1.set_ylabel('Sending Rate (Gbps)', fontsize=14, fontweight='bold')
-    ax1.set_title(f'Flow Sending Rates ({len(active_hosts)} flows)', fontsize=15, fontweight='bold')
-    ax1.legend(loc='upper right', fontsize=10, ncol=3, framealpha=0.9)
-    ax1.grid(True, alpha=0.3, linestyle='--')
-    ax1.set_ylim(0, 110)
-    ax1.tick_params(labelsize=11)
+    ax2.set_ylabel('Receive Throughput (Gbps)', fontsize=14, fontweight='bold')
+    ax2.set_title(f'RX Throughput - per-flow ({len(active_flows)} flows)', fontsize=15, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=10, ncol=3, framealpha=0.9)
+    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax2.set_ylim(0, 110)
+    ax2.tick_params(labelsize=11)
     
     # 子图2: 队列长度
-    ax2 = axes[1]
+    ax3 = axes[1]
     if sw10_time and sw10_q:
-        ax2.fill_between(sw10_time, 0, sw10_q, alpha=0.35, color='purple')
-        ax2.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 10 Port 1')
-        ax2.axhline(y=500, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 500KB')
-        ax2.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
+        ax3.fill_between(sw10_time, 0, sw10_q, alpha=0.35, color='purple')
+        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 85 Port 1')
+        ax3.axhline(y=500, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 500KB')
+        ax3.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
     
-    ax2.set_ylabel('Queue Length (KB)', fontsize=14, fontweight='bold')
-    ax2.set_xlabel('Time (ms)', fontsize=14, fontweight='bold')
-    ax2.set_title('Switch 10 Queue Length (Port 1 - Bottleneck)', fontsize=15, fontweight='bold')
-    ax2.legend(loc='upper right', fontsize=11, framealpha=0.9)
-    ax2.grid(True, alpha=0.3, linestyle='--')
+    ax3.set_ylabel('Queue Length (KB)', fontsize=14, fontweight='bold')
+    ax3.set_xlabel('Time (ms)', fontsize=14, fontweight='bold')
+    ax3.set_title('Switch 85 Queue Length (Port 1 - Bottleneck, →Host 53)', fontsize=15, fontweight='bold')
+    ax3.legend(loc='upper right', fontsize=11, framealpha=0.9)
+    ax3.grid(True, alpha=0.3, linestyle='--')
     
     max_q = max(sw10_q) if sw10_q else 1000
-    ax2.set_ylim(-50, max_q * 1.15)
-    ax2.tick_params(labelsize=11)
+    ax3.set_ylim(-50, max_q * 1.15)
+    ax3.tick_params(labelsize=11)
     
     plt.tight_layout()
     
@@ -186,7 +211,7 @@ def run_and_plot(ccMode, algo_name):
     print(f"{'='*80}")
     print(f"统计信息 - {algo_name}")
     print(f"{'='*80}")
-    print(f"活跃流数量: {len(active_hosts)}")
+    print(f"活跃流数量: {len(active_flows)}")
     print(f"队列最大值: {max(sw10_q):.0f} KB" if sw10_q else "队列数据: 无")
     print(f"队列均值: {np.mean(sw10_q):.0f} KB" if sw10_q else "")
     print(f"图像文件: {output_file}")

@@ -354,6 +354,12 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	rxQp->m_milestone_rx = m_ack_interval;
 
 	int x = ReceiverCheckSeq(ch.udp.seq, rxQp, payload_size);
+	// 按序到达时累加接收字节（用于接收侧 goodput 统计）
+	// x==1: 按序+需发ACK; x==5: 按序+无需ACK
+	// x==2/x==4: 乱序(不累加,等重传补洞); x==3: 重复包(不累加)
+	if (x == 1 || x == 5) {
+		rxQp->m_recv_bytes += payload_size;
+	}
 	if (x == 1 || x == 2) { //generate ACK or NACK
 		qbbHeader seqh;
 		seqh.SetSeq(rxQp->ReceiverNextExpectedSeq);
@@ -670,30 +676,30 @@ void RdmaHw::PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap)
 }
 
 void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t pkt_size) {
-	Time sendingTime;
-	if (m_rateBound)
-		sendingTime = interframeGap + qp->m_rate.CalculateBytesTxTime(pkt_size);
-	else
-		sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
-	qp->m_nextAvail = Simulator::Now() + sendingTime;
-	
-	// 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
-	static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
-	uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
-	if (qpDebugCounters[qpKey]++ % 50 == 0) {
-		std::cout << "[TX RATE] Host " << m_node->GetId() 
-		          << " qp=" << qp->sip << "->" << qp->dip
-		          << " m_rate=" << (qp->m_rate.GetBitRate()/1e6) << "Mbps"
-		          << " m_max_rate=" << (qp->m_max_rate.GetBitRate()/1e6) << "Mbps"
-		          << " pkt_size=" << pkt_size
-		          << " snd_nxt=" << qp->snd_nxt
-		          << " snd_una=" << qp->snd_una
-		          << " bytesLeft=" << qp->GetBytesLeft()
-		          << " nextAvail=" << qp->m_nextAvail.GetMicroSeconds() << "us"
-		          << std::endl;
-	}
+        Time sendingTime;
+        if (m_rateBound)
+                sendingTime = interframeGap + qp->m_rate.CalculateBytesTxTime(pkt_size);
+        else
+                sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
+        qp->m_nextAvail = Simulator::Now() + sendingTime;
+        
+        // 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
+        static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
+        uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+        if (qpDebugCounters[qpKey]++ % 50 == 0) {
+                std::cout << "[TX RATE] Host " << m_node->GetId() 
+                          << " qp=" << qp->sip << "->" << qp->dip
+                          << " m_rate=" << (qp->m_rate.GetBitRate()/1e6) << "Mbps"
+                          << " m_max_rate=" << (qp->m_max_rate.GetBitRate()/1e6) << "Mbps"
+                          << " pkt_size=" << pkt_size
+                          << " snd_nxt=" << qp->snd_nxt
+                          << " snd_una=" << qp->snd_una
+                          << " bytesLeft=" << qp->GetBytesLeft()
+                          << " nextAvail=" << qp->m_nextAvail.GetMicroSeconds() << "us"
+                          << " t=" << Simulator::Now().GetMicroSeconds() << "us"
+                          << std::endl;
+        }
 }
-
 void RdmaHw::ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate) {
 #if 1
 	Time sendingTime = qp->m_rate.CalculateBytesTxTime(qp->lastPktSize);
