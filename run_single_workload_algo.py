@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-crossDC workload 算法运行脚本。
-默认混合流量模式（flow-file 长背景流 + Alistorage CDF 前景流），命令行只需指定算法：
+crossDC workload algorithm runner script.
+Default hybrid traffic mode (flow-file background + Alistorage CDF foreground), just specify algorithm:
     python3 run_single_workload_algo.py 13 FRP --load 0.2 --duration 0.02 
 
-关闭背景流，回到 workload-only 模式：
+Disable background flow, back to workload-only mode:
     python3 run_single_workload_algo.py 13 FRP --enableFlowFileBackground 0 --load 0.2 --duration 0.02
 """
 
@@ -18,6 +18,84 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Import for query flow FCT analysis
+def analyze_query_flow_fct(algo_name, load):
+    """Analyze query flow FCT and print statistics"""
+    query_fct_file = os.path.join(FCT_DIR, f"query-flow-{algo_name.lower()}.txt")
+    
+    if not os.path.exists(query_fct_file):
+        print(f"Query flow FCT file not found: {query_fct_file}")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"Query Flow FCT Analysis")
+    print(f"{'='*80}")
+    print(f"File: {query_fct_file}\n")
+    
+    # Read FCT file
+    flows = []
+    with open(query_fct_file, 'r') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 8:
+                flows.append({
+                    'src': int(parts[0]),
+                    'dst': int(parts[1]),
+                    'pg': int(parts[2]),
+                    'dport': int(parts[3]),
+                    'size': int(parts[4]),
+                    'start_ns': int(parts[5]),
+                    'fct_ns': int(parts[6]),
+                    'is_cross_dc': int(parts[7]),
+                })
+    
+    if not flows:
+        print("No query flows found!")
+        return
+    
+    # Print details
+    print(f"{'No.':<6} {'Src':<8} {'Dst':<8} {'PG':<6} {'Dport':<8} {'Size(MB)':<10} {'Start(ms)':<12} {'FCT(ms)':<12} {'Cross-DC':<10}")
+    print('='*80)
+    
+    for idx, flow in enumerate(flows, 1):
+        size_mb = flow['size'] / (1024 * 1024)
+        start_ms = flow['start_ns'] / 1e6
+        fct_ms = flow['fct_ns'] / 1e6
+        cross_dc = "Yes" if flow['is_cross_dc'] == 1 else "No"
+        print(f"{idx:<6} {flow['src']:<8} {flow['dst']:<8} {flow['pg']:<6} {flow['dport']:<8} "
+              f"{size_mb:<10.2f} {start_ms:<12.3f} {fct_ms:<12.3f} {cross_dc:<10}")
+    
+    print('='*80)
+    
+    # Statistics
+    fct_values = np.array([f['fct_ns'] / 1e6 for f in flows])
+    cross_dc_flows = [f for f in flows if f['is_cross_dc'] == 1]
+    intra_dc_flows = [f for f in flows if f['is_cross_dc'] == 0]
+    
+    print(f"\nStatistics:")
+    print(f"  Total query flows: {len(flows)}")
+    print(f"  Cross-DC flows: {len(cross_dc_flows)}")
+    print(f"  Intra-DC flows: {len(intra_dc_flows)}")
+    print(f"\n  Average FCT: {np.mean(fct_values):.3f} ms")
+    print(f"  Min FCT: {np.min(fct_values):.3f} ms")
+    print(f"  Max FCT: {np.max(fct_values):.3f} ms")
+    print(f"  P50 FCT: {np.percentile(fct_values, 50):.3f} ms")
+    print(f"  P95 FCT: {np.percentile(fct_values, 95):.3f} ms")
+    print(f"  P99 FCT: {np.percentile(fct_values, 99):.3f} ms")
+    
+    # Cross-DC vs Intra-DC comparison
+    if cross_dc_flows and intra_dc_flows:
+        cross_fct = np.array([f['fct_ns'] / 1e6 for f in cross_dc_flows])
+        intra_fct = np.array([f['fct_ns'] / 1e6 for f in intra_dc_flows])
+        print(f"\n  Cross-DC vs Intra-DC FCT Comparison:")
+        print(f"    Cross-DC:  avg={np.mean(cross_fct):.3f} ms, min={np.min(cross_fct):.3f} ms, max={np.max(cross_fct):.3f} ms")
+        print(f"    Intra-DC:  avg={np.mean(intra_fct):.3f} ms, min={np.min(intra_fct):.3f} ms, max={np.max(intra_fct):.3f} ms")
+        print(f"    Note: Cross-DC FCT has been compensated (subtracted long-distance RTT)")
+    
+    print(f"{'='*80}\n")
+
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 NS3_DIR = os.path.join(REPO_ROOT, "simulator/ns-3.39")
 CONFIG_FILE = "examples/PowerTCP/config-workload.txt"
@@ -29,10 +107,10 @@ PFC_DIR = os.path.join(RESULTS_DIR, "pfc")
 
 
 def run_and_plot(args):
-    """运行 workload 仿真并绘图"""
+    """Run workload simulation and generate plots"""
 
     print(f"\n{'='*80}")
-    print(f"仿真: {args.algo_name} (ccMode={args.ccMode}, load={args.load})")
+    print(f"Simulation: {args.algo_name} (ccMode={args.ccMode}, load={args.load})")
     print(f"{'='*80}\n")
 
     os.makedirs(DUMP_DIR, exist_ok=True)
@@ -40,14 +118,12 @@ def run_and_plot(args):
     os.makedirs(FCT_DIR, exist_ok=True)
     os.makedirs(PFC_DIR, exist_ok=True)
 
-    # 1. 更新配置文件
+    # 1. Update configuration file
     config_path = os.path.join(NS3_DIR, CONFIG_FILE)
     with open(config_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     suffix = f"{args.algo_name.lower()}_load{args.load}"
-    if args.enableFlowFileBackground:
-        suffix += "_bgflow"
     fct_out = os.path.join(FCT_DIR, f"fct_{suffix}.txt")
     pfc_out = os.path.join(PFC_DIR, f"pfc_{suffix}.txt")
     content = re.sub(r"FCT_OUTPUT_FILE\s+\S+", f"FCT_OUTPUT_FILE {fct_out}", content)
@@ -57,17 +133,17 @@ def run_and_plot(args):
         f.write(content)
 
     config = CONFIG_FILE
-    log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}{'_bgflow' if args.enableFlowFileBackground else ''}.log")
+    log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}.log")
 
     try:
-        # 2. 编译
+        # 2. Build
         with open(log_file, "w", encoding="utf-8") as log:
-            log.write("编译 crossDC-evaluation-workload...\n")
+            log.write("Building crossDC-evaluation-workload...\n")
             subprocess.run(["./ns3", "build", "crossDC-evaluation-workload"], cwd=NS3_DIR,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-            log.write("✓ 编译完成\n\n")
+            log.write("✓ Build complete\n\n")
 
-        # 3. 运行仿真
+        # 3. Run simulation
         flow_end = args.flowEnd if args.flowEnd is not None else max(args.start, args.duration * 0.9)
         cdf_path = args.cdf
         if not os.path.isabs(cdf_path):
@@ -75,7 +151,25 @@ def run_and_plot(args):
             if os.path.exists(root_cdf_path):
                 cdf_path = root_cdf_path
 
-        log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}{'_bgflow' if args.enableFlowFileBackground else ''}.log")
+        # Handle query flow file path
+        query_path = args.queryFlowFile
+        if not os.path.isabs(query_path):
+            # Try REPO_ROOT first
+            root_query_path = os.path.join(REPO_ROOT, query_path)
+            if os.path.exists(root_query_path):
+                query_path = root_query_path
+            else:
+                # Then try PowerTCP directory
+                powertcp_query_path = os.path.join(
+                    REPO_ROOT, "simulator/ns-3.39/examples/PowerTCP", query_path
+                )
+                if os.path.exists(powertcp_query_path):
+                    query_path = powertcp_query_path
+                else:
+                    print(f"⚠ Warning: Cannot find query flow file {query_path}")
+                    query_path = ""  # If not found, don't add this parameter
+
+        log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}.log")
         binary = os.path.join(NS3_DIR, "build/examples/PowerTCP/ns3.39-crossDC-evaluation-workload-optimized")
         cmd = [
             binary,
@@ -86,40 +180,32 @@ def run_and_plot(args):
             f"--START_TIME={args.start}",
             f"--END_TIME={args.duration}",
             f"--FLOW_LAUNCH_END_TIME={flow_end}",
-            f"--queryRequestRate={args.queryRequestRate}",
-            f"--request={args.request}",
-            f"--incast={args.incast}",
             f"--randomSeed={args.randomSeed}",
         ]
-        if args.enableFlowFileBackground >= 0:
-            cmd.append(f"--enableFlowFileBackground={args.enableFlowFileBackground}")
-        if args.backgroundFlowFile:
-            bg_path = args.backgroundFlowFile
-            if not os.path.isabs(bg_path):
-                root_bg_path = os.path.join(REPO_ROOT, bg_path)
-                if os.path.exists(root_bg_path):
-                    bg_path = root_bg_path
-            cmd.append(f"--backgroundFlowFile={bg_path}")
+        
+        # Add query flow file (if found)
+        if query_path:
+            cmd.append(f"--queryFlowFile={query_path}")
 
-        print("运行 workload 仿真...")
+        print("Running workload simulation...")
         with open(log_file, "a", encoding="utf-8") as log:
             subprocess.run(cmd, cwd=NS3_DIR, stdout=log, stderr=subprocess.STDOUT,
                            timeout=args.timeout, check=True)
 
         log_size = os.path.getsize(log_file)
-        print(f"✓ 仿真完成 ({log_size/1024:.1f}KB)\n")
+        print(f"✓ Simulation complete ({log_size/1024:.1f}KB)\n")
 
-        # 4. 解析日志
-        print("解析日志...")
+        # 4. Parse log
+        print("Parsing log...")
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
-        queue_time, queue_kb = [], []
+        # Collect queue data from ALL switches/ports to auto-identify congestion points
+        # Key: (switch_id, port_id) -> {"times": [], "queues": []}
+        all_queue_data = {}
         flow_tp = {}
         workload_lines = []
         totals = {"flow": None, "query": None, "background": None}
-        queue_switch = 85
-        queue_port = 1
 
         for line in lines:
             line = line.strip()
@@ -138,15 +224,25 @@ def run_and_plot(args):
 
             if "[DCQCN_QLEN]" in line and args.ccMode in (1, 3, 7):
                 parts = line.split()
-                if len(parts) >= 5 and int(parts[2]) == queue_switch and int(parts[3]) == queue_port:
-                    queue_time.append(float(parts[1]) / 1e9 * 1000)
-                    queue_kb.append(float(parts[4]) / 1024.0)
+                if len(parts) >= 5:
+                    sw = int(parts[2])
+                    port = int(parts[3])
+                    t_ms = float(parts[1]) / 1e9 * 1000
+                    q_kb = float(parts[4]) / 1024.0
+                    all_queue_data.setdefault((sw, port), {"times": [], "queues": []})
+                    all_queue_data[(sw, port)]["times"].append(t_ms)
+                    all_queue_data[(sw, port)]["queues"].append(q_kb)
 
             if "[FRP_DATA_SW]" in line and args.ccMode in (13, 14):
                 parts = line.split()
-                if len(parts) >= 8 and int(parts[2]) == queue_switch and int(parts[3]) == queue_port and int(parts[7]) == args.ccMode:
-                    queue_time.append(float(parts[1]) * 1000)
-                    queue_kb.append(float(parts[5]))
+                if len(parts) >= 8 and int(parts[7]) == args.ccMode:
+                    sw = int(parts[2])
+                    port = int(parts[3])
+                    t_ms = float(parts[1]) * 1000
+                    q_kb = float(parts[5])  # qCur in KB
+                    all_queue_data.setdefault((sw, port), {"times": [], "queues": []})
+                    all_queue_data[(sw, port)]["times"].append(t_ms)
+                    all_queue_data[(sw, port)]["queues"].append(q_kb)
 
             m = re.search(
                 r"\[FLOW TP\] Src (\d+) Dst (\d+) pg (\d+) sport (\d+) dport (\d+) "
@@ -157,11 +253,42 @@ def run_and_plot(args):
                 flow_tp[key]["times"].append(float(m.group(7)) * 1000)
                 flow_tp[key]["rates"].append(float(m.group(6)) / 1e9)
 
-        active_flows = sorted(flow_tp)
-        print(f"✓ 解析完成: Switch85 {len(queue_kb)} 点, 接收侧流 {len(active_flows)} 条")
+        # Identify congestion points: filter switch+port pairs with sufficient samples
+        # and sort by average queue length (top bottlenecks)
+        MIN_SAMPLES = 5
+        congestion_points = []
+        for (sw, port), data in all_queue_data.items():
+            queues = data["queues"]
+            if len(queues) < MIN_SAMPLES:
+                continue
+            avg_q = float(np.mean(queues))
+            max_q = float(np.max(queues))
+            congestion_points.append({
+                "switch": sw, "port": port,
+                "avg_q_kb": avg_q, "max_q_kb": max_q,
+                "n_samples": len(queues),
+                "times": data["times"], "queues": queues,
+            })
+        # Sort by average queue length, descending
+        congestion_points.sort(key=lambda x: x["avg_q_kb"], reverse=True)
+        top_n = min(5, len(congestion_points))
+        top_congestion = congestion_points[:top_n]
 
-        # 5. 绘图
-        print("生成图像...")
+        # Backward compatibility: keep queue_time/queue_kb pointing to top congestion point
+        if top_congestion:
+            queue_time = top_congestion[0]["times"]
+            queue_kb = top_congestion[0]["queues"]
+
+        active_flows = sorted(flow_tp)
+        if top_congestion:
+            top_desc = ", ".join([f"SW{cp['switch']}p{cp['port']}(avg={cp['avg_q_kb']:.0f}KB)"
+                                  for cp in top_congestion[:3]])
+            print(f"✓ Parse complete: {len(all_queue_data)} switch-port pairs monitored, top bottlenecks: {top_desc}, receiver-side flows {len(active_flows)}")
+        else:
+            print(f"✓ Parse complete: {len(all_queue_data)} switch-port pairs, receiver-side flows {len(active_flows)}")
+
+        # 5. Plot
+        print("Generating plots...")
         plt.rcParams["font.family"] = "DejaVu Sans"
         plt.rcParams["axes.unicode_minus"] = False
         colors = ["red", "blue", "green", "orange", "purple", "cyan", "lime", "brown", "pink", "gray",
@@ -172,7 +299,7 @@ def run_and_plot(args):
                      fontsize=18, fontweight="bold")
 
         ax2 = axes[0]
-        print(f"绘制 {len(active_flows)} 条流的接收速率...")
+        print(f"Plotting receiver throughput for {len(active_flows)} flows...")
         for idx, key in enumerate(active_flows[:15]):
             times = flow_tp[key]["times"]
             rates = flow_tp[key]["rates"]
@@ -192,29 +319,33 @@ def run_and_plot(args):
         ax2.tick_params(labelsize=11)
 
         ax3 = axes[1]
-        if queue_time and queue_kb:
-            ax3.fill_between(queue_time, 0, queue_kb, alpha=0.35, color="purple")
-            ax3.plot(queue_time, queue_kb, color="purple", lw=2, label="Switch 85 Port 1")
-            ax3.axhline(y=500, color="blue", ls="--", lw=2, alpha=0.7, label="qRef = 500KB")
-            ax3.axhline(y=300, color="red", ls=":", lw=1.5, alpha=0.6, label="q_th = 300KB")
+        # Plot all top congestion points
+        if top_congestion:
+            plot_colors = ["purple", "red", "orange", "green", "blue"]
+            for i, cp in enumerate(top_congestion):
+                color = plot_colors[i % len(plot_colors)]
+                label = f"SW{cp['switch']} Port{cp['port']} (avg={cp['avg_q_kb']:.0f}KB)"
+                ax3.fill_between(cp["times"], 0, cp["queues"], alpha=0.20, color=color)
+                ax3.plot(cp["times"], cp["queues"], color=color, lw=1.5, label=label, alpha=0.85)
+            ax3.axhline(y=500, color="blue", ls="--", lw=2, alpha=0.5, label="qRef = 500KB (old)")
+            ax3.axhline(y=300, color="red", ls=":", lw=1.5, alpha=0.5, label="qRef = 300KB (current)")
         ax3.set_ylabel("Queue Length (KB)", fontsize=14, fontweight="bold")
         ax3.set_xlabel("Time (ms)", fontsize=14, fontweight="bold")
-        ax3.set_title("Switch 85 Queue Length (Port 1 - Bottleneck, →Host 53)", fontsize=15, fontweight="bold")
-        ax3.legend(loc="upper right", fontsize=11, framealpha=0.9)
+        n_cp = len(top_congestion)
+        ax3.set_title(f"Top {n_cp} Congestion Points Queue Length (auto-detected)", fontsize=15, fontweight="bold")
+        ax3.legend(loc="upper right", fontsize=10, framealpha=0.9)
         ax3.grid(True, alpha=0.3, linestyle="--")
-        max_q = max(queue_kb) if queue_kb else 1000
+        max_q = max([cp["max_q_kb"] for cp in top_congestion], default=1000)
         ax3.set_ylim(-50, max_q * 1.15)
         ax3.tick_params(labelsize=11)
 
         plt.tight_layout()
         output_suffix = f"{args.algo_name.lower()}_cc{args.ccMode}_load{args.load}"
-        if args.enableFlowFileBackground:
-            output_suffix += "_bgflow"
         output_file = os.path.join(RESULTS_DIR, f"workload_{output_suffix}.png")
         plt.savefig(output_file, dpi=150, bbox_inches="tight")
-        print(f"✓ 图像已保存: {output_file}\n")
+        print(f"✓ Plot saved: {output_file}\n")
 
-        # 6. 打印统计
+        # 6. Print statistics
         fct_ns = []
         if os.path.exists(fct_out):
             with open(fct_out, "r", encoding="utf-8", errors="replace") as f:
@@ -228,27 +359,37 @@ def run_and_plot(args):
                         continue
 
         print(f"{'='*80}")
-        print(f"统计信息 - {args.algo_name}")
+        print(f"Statistics - {args.algo_name}")
         print(f"{'='*80}")
         print(f"Total background flow: {totals['background']}  Total flow: {totals['flow']}  Total Query: {totals['query']}")
-        print(f"发现信息/负载行: {len(workload_lines)} 行")
-        print(f"活跃流数量: {len(active_flows)}")
-        print(f"队列点数量: {len(queue_kb)}")
-        if queue_kb:
-            print(f"队列平均值: {np.mean(queue_kb):.0f} KB")
-            print(f"队列最小值: {min(queue_kb):.0f} KB")
-            print(f"队列最大值: {max(queue_kb):.0f} KB")
-        else:
-            print("队列数据: 无")
+        print(f"Discovered info/load lines: {len(workload_lines)}")
+        print(f"Active flow count: {len(active_flows)}")
+        print(f"\n{'='*80}")
+        print(f"Congestion Point Detection (auto-identified by avg queue length)")
+        print(f"{'='*80}")
+        print(f"Total switch-port pairs monitored: {len(all_queue_data)}")
+        print(f"Congestion points identified (>= {MIN_SAMPLES} samples): {len(congestion_points)}")
+        if congestion_points:
+            print(f"\n{'Rank':<6} {'Switch':<8} {'Port':<6} {'Avg Queue':<12} {'Max Queue':<12} {'Samples':<10}")
+            print('-' * 70)
+            for rank, cp in enumerate(congestion_points[:10], 1):
+                marker = "  <-- TOP BOTTLENECK" if rank == 1 else ""
+                print(f"  {rank:<4} SW{cp['switch']:<6} {cp['port']:<6} {cp['avg_q_kb']:<10.1f}KB "
+                      f"{cp['max_q_kb']:<10.1f}KB {cp['n_samples']:<10}{marker}")
         if fct_ns:
             fct_ms = np.array(fct_ns) / 1e6
-            print(f"FCT 统计: 完成流={len(fct_ms)} 平均完成时间={np.mean(fct_ms):.6f} ms P99完成时间={np.percentile(fct_ms, 99):.6f} ms")
+            print(f"\nFCT stats: completed flows={len(fct_ms)} avg completion time={np.mean(fct_ms):.6f} ms P99 completion time={np.percentile(fct_ms, 99):.6f} ms")
         else:
-            print("FCT 统计: 无完成流数据")
-        print(f"日志: {log_file}")
+            print("\nFCT stats: No completed flow data")
+        print(f"Log: {log_file}")
         print(f"FCT: {fct_out}")
         print(f"PFC: {pfc_out}")
-        print(f"图像文件: {output_file}")
+        print(f"Image file: {output_file}")
+        
+        # Analyze query flow FCT if query flows were used
+        if hasattr(args, 'queryFlowFile') and args.queryFlowFile:
+            analyze_query_flow_fct(args.algo_name, args.load)
+        
         print(f"{'='*80}\n")
 
         return output_file
@@ -257,21 +398,42 @@ def run_and_plot(args):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("ccMode", type=int)
-    parser.add_argument("algo_name")
-    parser.add_argument("--load", type=float, default=0.2)
-    parser.add_argument("--duration", type=float, default=0.02)
-    parser.add_argument("--start", type=float, default=0.001)
-    parser.add_argument("--flowEnd", type=float, default=None)
-    parser.add_argument("--cdf", default=DEFAULT_CDF)
-    parser.add_argument("--queryRequestRate", type=float, default=0.0)
-    parser.add_argument("--request", type=int, default=0)
-    parser.add_argument("--incast", type=int, default=5)
-    parser.add_argument("--randomSeed", type=int, default=7)
-    parser.add_argument("--timeout", type=int, default=360)
-    parser.add_argument("--enableFlowFileBackground", type=int, default=1)
-    parser.add_argument("--backgroundFlowFile", default="")
+    parser = argparse.ArgumentParser(
+        description="""Workload simulation script (simplified version)
+        
+Algorithm ccMode Mapping:
+  dcqcn      → ccMode=1   (DCQCN)
+  hpcc       → ccMode=3   (HPCC)
+  timely     → ccMode=7   (Timely)
+  dctcp      → ccMode=8   (DCTCP)
+  frp        → ccMode=13  (FRP)
+  rocc       → ccMode=14  (ROCC)
+
+Examples:
+  python3 run_single_workload_algo.py 1 DCQCN --load 0.2 --duration 0.02
+  python3 run_single_workload_algo.py 13 FRP --load 0.2 --duration 0.02 --queryFlowFile query-flow.txt
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("ccMode", type=int, 
+                       help="Congestion control algorithm mode (see mapping above)")
+    parser.add_argument("algo_name", type=str, help="Algorithm name (e.g., DCQCN, FRP, ROCC)")
+    parser.add_argument("--load", type=float, default=0.2, 
+                       help="Background flow load factor (default: 0.2)")
+    parser.add_argument("--duration", type=float, default=0.02, 
+                       help="Simulation duration in seconds (default: 0.02)")
+    parser.add_argument("--start", type=float, default=0.001, 
+                       help="Start time in seconds (default: 0.001)")
+    parser.add_argument("--flowEnd", type=float, default=None, 
+                       help="Flow end time in seconds (default: duration*0.9)")
+    parser.add_argument("--cdf", default=DEFAULT_CDF, 
+                       help="CDF file path (default: Alistorage.txt)")
+    parser.add_argument("--queryFlowFile", default="query-flow.txt", 
+                       help="Query flow file name (default: query-flow.txt)")
+    parser.add_argument("--randomSeed", type=int, default=7, 
+                       help="Random seed (default: 7)")
+    parser.add_argument("--timeout", type=int, default=180, 
+                       help="Timeout in seconds (default: 180 = 3 minutes)")
     args = parser.parse_args()
 
     run_and_plot(args)

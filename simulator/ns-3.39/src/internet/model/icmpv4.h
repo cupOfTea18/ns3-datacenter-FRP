@@ -322,21 +322,21 @@ class Icmpv4FrpFeedback : public Header
 
     // Setters
     void SetFairRate(uint16_t fairRate);
-    void SetQDepth(uint16_t qDepth);
+    void SetQDepth(int16_t qDepth);
     void SetCpId(uint16_t cpId);
     void SetType(bool type);
     void SetLinkRate(uint16_t linkRate);  
 
     // Getters
     uint16_t GetFairRate() const;
-    uint16_t GetQDepth() const;
+    int16_t GetQDepth() const;
     uint16_t GetCpId() const;
     bool GetType() const;
     uint16_t GetLinkRate() const;  
 
   private:
     uint16_t m_fairRate;   //!< Fair rate (F) in units of 10Mbps
-    uint16_t m_qDepth;     //!< Current queue depth (Q_cur) in units of 600B blocks
+    int16_t  m_qDepth;     //!< Queue deviation (Q_cur - Q_ref) in units of 600B blocks (can be negative)
     uint16_t m_cpId;       //!< Congestion point ID (CP)
     bool     m_type;       //!< Algorithm type (false=FRP, true=ROCC, 占用最后16位的最高1bit)
     uint16_t m_linkRate;   //!< Link rate in units of 10Mbps (占用最后16位的低15bit)

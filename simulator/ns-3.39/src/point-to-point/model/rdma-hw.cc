@@ -1360,30 +1360,30 @@ int RdmaHw::ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch) {
 	// FRP反馈包的完整结构: [CustomHeader][ICMP Header][Icmpv4FrpFeedback]
 	// IP封装: SIP=数据流目的IP, DIP=数据流源IP(=自己)
 	// 发送方可由 DIP(=自己) + SIP(=数据流目的IP) 精确匹配QP
-	
+
 	// 移除CustomHeader
 	p->RemoveHeader(ch);
-	
+
 	// 移除ICMP头部
 	Icmpv4Header icmpHeader;
 	p->RemoveHeader(icmpHeader);
-	
+
 	// 解析FRP payload
 	Icmpv4FrpFeedback frpFb;
 	if (p->GetSize() >= frpFb.GetSerializedSize()) {
 		p->RemoveHeader(frpFb);
-		
+
 		// 提取FRP参数
 		uint16_t fairRate = frpFb.GetFairRate();
-		uint16_t qDev = frpFb.GetQDepth();       // 现在是q_dev而不是q_depth
+		int16_t qDev = frpFb.GetQDepth();       // q_dev = qCur - qRef (int16_t, can be negative)
 		uint16_t cpId = frpFb.GetCpId();
 		bool type = frpFb.GetType();
 		uint16_t linkRate = frpFb.GetLinkRate();
-		
+
 		// 解析IP头: SIP=数据流目的IP, DIP=数据流源IP(=自己)
 		Ipv4Address flowDstIp = Ipv4Address(ch.sip);   // FRP包的SIP = 数据流的目的IP
 		Ipv4Address flowSrcIp = Ipv4Address(ch.dip);   // FRP包的DIP = 数据流的源IP(=自己)
-		
+
 		// 用 dip=flowDstIp 精确匹配QP
 		for (auto& kv : m_qpMap) {
 			Ptr<RdmaQueuePair> qp = kv.second;
@@ -1391,10 +1391,10 @@ int RdmaHw::ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch) {
 				HandleFrpFeedback(qp, fairRate, qDev, cpId, type, linkRate, flowDstIp);
 			}
 		}
-		
+
 		return 0;
 	}
-	
+
 	// 不是FRP包，忽略
 	return 0;
 }
@@ -1415,10 +1415,10 @@ int RdmaHw::ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch) {
  * 瓶颈更新：若 r < 当前速率 或 cpId == 上次瓶颈cpId，则更新瓶颈
  * 速率边界：max = linkBps*0.95, min = 100Mbps
  */
-void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, uint16_t qDev, uint16_t cpId, bool type, uint16_t linkRate, Ipv4Address flowDstIp) {
+void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t qDev, uint16_t cpId, bool type, uint16_t linkRate, Ipv4Address flowDstIp) {
 	// 1. 还原为全局标准单位 (bps, Bytes)
 	double fairRateBps = static_cast<double>(fairRate) * 10000000.0;       // 10Mbps -> bps
-	double qDevBytes  = static_cast<double>(static_cast<int16_t>(qDev)) * 600.0;  // 600B Cell -> Byte (允许负值: qCur<qRef)
+	double qDevBytes  = static_cast<double>(qDev) * 600.0;  // 600B Cell -> Byte (qDev is int16_t, can be negative)
 	double linkRateBps = static_cast<double>(linkRate) * 10000000.0;      // 10Mbps -> bps
 	double maxRateBps  = linkRateBps * 0.95;
 	double minRateBps  = 100.0 * 1000000.0;  // 100 Mbps
@@ -1434,7 +1434,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, uint16_
 
 	// 输出FRP接收日志：记录瓶颈节点ID、链路速率、公平速率
 	static uint32_t recvCounter = 0;
-	if (recvCounter++ < 50) {  // 只输出前50条，避免日志过多
+	if (recvCounter++ < 500) {  // 扩大到500条，能看到跨DC流完整生命周期
 		fprintf(stderr, "[FRP_RECV_DETAIL] t=%.3fms Host=%u flow=%u->%u cpId=%u linkRate=%u*10Mbps(%.2fGbps) fairRate=%u*10Mbps(%.2fGbps) qDev=%dcells(%.2fKB) type=%d\n",
 			Simulator::Now().GetSeconds() * 1000.0,
 			m_node->GetId(),
@@ -1469,7 +1469,6 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, uint16_
 		if (qDevBytes < qThBytes) {
 			// 策略1: 平滑调整
 			rBps = fairRateBps - qDevBytes / ( N * T ) * 8.0;
-			
 			
 		} else {
 			// 策略2: 基于公平速率的退避 r = max(F_min, F - gamma*qDev)

@@ -76,22 +76,22 @@ def run_and_plot(ccMode, algo_name):
     with open(log_file, 'r') as f:
         lines = f.readlines()
     
-    # 解析队列数据 - 监控 Switch 85 Port 1（Switch 85 → Host 53 接入链路，当前 flow.txt 瓶颈点）
+    # 解析队列数据 - 监控 Switch 93 Port 1（瓶颈点）
     sw10_time, sw10_q = [], []
     for l in lines:
         l = l.strip()
         # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN
         if '[DCQCN_QLEN]' in l and ccMode in [1, 3, 7]:
             parts = l.split()
-            # 监控的是Switch 85的Port 1（连host 53的端口）
-            if len(parts) >= 5 and int(parts[2]) == 85 and int(parts[3]) == 1:
+            # 监控的是Switch 93的Port 1
+            if len(parts) >= 5 and int(parts[2]) == 93 and int(parts[3]) == 1:
                 sw10_time.append(float(parts[1]) / 1e9 * 1000)  # timestep -> ms
                 sw10_q.append(float(parts[4]) / 1024.0)  # Bytes -> KB
-        
+
         # FRP/ROCC 使用 FRP_DATA_SW
         if '[FRP_DATA_SW]' in l and ccMode in [13, 14]:
             parts = l.split()
-            if len(parts) >= 8 and int(parts[2]) == 85 and int(parts[3]) == 1:
+            if len(parts) >= 8 and int(parts[2]) == 93 and int(parts[3]) == 1:
                 if int(parts[7]) == ccMode:
                     sw10_time.append(float(parts[1]) * 1000)  # s -> ms
                     sw10_q.append(float(parts[5]))  # KB
@@ -140,13 +140,29 @@ def run_and_plot(ccMode, algo_name):
     # 时间轴：按时间周期采样，直接使用日志中的真实时间戳，不再用 linspace 兜底
     active_hosts = sorted(host_rates.keys())
     active_flows = sorted(flow_tp.keys())
-    print(f"✓ 解析完成: Switch85 {len(sw10_time)} 点, 接收侧流 {len(active_flows)} 条")
+    print(f"✓ 解析完成: Switch93 {len(sw10_time)} 点, 接收侧流 {len(active_flows)} 条")
     # print(f"  活跃主机列表: {active_hosts}")
     # for h in active_hosts:
     #     print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
     # for fk in active_flows:
     #     print(f"    Flow {fk}: {len(flow_tp[fk]['times'])} 个接收速率数据点")
     # print()
+
+    # 4.5 解析 FCT 文件 (单位: ns-3 timestep, 默认 = ns)
+    fct_ns_list = []  # 各流实际 FCT (纳秒)
+    fct_standalone_list = []  # 独立传输 FCT (纳秒)
+    fct_file_path = "/home/gj/ns3/results/fct/fct.txt"
+    if os.path.exists(fct_file_path):
+        with open(fct_file_path, 'r') as ff:
+            for fl in ff:
+                fl = fl.strip()
+                if not fl:
+                    continue
+                # sip dip sport dport size startTime fct standalone_fct
+                p = fl.split()
+                if len(p) >= 8:
+                    fct_ns_list.append(int(p[6]))
+                    fct_standalone_list.append(int(p[7]))
     
     # 5. 绘图
     print("生成图像...")
@@ -187,13 +203,13 @@ def run_and_plot(ccMode, algo_name):
     ax3 = axes[1]
     if sw10_time and sw10_q:
         ax3.fill_between(sw10_time, 0, sw10_q, alpha=0.35, color='purple')
-        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 85 Port 1')
+        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 93 Port 1')
         ax3.axhline(y=500, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 500KB')
         ax3.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
-    
+
     ax3.set_ylabel('Queue Length (KB)', fontsize=14, fontweight='bold')
     ax3.set_xlabel('Time (ms)', fontsize=14, fontweight='bold')
-    ax3.set_title('Switch 85 Queue Length (Port 1 - Bottleneck, →Host 53)', fontsize=15, fontweight='bold')
+    ax3.set_title('Switch 93 Queue Length (Port 1 - Bottleneck, →SW85→Host 53)', fontsize=15, fontweight='bold')
     ax3.legend(loc='upper right', fontsize=11, framealpha=0.9)
     ax3.grid(True, alpha=0.3, linestyle='--')
     
@@ -214,7 +230,23 @@ def run_and_plot(ccMode, algo_name):
     print(f"活跃流数量: {len(active_flows)}")
     print(f"队列最大值: {max(sw10_q):.0f} KB" if sw10_q else "队列数据: 无")
     print(f"队列均值: {np.mean(sw10_q):.0f} KB" if sw10_q else "")
-    print(f"图像文件: {output_file}")
+
+    # FCT 统计 (转换为 ms)
+    if fct_ns_list:
+        fct_ms = [f / 1e6 for f in fct_ns_list]
+        print(f"\n--- FCT 统计 ({len(fct_ms)} 条流完成) ---")
+        print(f"FCT 平均: {np.mean(fct_ms):.3f} ms")
+        print(f"FCT 最大: {max(fct_ms):.3f} ms")
+        print(f"FCT 最小: {min(fct_ms):.3f} ms")
+        if fct_standalone_list:
+            sa_ms = [f / 1e6 for f in fct_standalone_list]
+            slowdown = [a / b if b > 0 else 0 for a, b in zip(fct_ms, sa_ms)]
+            print(f"Slowdown 平均: {np.mean(slowdown):.2f}x")
+            print(f"Slowdown 最大: {max(slowdown):.2f}x")
+    else:
+        print("FCT 数据: 无 (检查 /home/gj/ns3/results/fct/fct.txt)")
+
+    print(f"\n图像文件: {output_file}")
     print(f"{'='*80}\n")
     
     return output_file

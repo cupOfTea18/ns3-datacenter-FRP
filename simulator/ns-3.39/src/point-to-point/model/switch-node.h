@@ -54,9 +54,11 @@ protected:
 	struct FlowEndpoints {
 		Ipv4Address srcIp;   // 数据流源IP -> 作为FRP包的DIP
 		Ipv4Address dstIp;   // 数据流目的IP -> 作为FRP包的SIP
+		uint32_t inPort;     // 数据流的入口端口（入口即出口原则：反馈沿入端口发回）
 		bool operator<(const FlowEndpoints& o) const {
 			if (srcIp.Get() != o.srcIp.Get()) return srcIp.Get() < o.srcIp.Get();
-			return dstIp.Get() < o.dstIp.Get();
+			if (dstIp.Get() != o.dstIp.Get()) return dstIp.Get() < o.dstIp.Get();
+			return inPort < o.inPort;
 		}
 	};
 	std::map<uint32_t, std::set<FlowEndpoints>> m_activeFlows;     // 出口网卡 -> 活跃流端点集合
@@ -75,7 +77,12 @@ private:
 	
 	// ========== 通用反馈包核心函数 ==========
 	Ptr<Packet> ConfigureFeedbackPayload(uint32_t ccMode, uint32_t ifIndex);
-	void SendControlPacket(Ipv4Address srcAddr, Ipv4Address dstAddr, Ptr<Packet> payload, uint8_t l3Prot);
+	void SendControlPacket(Ipv4Address srcAddr, Ipv4Address dstAddr, Ptr<Packet> payload, uint8_t l3Prot, uint32_t inPort = (uint32_t)-1);
+public:
+	// 调试接口：打印路由表
+	std::unordered_map<uint32_t, std::vector<int> >* GetRtTablePtr() { return &m_rtTable; }
+	void PrintRoutingTableFor(Ipv4Address targetDst);
+private:
 	void PeriodicFeedbackLoop(Time interval);
 	void TrackActiveFlow(Ptr<Packet> p, uint32_t outPort);
 	bool CheckHasWan(Ipv4Address srcIp);

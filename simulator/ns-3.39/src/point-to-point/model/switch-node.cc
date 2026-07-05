@@ -480,42 +480,48 @@ int SwitchNode::log2apprx(int x, int b, int m, int l) {
  */
 void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
     if (!m_switchFeedbackEnabled) return;
-    
+
+    // 提取入口端口（InterfaceTag在包被入队时由QbbNetDevice写上，标识这个包从哪个口进来）
+    InterfaceTag intfTag;
+    uint32_t inPort = (p->PeekPacketTag(intfTag) ? intfTag.GetPortId() : (uint32_t)-1);
+
     Ptr<Packet> cp = p->Copy();
     PppHeader ppp;
     cp->RemoveHeader(ppp);
     Ipv4Header ipv4;
     cp->RemoveHeader(ipv4);
-    
+
     uint8_t proto = ipv4.GetProtocol();
     Ipv4Address srcIp = ipv4.GetSource();
     Ipv4Address dstIp = ipv4.GetDestination();
-    
+
     // 调试：打印所有包的协议号
     static uint32_t dbgCount = 0;
     if (dbgCount < 5) {
-        std::cout << "[TRACK DEBUG] Switch " << m_id << " port=" << outPort 
+        std::cout << "[TRACK DEBUG] Switch " << m_id << " port=" << outPort
+                  << " inPort=" << inPort
                   << " proto=0x" << std::hex << (uint32_t)proto << std::dec
                   << " src=" << srcIp << " dst=" << dstIp << std::endl;
         dbgCount++;
     }
-    
+
     // 只跟踪UDP/TCP数据流
     if (proto == 0x11 || proto == 0x06) {
-        // 记录流端点 (srcIp=数据流源IP, dstIp=数据流目的IP)
+        // 记录流端点 (srcIp=数据流源IP, dstIp=数据流目的IP, inPort=入口端口)
         FlowEndpoints fe;
         fe.srcIp = srcIp;
         fe.dstIp = dstIp;
+        fe.inPort = inPort;
         m_activeFlows[outPort].insert(fe);
-        
+
         // 提取源IP的DC-ID（IP第2段：11.{dc_id}.*.*）
         uint32_t srcIpValue = srcIp.Get();
         uint8_t srcDcId = (srcIpValue >> 16) & 0xFF;
         m_activeSrcDcIds[outPort].insert(srcDcId);
-        
+
         // 调试：如果该端口有多个DC的流，输出提示
         if (m_activeSrcDcIds[outPort].size() > 1) {
-            std::cout << "  [WAN DETECT] Switch " << m_id << " port=" << outPort 
+            std::cout << "  [WAN DETECT] Switch " << m_id << " port=" << outPort
                       << " has multi-DC flows! src=" << srcIp << " (dc=" << (int)srcDcId << ")";
             std::cout << " DCs on port=";
             for (auto dc : m_activeSrcDcIds[outPort]) std::cout << (int)dc << ",";
@@ -580,7 +586,7 @@ void SwitchNode::PeriodicFeedbackLoop(Time interval) {
             //   DIP = fe.srcIp (数据流的源IP，即发送方，FRP包发给他)
             Ipv4Address frpSrcAddr = fe.dstIp;
             Ipv4Address frpDstAddr = fe.srcIp;
-            
+
             // 查路由表验证转发端口
             auto routeEntry = m_rtTable.find(frpDstAddr.Get());
             std::string routeInfo = "NO_ROUTE";
@@ -592,13 +598,14 @@ void SwitchNode::PeriodicFeedbackLoop(Time interval) {
                 }
                 routeInfo += "]";
             }
-            
-            std::cout << "  [FRP SEND] port=" << idx << " -> srcIp=" << fe.srcIp 
+
+            std::cout << "  [FRP SEND] port=" << idx << " -> srcIp=" << fe.srcIp
                       << " FRP<SIp=" << frpSrcAddr << ", DIp=" << frpDstAddr << ">"
+                      << " inPort=" << fe.inPort
                       << " route:" << routeInfo << std::endl;
-            
-            // 3. 调用发送函数完成发送
-            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, 0xFF);
+
+            // 3. 调用发送函数完成发送（“入口即出口”原则：使用数据流入口端口作为反馈出口）
+            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, 0xFF, fe.inPort);
         }
     }
     
@@ -650,12 +657,12 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         // 2. 严格遵循控制包字段的局部量纲换算
         uint16_t fairRateField = static_cast<uint16_t>(calculatedRateBps / 10000000.0);  // 换算为 10Mbps 单元
         // q_dev = qCur - qRef (Cell单位), 小于0则=0
-        double qRefBytes = (link_bps >= 200ULL * 1000000000ULL) ? 1048576.0 : 512000.0;  // 200G:1MB, 100G:500KB
+        double qRefBytes = (link_bps >= 200ULL * 1000000000ULL) ? 1048576.0 : 307200.0;  // 200G:1MB, 100G:300KB (must match frp-rate-calculator.cc)
         double qCurCell = static_cast<double>(currentQDepth) / 600.0;
         double qRefCell = qRefBytes / 600.0;
         double qDevCell = qCurCell - qRefCell;
       //  if (qDevCell < 0) qDevCell = 0;
-        uint16_t qDevField   = static_cast<uint16_t>(qDevCell);  // 换算为 600B Cell 单元
+        int16_t qDevField   = static_cast<int16_t>(qDevCell);  // 换算为 600B Cell 单元 (可为负值)
         uint16_t linkRateField = static_cast<uint16_t>(link_bps / 10000000.0);  // 换算为 10Mbps 单元
 
         // cp_id: 使用Switch节点ID直接编码（避免哈希冲突）
@@ -719,59 +726,88 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
  * 包格式：[CustomHeader(L2+L3, l3Prot=0x01)] [Icmpv4FrpFeedback payload]
  * CustomHeader内部已包含PPP+IPv4信息，不需要额外添加PppHeader/Ipv4Header
  */
-void SwitchNode::SendControlPacket(Ipv4Address srcAddr, 
-                                    Ipv4Address dstAddr, 
-                                    Ptr<Packet> payload, 
-                                    uint8_t l3Prot) {
+void SwitchNode::SendControlPacket(Ipv4Address srcAddr,
+                                    Ipv4Address dstAddr,
+                                    Ptr<Packet> payload,
+                                    uint8_t l3Prot,
+                                    uint32_t inPort) {
     Ptr<Packet> p = payload->Copy();
-    
+
     // 构造CustomHeader (仿真平台的标准封装)
     CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header);
     ch.l3Prot = 0x01;  // ICMP - 让主机端路由到ReceiveIcmp
-    
+
     // L2: PPP
     ch.pppProto = 0x0021;  // IPv4
-    
+
     // L3: IPv4
     ch.sip = srcAddr.Get();
     ch.dip = dstAddr.Get();
     ch.m_ttl = 64;
     ch.ipid = rand() % 65536;
-    
+
     // 设置payload大小
     ch.m_payloadSize = p->GetSize();
-    
+
     // 将CustomHeader封装到packet前面
     p->AddHeader(ch);
-    
+
     // 用MyPriorityTag标记为最高优先级(0)，避免被低优先级队列延迟
     MyPriorityTag prioTag;
     prioTag.SetPriority(0);  // queue 0 = highest priority
     p->AddPacketTag(prioTag);
-    
+
     // 设置入端口标签，标识该包由交换机内部产生
     InterfaceTag intTag(m_id);
     p->AddPacketTag(intTag);
-    
-    std::cout << "  [FRP SEND] SendToDev: src=" << srcAddr << " dst=" << dstAddr 
+
+    std::cout << "  [FRP SEND] SendToDev: src=" << srcAddr << " dst=" << dstAddr
               << " pktSize=" << p->GetSize() << " ch.l3Prot=0x" << std::hex << (int)ch.l3Prot << std::dec << std::endl;
-    
-    // 交换机内部发送：直接调用设备的SwitchSend
-    // 由于FRP包是自己产生的，不需要走完整的SendToDev查表流程
-    // 查表找到出端口，然后直接发送
-    // 这里我们需要根据目的IP查路由表找出口
-    auto entry = m_rtTable.find(dstAddr.Get());
-    if (entry != m_rtTable.end() && !entry->second.empty()) {
-        uint32_t outPort = entry->second[0];  // 取第一个可用端口
-        if (outPort < m_devices.size()) {
-            m_devices[outPort]->SwitchSend(0, p, ch);  // qIndex=0, 最高优先级
-            std::cout << "  [FRP SEND] Sent via port " << outPort << std::endl;
-        } else {
-            std::cout << "  [FRP SEND] ERROR: outPort " << outPort << " out of range" << std::endl;
-        }
+
+    // 选择出端口
+    // 原则：入口即出口 (input port = output port)
+    //   当交换机记录了入端口 (inPort != -1) 且入端口不是该流的出端口时，
+    //   使用入端口作为反馈出口，能保证反馈沿相同路径反向回源。
+    //   退化逻辑：若 inPort 不可用 (==-1 或 ==出端口)，则退化到查路由表走第一个可用端口。
+    uint32_t outPort = (uint32_t)-1;
+    bool useInPortAsOut = (inPort != (uint32_t)-1) && (inPort < m_devices.size()) && m_devices[inPort]->IsLinkUp();
+
+    if (useInPortAsOut) {
+        outPort = inPort;
+        std::cout << "  [FRP SEND] Using inPort=" << inPort << " as outPort (input-equals-output principle)" << std::endl;
     } else {
-        std::cout << "  [FRP SEND] ERROR: No route to " << dstAddr << std::endl;
+        // 退化：查路由表
+        auto entry = m_rtTable.find(dstAddr.Get());
+        if (entry != m_rtTable.end() && !entry->second.empty()) {
+            outPort = entry->second[0];  // 取第一个可用端口
+            std::cout << "  [FRP SEND] Fallback to route table outPort=" << outPort << std::endl;
+        }
     }
+
+    if (outPort != (uint32_t)-1 && outPort < m_devices.size()) {
+        m_devices[outPort]->SwitchSend(0, p, ch);  // qIndex=0, 最高优先级
+        std::cout << "  [FRP SEND] Sent via port " << outPort << std::endl;
+    } else {
+        std::cout << "  [FRP SEND] ERROR: No valid outPort for dst=" << dstAddr
+                  << " (inPort=" << inPort << ")" << std::endl;
+    }
+}
+
+// 调试接口：打印指向特定目的 IP 的路由表条目
+void SwitchNode::PrintRoutingTableFor(Ipv4Address targetDst) {
+    std::cout << "  [RTABLE] Switch " << m_id << " routes for dst=" << targetDst << " (0x"
+              << std::hex << targetDst.Get() << std::dec << "):" << std::endl;
+    auto entry = m_rtTable.find(targetDst.Get());
+    if (entry == m_rtTable.end()) {
+        std::cout << "    (no entry)" << std::endl;
+        return;
+    }
+    std::cout << "    ports=[";
+    for (size_t i = 0; i < entry->second.size(); i++) {
+        if (i > 0) std::cout << ",";
+        std::cout << entry->second[i];
+    }
+    std::cout << "]" << std::endl;
 }
 
 /**

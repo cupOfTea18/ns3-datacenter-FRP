@@ -596,8 +596,8 @@ Icmpv4FrpFeedback::Serialize(Buffer::Iterator start) const
     // 写入 fairRate (16位，网络字节序) - 单位：10Mbps
     i.WriteHtonU16(m_fairRate);
     
-    // 写入 qDepth (16位，网络字节序) - 单位：600B块
-    i.WriteHtonU16(m_qDepth);
+    // 写入 qDepth (16位，网络字节序) - 单位：600B块 (int16_t, 可为负值)
+    i.WriteHtonU16(static_cast<uint16_t>(m_qDepth));
     
     // 写入 cpId (16位，网络字节序)
     i.WriteHtonU16(m_cpId);
@@ -622,8 +622,8 @@ Icmpv4FrpFeedback::Deserialize(Buffer::Iterator start)
     // 读取 fairRate (16位，网络字节序)
     m_fairRate = i.ReadNtohU16();
     
-    // 读取 qDepth (16位，网络字节序)
-    m_qDepth = i.ReadNtohU16();
+    // 读取 qDepth (16位，网络字节序) - int16_t, 可为负值
+    m_qDepth = static_cast<int16_t>(i.ReadNtohU16());
     
     // 读取 cpId (16位，网络字节序)
     m_cpId = i.ReadNtohU16();
@@ -656,7 +656,7 @@ void Icmpv4FrpFeedback::SetFairRate(uint16_t fairRate) {
     m_fairRate = fairRate;
 }
 
-void Icmpv4FrpFeedback::SetQDepth(uint16_t qDepth) {
+void Icmpv4FrpFeedback::SetQDepth(int16_t qDepth) {
     NS_LOG_FUNCTION(this << qDepth);
     m_qDepth = qDepth;
 }
@@ -681,7 +681,7 @@ uint16_t Icmpv4FrpFeedback::GetFairRate() const  {
     return m_fairRate; 
 }
 
-uint16_t Icmpv4FrpFeedback::GetQDepth() const    {
+int16_t Icmpv4FrpFeedback::GetQDepth() const    {
     NS_LOG_FUNCTION(this); 
     return m_qDepth; 
 }

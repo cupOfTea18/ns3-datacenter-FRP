@@ -156,7 +156,7 @@ public:
 	/***********************
 	 * FRP (Fair Rate Protocol)
 	 ***********************/
-	void HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, uint16_t qDev, uint16_t cpId, bool hasWan, uint16_t linkRate, Ipv4Address flowDstIp);
+	void HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t qDev, uint16_t cpId, bool hasWan, uint16_t linkRate, Ipv4Address flowDstIp);
 
 	/********************
 	 * HPCC-PINT

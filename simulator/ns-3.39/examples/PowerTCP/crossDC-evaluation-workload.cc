@@ -162,11 +162,23 @@ std::map<uint32_t, uint64_t> leafDownlinkCapacityBps;
 std::map<uint32_t, uint64_t> leafUplinkCapacityBps;
 uint32_t FAN = 5;
 
+// Global counter for query flow completion
+uint32_t g_queryFlowCompleted = 0;
+uint32_t g_totalQueryFlows = 0;
+bool g_simulationStopped = false;
+
+// Long-distance RTT for cross-DC compensation (from topology.txt line 171: 0.5ms)
+uint64_t g_longDistanceRtt = 0;  // Will be set from topology
+
+// Query flow FCT output file
+FILE* g_queryFlowFctFile = nullptr;
+
 struct FlowInput {
 	uint64_t src, dst, pg, maxPacketCount, port, dport;
 	double start_time;
 	uint32_t idx;
-	uint64_t last_recv_bytes;  // 上次采样时的 m_recv_bytes，用于计算 delta goodput
+	uint64_t last_recv_bytes;  // Last sampled m_recv_bytes, used for delta goodput calculation
+	bool is_query_flow;        // Flag to indicate if this is a query flow
 };
 FlowInput flow_input = {0};
 uint32_t flow_num;
@@ -245,10 +257,22 @@ void AutoAssignTopologyIps(NodeContainer &n) {
     }
     
     // ==================== 第2步: BFS 划分数据中心 (交换机) ====================
+    // Use >= because delay==threshold means it IS a cross-DC link
     const uint64_t CROSS_DC_DELAY_THRESHOLD = 1000000; // 1ms
     map<uint32_t, uint32_t> switchToDc;
     map<uint32_t, bool> visited;
     uint32_t dcId = 0;
+    
+    // Debug: print all inter-switch links with delays
+    std::cout << "[TOPO BFS] Inter-switch links:" << std::endl;
+    for (auto& link : interSwitchLinks) {
+        std::cout << "  Switch " << link.first.first << " <-> Switch " << link.first.second
+                  << " delay=" << link.second << "ns";
+        if (link.second >= CROSS_DC_DELAY_THRESHOLD) {
+            std::cout << " (CROSS-DC)";
+        }
+        std::cout << std::endl;
+    }
     
     for (uint32_t swId : switchIds) {
         if (visited[swId]) continue;
@@ -272,7 +296,9 @@ void AutoAssignTopologyIps(NodeContainer &n) {
                 else if (dst == curr) neighbor = src;
                 else continue;
                 
-                if (delay > CROSS_DC_DELAY_THRESHOLD) {
+                if (delay >= CROSS_DC_DELAY_THRESHOLD) {
+                    std::cout << "[TOPO BFS] Cross-DC link skipped: " << src << " <-> " << dst
+                              << " delay=" << delay << "ns" << std::endl;
                     continue; // 跨DC链路，跳过
                 }
                 
@@ -287,7 +313,10 @@ void AutoAssignTopologyIps(NodeContainer &n) {
         dcId++; // 发现完一个连通子图，DC编号加1
     }
     
-    NS_LOG_INFO("Total " << dcId << " datacenters discovered.");
+    std::cout << "[TOPO BFS] Total " << dcId << " datacenters discovered." << std::endl;
+    for (auto& kv : switchToDc) {
+        std::cout << "  Switch " << kv.first << " -> DC" << kv.second << std::endl;
+    }
     
     // ==================== 第3步: 发现主机所属的 DC ====================
     map<uint32_t, uint32_t> hostToDc;
@@ -408,9 +437,65 @@ void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q) {
 	uint64_t base_rtt = pairRtt[sid][did], b = pairBw[sid][did];
 	uint32_t total_bytes = q->m_size + ((q->m_size - 1) / packet_payload_size + 1) * (CustomHeader::GetStaticWholeHeaderSize() - IntHeader::GetStaticSize()); // translate to the minimum bytes required (with header but no INT)
 	uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
-	// sip, dip, sport, dport, size (B), start_time, fct (ns), standalone_fct (ns)
-	fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(), (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
+	
+	// Check if this is a query flow by matching sip, dip, and dport
+	bool is_query = false;
+	const FlowInput* query_flow_info = nullptr;
+	for (const auto& flow : flows) {
+		if (serverAddress[flow.src].Get() == q->sip.Get() &&
+		    serverAddress[flow.dst].Get() == q->dip.Get() &&
+		    flow.dport == q->dport &&
+		    flow.is_query_flow) {
+			is_query = true;
+			query_flow_info = &flow;
+			break;
+		}
+	}
+	
+	// sip, dip, sport, dport, size (B), start_time, fct (ns), standalone_fct (ns), is_query_flow
+	fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %d\n", q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(), (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct, is_query ? 1 : 0);
 	fflush(fout);
+
+	// Write query flow to dedicated FCT file with node IDs and RTT compensation
+	if (is_query && query_flow_info && g_queryFlowFctFile != nullptr) {
+		uint64_t fct_ns = (Simulator::Now() - q->startTime).GetTimeStep();
+		
+		// Check if cross-DC flow (one node in [0,52], other in [53,105])
+		bool cross_dc = false;
+		if ((sid <= 52 && did >= 53 && did <= 105) || (sid >= 53 && sid <= 105 && did <= 52)) {
+			cross_dc = true;
+			// Compensate for long-distance RTT (subtract 2 * long-distance delay)
+			if (g_longDistanceRtt > 0 && fct_ns > g_longDistanceRtt) {
+				fct_ns -= g_longDistanceRtt;
+			}
+		}
+		
+		// Output format: src_node dst_node pg dport flow_size start_time_ns fct_ns is_cross_dc
+		fprintf(g_queryFlowFctFile, "%u %u %lu %lu %lu %lu %lu %d\n",
+		        query_flow_info->src,  // Source node ID
+		        query_flow_info->dst,  // Destination node ID
+		        query_flow_info->pg,   // Priority group
+		        query_flow_info->dport, // Destination port
+		        query_flow_info->maxPacketCount, // Flow size in bytes
+		        q->startTime.GetTimeStep(), // Start time in ns
+		        fct_ns,  // FCT in ns (compensated if cross-DC)
+		        cross_dc ? 1 : 0);  // Cross-DC flag
+		fflush(g_queryFlowFctFile);
+	}
+
+	// Count query flow completion and stop simulation if all query flows are done
+	if (is_query) {
+		g_queryFlowCompleted++;
+		std::cout << "[QUERY FLOW] Completed " << g_queryFlowCompleted << "/" << g_totalQueryFlows 
+		          << " query flows at time " << Simulator::Now().GetSeconds() << "s" << std::endl;
+		
+		// Stop simulation when all query flows complete (with 1ms grace period)
+		if (g_queryFlowCompleted >= g_totalQueryFlows && !g_simulationStopped) {
+			g_simulationStopped = true;
+			std::cout << "[QUERY FLOW] All " << g_totalQueryFlows << " query flows completed! Stopping simulation..." << std::endl;
+			Simulator::Stop(Seconds(0.001)); // Stop after 1ms grace period
+		}
+	}
 
 	// remove rxQp from the receiver
 	Ptr<Node> dstNode = n.Get(did);
@@ -823,7 +908,8 @@ void AddWorkloadFlow(uint32_t src,
                      double startTime,
                      long &flowCount,
                      long &totalFlowSize,
-                     uint16_t forcedDport = 0)
+                     uint16_t forcedDport = 0,
+                     bool isQueryFlow = false)
 {
 	if (src == dst || flowSize == 0)
 		return;
@@ -856,6 +942,7 @@ void AddWorkloadFlow(uint32_t src,
 	fi.start_time = startTime;
 	fi.idx = flows.size();
 	fi.last_recv_bytes = 0;
+	fi.is_query_flow = isQueryFlow;
 	flows.push_back(fi);
 
 	RdmaClientHelper clientHelper(pg,
@@ -874,51 +961,7 @@ void AddWorkloadFlow(uint32_t src,
 	totalFlowSize += flowSize;
 }
 
-void InstallFlowFileBackground(const std::string& flowFile,
-                               long& backgroundFlowCount,
-                               long& totalBackgroundFlowSize)
-{
-	std::ifstream bgFlow;
-	bgFlow.open(flowFile.c_str());
-	NS_ASSERT_MSG(bgFlow.is_open(), "Cannot open background flow file: " << flowFile);
 
-	uint32_t bgFlowNum = 0;
-	bgFlow >> bgFlowNum;
-	for (uint32_t i = 0; i < bgFlowNum; i++) {
-		uint32_t src = 0, dst = 0, pg = 0;
-		uint16_t dport = 0;
-		uint64_t flowSize = 0;
-		double startTime = 0;
-		bgFlow >> src >> dst >> pg >> dport >> flowSize >> startTime;
-		NS_ASSERT_MSG(bgFlow.good() || bgFlow.eof(), "Invalid background flow entry in " << flowFile);
-		NS_ASSERT_MSG(src < n.GetN() && dst < n.GetN(), "Background flow node id out of range");
-		NS_ASSERT_MSG(n.Get(src)->GetNodeType() == 0 && n.Get(dst)->GetNodeType() == 0,
-		              "Background flow selected a non-host node");
-		NS_ASSERT_MSG(src != dst, "Background flow src and dst must differ");
-		NS_ASSERT_MSG(flowSize > 0, "Background flow size must be positive");
-		NS_ASSERT_MSG(serverAddress[src].Get() != Ipv4Address("10.0.0.1").Get() &&
-		              serverAddress[dst].Get() != Ipv4Address("10.0.0.1").Get(),
-		              "Background flow uses temporary serverAddress");
-
-		AddWorkloadFlow(src, dst, pg, flowSize, startTime,
-		                backgroundFlowCount, totalBackgroundFlowSize, dport);
-		std::cout << "[BACKGROUND FLOW] src " << src
-		          << " dst " << dst
-		          << " pg " << pg
-		          << " dport " << dport
-		          << " size " << flowSize
-		          << " start " << startTime
-		          << std::endl;
-	}
-	bgFlow.close();
-
-	std::cout << "Total background flow: " << backgroundFlowCount << std::endl;
-	if (backgroundFlowCount > 0) {
-		std::cout << "Actual background average flow size: "
-		          << static_cast<double>(totalBackgroundFlowSize) / backgroundFlowCount
-		          << std::endl;
-	}
-}
 
 void InstallBackgroundWorkload(double load,
                                struct cdf_table *cdfTable,
@@ -930,65 +973,162 @@ void InstallBackgroundWorkload(double load,
 	double avgFlowSize = avg_cdf(cdfTable);
 	NS_ASSERT_MSG(avgFlowSize > 0, "Average CDF flow size must be positive");
 
+	// Separate hosts into two data centers
+	// DC0: nodes [0, 52], DC1: nodes [53, 105]
+	std::vector<uint32_t> dc0_hosts;
+	std::vector<uint32_t> dc1_hosts;
+	
 	for (uint32_t leafId : hostFacingLeafIds) {
 		auto &hosts = leafToHostIds[leafId];
-		uint64_t downlinkCapacity = leafDownlinkCapacityBps[leafId];
-		uint64_t uplinkCapacity = leafUplinkCapacityBps[leafId];
-		if (hosts.empty() || uplinkCapacity == 0 || downlinkCapacity == 0) {
-			std::cerr << "[WORKLOAD] Skip leaf " << leafId
-			          << " hostCount=" << hosts.size()
-			          << " downlinkCapacity=" << downlinkCapacity
-			          << " uplinkCapacity=" << uplinkCapacity << std::endl;
-			continue;
-		}
-		double bottleneckCapacity = std::min(downlinkCapacity, uplinkCapacity);
-		double requestRatePerHost = load * bottleneckCapacity / (8.0 * avgFlowSize * hosts.size());
-		double oversubRatio = (double)downlinkCapacity / (double)uplinkCapacity;
-		std::cout << "[WORKLOAD LEAF] leaf " << leafId
-		          << " hostCount " << hosts.size()
-		          << " downlinkCapacity " << downlinkCapacity
-		          << " uplinkCapacity " << uplinkCapacity
-		          << " oversubRatio " << oversubRatio
-		          << " requestRatePerHost " << requestRatePerHost
-		          << std::endl;
-
-		for (uint32_t src : hosts) {
-			double startTime = START_TIME + poission_gen_interval(requestRatePerHost);
-			while (startTime < FLOW_LAUNCH_END_TIME && startTime > START_TIME) {
-				uint32_t dst = PickDestinationHost(leafId, src);
-				uint64_t flowSize = (uint64_t)gen_random_cdf(cdfTable);
-				while (flowSize == 0) {
-					flowSize = (uint64_t)gen_random_cdf(cdfTable);
-				}
-				AddWorkloadFlow(src, dst, 3, flowSize, startTime, flowCount, totalFlowSize);
-				startTime += poission_gen_interval(requestRatePerHost);
+		for (uint32_t hostId : hosts) {
+			if (hostId <= 52) {
+				dc0_hosts.push_back(hostId);
+			} else if (hostId >= 53 && hostId <= 105) {
+				dc1_hosts.push_back(hostId);
 			}
 		}
 	}
+	
+	std::cout << "[WORKLOAD DC] DC0 hosts: " << dc0_hosts.size() 
+	          << ", DC1 hosts: " << dc1_hosts.size() << std::endl;
+	
+	// Both DCs must have the same number of hosts for mirroring
+	uint32_t numHostsPerDC = std::min(dc0_hosts.size(), dc1_hosts.size());
+	
+	// Step 1: Generate flow pattern for DC0, record (src_idx, dst_idx, flowSize, startTime)
+	// Using index-based approach so DC1 can mirror with its own host list
+	struct BgFlowPattern {
+		uint32_t src_idx;   // Index into dc0_hosts / dc1_hosts
+		uint32_t dst_idx;   // Index into dc0_hosts / dc1_hosts
+		uint64_t flowSize;
+		double startTime;
+	};
+	std::vector<BgFlowPattern> flowPatterns;
+	
+	std::cout << "[WORKLOAD DC0] Generating background flows for DC0 (nodes 0-52)" << std::endl;
+	double requestRate = load * 1e10 / (8.0 * avgFlowSize * numHostsPerDC);
+	
+	for (uint32_t i = 0; i < numHostsPerDC; i++) {
+		double startTime = START_TIME + poission_gen_interval(requestRate);
+		while (startTime < FLOW_LAUNCH_END_TIME && startTime > START_TIME) {
+			uint32_t dst_idx = rand_range_uint(0, numHostsPerDC);
+			if (dst_idx == i) {
+				startTime += poission_gen_interval(requestRate);
+				continue;
+			}
+			
+			uint64_t flowSize = (uint64_t)gen_random_cdf(cdfTable);
+			while (flowSize == 0) {
+				flowSize = (uint64_t)gen_random_cdf(cdfTable);
+			}
+			
+			// Record pattern
+			flowPatterns.push_back({i, dst_idx, flowSize, startTime});
+			
+			// Add to DC0
+			AddWorkloadFlow(dc0_hosts[i], dc0_hosts[dst_idx], 3, flowSize, startTime, flowCount, totalFlowSize);
+			startTime += poission_gen_interval(requestRate);
+		}
+	}
+	
+	uint64_t dc0_totalBytes = 0;
+	for (auto &p : flowPatterns) {
+		dc0_totalBytes += p.flowSize;
+	}
+	std::cout << "[WORKLOAD DC0] " << flowPatterns.size() << " flows, "
+	          << dc0_totalBytes << " bytes total" << std::endl;
+	
+	// Step 2: Mirror the exact same flow pattern to DC1
+	// Same flow sizes, same start times, same src/dst indices (mapped to DC1 hosts)
+	std::cout << "[WORKLOAD DC1] Mirroring " << flowPatterns.size() << " flows to DC1 (nodes 53-105)" << std::endl;
+	uint64_t dc1_totalBytes = 0;
+	for (auto &p : flowPatterns) {
+		AddWorkloadFlow(dc1_hosts[p.src_idx], dc1_hosts[p.dst_idx], 3, p.flowSize, p.startTime, flowCount, totalFlowSize);
+		dc1_totalBytes += p.flowSize;
+	}
+	std::cout << "[WORKLOAD DC1] " << flowPatterns.size() << " flows, "
+	          << dc1_totalBytes << " bytes total" << std::endl;
+	
+	std::cout << "[WORKLOAD] Background flow generation complete. "
+	          << "DC0=" << dc0_totalBytes << "B, DC1=" << dc1_totalBytes << "B, "
+	          << "Total flows: " << flowCount << std::endl;
 }
 
-void InstallQueryWorkload(double queryRequestRate,
-                          uint32_t requestSize,
-                          double START_TIME,
-                          double FLOW_LAUNCH_END_TIME,
-                          long &queryFlowCount,
-                          long &totalQueryFlowSize)
+void InstallQueryFlowFile(const std::string& queryFlowFile,
+                          long& queryFlowCount,
+                          long& totalQueryFlowSize)
 {
-	if (queryRequestRate <= 0 || requestSize == 0 || FAN == 0)
+	if (queryFlowFile.empty()) {
+		std::cout << "No query flow file specified, skip query flows." << std::endl;
 		return;
-
-	uint64_t flowSize = std::max<uint64_t>(1, requestSize / FAN);
-	for (uint32_t dstLeafId : hostFacingLeafIds) {
-		for (uint32_t dst : leafToHostIds[dstLeafId]) {
-			double startTime = START_TIME + poission_gen_interval(queryRequestRate);
-			while (startTime < FLOW_LAUNCH_END_TIME && startTime > START_TIME) {
-				for (uint32_t r = 0; r < FAN; r++) {
-					uint32_t src = PickSourceHostForQuery(dstLeafId, dst);
-					AddWorkloadFlow(src, dst, 3, flowSize, startTime, queryFlowCount, totalQueryFlowSize);
-				}
-				startTime += poission_gen_interval(queryRequestRate);
-			}
+	}
+	
+	std::ifstream qf(queryFlowFile.c_str());
+	NS_ASSERT_MSG(qf.is_open(), "Cannot open query flow file: " << queryFlowFile);
+	
+	uint32_t queryFlowNum = 0;
+	qf >> queryFlowNum;
+	
+	// Set global query flow counter
+	g_totalQueryFlows = queryFlowNum;
+	g_queryFlowCompleted = 0;
+	g_simulationStopped = false;
+	
+	std::cout << "[QUERY FLOW] Loading " << queryFlowNum 
+	          << " flows from " << queryFlowFile << std::endl;
+	
+	for (uint32_t i = 0; i < queryFlowNum; i++) {
+		uint32_t src, dst, pg;
+		uint16_t dport;
+		uint64_t flowSize;
+		double startTime;
+		
+		qf >> src >> dst >> pg >> dport >> flowSize >> startTime;
+		
+		// Validation
+		NS_ASSERT_MSG(src < n.GetN() && dst < n.GetN(), 
+		             "Query flow node id out of range");
+		NS_ASSERT_MSG(n.Get(src)->GetNodeType() == 0 && n.Get(dst)->GetNodeType() == 0,
+		             "Query flow selected a non-host node");
+		NS_ASSERT_MSG(src != dst, "Query flow src and dst must differ");
+		NS_ASSERT_MSG(flowSize > 0, "Query flow size must be positive");
+		
+		// Check if this is a cross-DC flow
+		bool is_cross_dc = false;
+		if ((src <= 52 && dst >= 53 && dst <= 105) || (src >= 53 && src <= 105 && dst <= 52)) {
+			is_cross_dc = true;
 		}
+		
+		// Adjust start time: cross-DC flows use original time, intra-DC flows add 1ms delay
+		double adjustedStartTime = startTime;
+		if (!is_cross_dc && g_longDistanceRtt > 0) {
+			// Add cross-DC delay (1ms one-way) for intra-DC flows
+			adjustedStartTime += (g_longDistanceRtt / 2.0) / 1e9;  // Convert ns to seconds
+		}
+		
+		// Add flow with query flow flag and adjusted start time
+		AddWorkloadFlow(src, dst, pg, flowSize, adjustedStartTime,
+		               queryFlowCount, totalQueryFlowSize, dport, true);
+		
+		// Output detailed info (queryable)
+		std::cout << "[QUERY FLOW #" << i << "] "
+		          << "src=" << src 
+		          << " dst=" << dst
+		          << " pg=" << pg
+		          << " dport=" << dport
+		          << " size=" << flowSize << " bytes"
+		          << " start=" << startTime << " sec"
+		          << " adjusted_start=" << adjustedStartTime << " sec"
+		          << " cross_dc=" << (is_cross_dc ? "yes" : "no")
+		          << std::endl;
+	}
+	qf.close();
+	
+	std::cout << "[QUERY FLOW] Total query flows: " << queryFlowCount << std::endl;
+	if (queryFlowCount > 0) {
+		std::cout << "[QUERY FLOW] Average flow size: "
+		          << static_cast<double>(totalQueryFlowSize) / queryFlowCount
+		          << " bytes" << std::endl;
 	}
 }
 
@@ -1012,12 +1152,9 @@ int main(int argc, char *argv[])
 	double END_TIME = 0.05;
 	double FLOW_LAUNCH_END_TIME = 0.045;
 	double load = 0.2;
-	uint32_t requestSize = 0;
-	double queryRequestRate = 0;
-	uint32_t incast = 5;
 	unsigned randomSeed = 7;
-	bool enableFlowFileBackground = false;
-	std::string backgroundFlowFile = "";
+	std::string queryFlowFile = "examples/PowerTCP/query-flow.txt";
+	std::string queryFlowFctFile = "";  // Will be set via command line
 
 	uint32_t algorithm = 3;
 	uint32_t windowCheck = 1;
@@ -1039,43 +1176,27 @@ int main(int argc, char *argv[])
 	cmd.AddValue("FLOW_LAUNCH_END_TIME", "workload launch end time", FLOW_LAUNCH_END_TIME);
 	cmd.AddValue("cdfFileName", "File name for flow distribution", cdfFileName);
 	cmd.AddValue("load", "offered load for background workload", load);
-	cmd.AddValue("request", "Query size in bytes; 0 disables query workload", requestSize);
-	cmd.AddValue("queryRequestRate", "Query request rate (poisson arrivals)", queryRequestRate);
+	cmd.AddValue("queryFlowFile", "Query flow file path", queryFlowFile);
+	cmd.AddValue("queryFlowFctFile", "Query flow FCT output file path", queryFlowFctFile);
 	cmd.AddValue ("algorithm", "specify CC mode. This is added for my convinience. I prefer cmd rather than parsing files.", algorithm);
 	cmd.AddValue("windowCheck", "windowCheck", windowCheck);
-	cmd.AddValue("incast", "query fan-in", incast);
-	cmd.AddValue("enableFlowFileBackground", "Enable deterministic background flows from a flow file", enableFlowFileBackground);
-	cmd.AddValue("backgroundFlowFile", "Background flow file; empty means use FLOW_FILE from config", backgroundFlowFile);
 
 	cmd.Parse (argc, argv);
-	FAN = incast;
 
 	// 保存命令行值，用于配置文件解析后覆盖（-1 表示未显式传入）
 	double cmd_load = -1;
 	double cmd_START_TIME = -1;
 	double cmd_END_TIME = -1;
 	double cmd_FLOW_LAUNCH_END_TIME = -1;
-	double cmd_queryRequestRate = -1;
-	int64_t cmd_requestSize = -1;
-	int64_t cmd_incast = -1;
-	bool cmd_enableFlowFileBackground = false;
-	std::string cmd_backgroundFlowFile = "";
 	std::string cmd_cdfFileName = "";
 	{
 		// 通过对比默认值判断是否显式传入
-		double def_load = 0.2, def_START = 0.001, def_END = 0.05, def_FLE = 0.045, def_QRR = 0;
-		uint32_t def_req = 0, def_incast = 5;
-		bool def_effb = false;
-		std::string def_bff = "", def_cdf = "examples/PowerTCP/Alistorage.txt";
+		double def_load = 0.2, def_START = 0.001, def_END = 0.05, def_FLE = 0.045;
+		std::string def_cdf = "examples/PowerTCP/Alistorage.txt";
 		if (load != def_load)                   cmd_load = load;
 		if (START_TIME != def_START)            cmd_START_TIME = START_TIME;
 		if (END_TIME != def_END)                cmd_END_TIME = END_TIME;
 		if (FLOW_LAUNCH_END_TIME != def_FLE)     cmd_FLOW_LAUNCH_END_TIME = FLOW_LAUNCH_END_TIME;
-		if (queryRequestRate != def_QRR)        cmd_queryRequestRate = queryRequestRate;
-		if (requestSize != def_req)             cmd_requestSize = requestSize;
-		if (incast != def_incast)               cmd_incast = incast;
-		if (enableFlowFileBackground != def_effb) cmd_enableFlowFileBackground = enableFlowFileBackground;
-		if (backgroundFlowFile != def_bff)       cmd_backgroundFlowFile = backgroundFlowFile;
 		if (cdfFileName != def_cdf)              cmd_cdfFileName = cdfFileName;
 	}
 
@@ -1411,28 +1532,6 @@ int main(int argc, char *argv[])
 			conf >> FLOW_LAUNCH_END_TIME;
 			std::cout << "FLOW_LAUNCH_END_TIME\t\t" << FLOW_LAUNCH_END_TIME << '\n';
 		}
-		else if (key.compare("QUERY_REQUEST_RATE") == 0) {
-			conf >> queryRequestRate;
-			std::cout << "QUERY_REQUEST_RATE\t\t" << queryRequestRate << '\n';
-		}
-		else if (key.compare("REQUEST_SIZE") == 0) {
-			conf >> requestSize;
-			std::cout << "REQUEST_SIZE\t\t\t" << requestSize << '\n';
-		}
-		else if (key.compare("INCAST") == 0) {
-			conf >> incast;
-			std::cout << "INCAST\t\t\t\t" << incast << '\n';
-		}
-		else if (key.compare("ENABLE_FLOW_FILE_BACKGROUND") == 0) {
-			uint32_t v;
-			conf >> v;
-			enableFlowFileBackground = (v != 0);
-			std::cout << "ENABLE_FLOW_FILE_BACKGROUND\t" << (enableFlowFileBackground ? "Yes" : "No") << '\n';
-		}
-		else if (key.compare("BACKGROUND_FLOW_FILE") == 0) {
-			conf >> backgroundFlowFile;
-			std::cout << "BACKGROUND_FLOW_FILE\t\t" << backgroundFlowFile << '\n';
-		}
 		fflush(stdout);
 	}
 	conf.close();
@@ -1448,13 +1547,7 @@ int main(int argc, char *argv[])
 	if (cmd_START_TIME >= 0)          START_TIME = cmd_START_TIME;
 	if (cmd_END_TIME >= 0)            END_TIME = cmd_END_TIME;
 	if (cmd_FLOW_LAUNCH_END_TIME >= 0) FLOW_LAUNCH_END_TIME = cmd_FLOW_LAUNCH_END_TIME;
-	if (cmd_queryRequestRate >= 0)    queryRequestRate = cmd_queryRequestRate;
-	if (cmd_requestSize >= 0)         requestSize = (uint32_t)cmd_requestSize;
-	if (cmd_incast >= 0)              incast = (uint32_t)cmd_incast;
-	if (cmd_enableFlowFileBackground) enableFlowFileBackground = true;
-	if (!cmd_backgroundFlowFile.empty()) backgroundFlowFile = cmd_backgroundFlowFile;
 	if (!cmd_cdfFileName.empty())     cdfFileName = cmd_cdfFileName;
-	FAN = incast;
 
 
 	Config::SetDefault("ns3::QbbNetDevice::PauseTime", UintegerValue(pause_time));
@@ -1488,6 +1581,58 @@ int main(int argc, char *argv[])
 	tors = switch_num;
 	std::cout << node_num << " " << switch_num << " " << tors <<  " " << link_num << std::endl;
 	flow_num = 0;
+	
+	// Read topology to find long-distance RTT (between DC0 and DC1)
+	// Look for link between node 52 and 105 (or similar cross-DC links)
+	std::ifstream topo_copy(topology_file.c_str());
+	if (topo_copy.is_open()) {
+		uint32_t n1, n2;
+		double bw;
+		std::string delay_str;
+		uint32_t dummy;
+		// Skip header
+		topo_copy >> n1; // node_num
+		topo_copy >> n1; // switch_num
+		topo_copy >> n1; // tors
+		topo_copy >> n1; // link_num
+		// Skip switch IDs
+		for (uint32_t i = 0; i < switch_num; i++) {
+			topo_copy >> n1;
+		}
+		// Read links to find cross-DC link (52-105 or similar)
+		while (topo_copy >> n1 >> n2 >> bw >> delay_str >> dummy) {
+			// Parse delay string (e.g., "1.5us", "0.5ms")
+			double delay_ns = 0;
+			if (delay_str.find("us") != std::string::npos) {
+				delay_ns = std::stod(delay_str) * 1000;  // Convert us to ns
+			} else if (delay_str.find("ms") != std::string::npos) {
+				delay_ns = std::stod(delay_str) * 1000000;  // Convert ms to ns
+			} else if (delay_str.find("ns") != std::string::npos) {
+				delay_ns = std::stod(delay_str);
+			} else {
+				delay_ns = std::stod(delay_str);  // Assume ns if no unit
+			}
+			
+			// Check if this is a cross-DC link (one endpoint in [0,52], other in [53,105])
+			bool is_cross_dc = false;
+			if ((n1 <= 52 && n2 >= 53 && n2 <= 105) || (n1 >= 53 && n1 <= 105 && n2 <= 52)) {
+				is_cross_dc = true;
+			}
+			// Also check if delay is significantly larger (0.5ms vs 1.5us)
+			if (delay_ns > 100000) { // > 0.1ms (100000 ns)
+				g_longDistanceRtt = static_cast<uint64_t>(delay_ns * 2); // RTT = 2 * one-way delay
+				std::cout << "[TOPOLOGY] Found long-distance link: " << n1 << " <-> " << n2 
+				          << " delay=" << delay_str << " (" << delay_ns << "ns) RTT=" << g_longDistanceRtt << "ns" << std::endl;
+				break;
+			}
+		}
+		topo_copy.close();
+	}
+	if (g_longDistanceRtt == 0) {
+		std::cout << "[TOPOLOGY] Warning: Long-distance RTT not found, using default 0" << std::endl;
+	} else {
+		std::cout << "[TOPOLOGY] Long-distance RTT set to: " << g_longDistanceRtt << " ns (" << g_longDistanceRtt / 1000000.0 << " ms)" << std::endl;
+	}
 
 	NodeContainer serverNodes;
 	NodeContainer torNodes;
@@ -1696,11 +1841,67 @@ int main(int argc, char *argv[])
 			sw->m_mmu->SetIngressPool(buffer_size * 1024 * 1024);
 			sw->m_mmu->SetEgressLosslessPool(buffer_size * 1024 * 1024);
 			sw->m_mmu->node_id = sw->GetId();
+
+			// ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
+			// 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小
+			//       导致队列可以推到7MB+才丢包。改为2MB+100KB+100ms。
+			if (sw->GetId() == 93) {
+				const uint32_t HOST_PORT = 1;     // SW93 port1 = SW85 (接 host53)
+				const uint32_t PFC_PG    = 1;     // host 流量所在 PG
+				const uint32_t TWO_MB    = 2 * 1024 * 1024;
+				const uint32_t HEADROOM  = 100 * 1024;  // 2MB 阈值后再绥冲 100KB
+				const uint32_t XON_BYTES = 256 * 1024;  // 队列跌到 256KB 以下才 resume
+
+				// 设 alphaIngress 使 threshold≈2MB (18MB pool × 2/18 ≈ 2MB)
+				sw->m_mmu->SetAlphaIngress(2.0 / 18.0, HOST_PORT, PFC_PG);
+				// 同步设 headroom (2MB阈值后允许多绥100KB)
+				sw->m_mmu->SetHeadroom(HEADROOM, HOST_PORT, PFC_PG);
+				// 调高 resume 阈值避免频繁 resume/pause 振荡
+				sw->m_mmu->SetXon(XON_BYTES, HOST_PORT, PFC_PG);
+				sw->m_mmu->SetXonOffset(XON_BYTES, HOST_PORT, PFC_PG);
+				std::cout << "[PFC] SW93 port 1: threshold=2MB, headroom="
+				          << HEADROOM << "B, xon=" << XON_BYTES << "B" << std::endl;
+
+				// 同时调高 PauseTime：默认5μs太短，跨域RTT≈1ms+，不够上游响应
+				for (uint32_t k = 1; k < sw->GetNDevices(); k++) {
+					Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(k));
+					dev->SetAttribute("PauseTime", UintegerValue(100000));  // 100ms
+				}
+			}
 		}
 	}
 
 #if ENABLE_QP
 	FILE *fct_output = fopen(fct_output_file.c_str(), "w");
+	
+	// Open query flow FCT file
+	if (!queryFlowFile.empty()) {
+		// If not specified, use default based on algorithm
+		if (queryFlowFctFile.empty()) {
+			std::string algo_suffix;
+			if (algorithm == 13) algo_suffix = "frp";
+			else if (algorithm == 14) algo_suffix = "rocc";
+			else if (algorithm == 1) algo_suffix = "dcqcn";  // DCQCN is ccMode=1
+			else if (algorithm == 3) algo_suffix = "hpcc";  // PowerInt/HPCC/PowerDelay use ccMode=3
+		
+			else if (algorithm == 7) algo_suffix = "timely";  // Timely is ccMode=7
+			else if (algorithm == 10) algo_suffix = "dctcp";
+			else algo_suffix = "unknown";
+			
+			queryFlowFctFile = "/home/gj/ns3/results/workload/fct/query-flow-" + algo_suffix + ".txt";
+		}
+		g_queryFlowFctFile = fopen(queryFlowFctFile.c_str(), "w");
+		if (g_queryFlowFctFile != nullptr) {
+			std::cout << "[QUERY FLOW] Output file: " << queryFlowFctFile << std::endl;
+			// Write header comment
+			fprintf(g_queryFlowFctFile, "# Query Flow FCT Results\n");
+			fprintf(g_queryFlowFctFile, "# Format: src_node dst_node pg dport flow_size(B) start_time(ns) fct(ns) is_cross_dc\n");
+			fprintf(g_queryFlowFctFile, "# Note: FCT is compensated for cross-DC flows (subtracts long-distance RTT)\n");
+			fflush(g_queryFlowFctFile);
+		} else {
+			std::cerr << "Warning: Cannot open query flow FCT file: " << queryFlowFctFile << std::endl;
+		}
+	}
 	//
 	// install RDMA driver
 	//
@@ -1758,7 +1959,7 @@ int main(int argc, char *argv[])
 	AutoAssignTopologyIps(n);
 	CalculateRoutes(n);
 	SetRoutingEntries();
-	
+
 	// ==================== 路由表审查区 ====================
 	std::cout << "\n================ [ROUTING TABLE CHECK] ================" << std::endl;
 	uint32_t total_empty_nodes = 0;
@@ -1949,13 +2150,7 @@ int main(int argc, char *argv[])
 	DiscoverWorkloadTopology(SERVER_COUNT, LEAF_COUNT, LEAF_SERVER_CAPACITY, SPINE_LEAF_CAPACITY, SPINE_COUNT);
 	InitializeWorkloadPorts();
 
-	long backgroundFlowCount = 0;
-	long totalBackgroundFlowSize = 0;
-	if (enableFlowFileBackground) {
-		std::string bgFile = backgroundFlowFile.empty() ? flow_file : backgroundFlowFile;
-		InstallFlowFileBackground(bgFile, backgroundFlowCount, totalBackgroundFlowSize);
-	}
-
+	// 生成背景流（CDF）
 	NS_LOG_INFO("Initialize CDF table");
 	struct cdf_table* cdfTable = new cdf_table();
 	init_cdf(cdfTable);
@@ -1967,17 +2162,15 @@ int main(int argc, char *argv[])
 	long flowCount = 0;
 	long totalFlowSize = 0;
 	InstallBackgroundWorkload(load, cdfTable, START_TIME, FLOW_LAUNCH_END_TIME, flowCount, totalFlowSize);
-	std::cout << "Total flow: " << flowCount << std::endl;
+	std::cout << "[BACKGROUND] Total background flows: " << flowCount << std::endl;
 	if (flowCount > 0)
-		std::cout << "Actual average flow size: " << static_cast<double>(totalFlowSize) / flowCount << std::endl;
+		std::cout << "[BACKGROUND] Average flow size: " << static_cast<double>(totalFlowSize) / flowCount << " bytes" << std::endl;
 
+	// 生成查询流（文件）
 	long queryFlowCount = 0;
 	long totalQueryFlowSize = 0;
-	InstallQueryWorkload(queryRequestRate, requestSize, START_TIME, FLOW_LAUNCH_END_TIME, queryFlowCount, totalQueryFlowSize);
-	std::cout << "Total Query: " << queryFlowCount << std::endl;
-	if (queryFlowCount > 0)
-		std::cout << "Actual average QuerySize: " << static_cast<double>(totalQueryFlowSize) / queryFlowCount << std::endl;
-	std::cout << "[WORKLOAD] flows.size() " << flows.size() << std::endl;
+	InstallQueryFlowFile(queryFlowFile, queryFlowCount, totalQueryFlowSize);
+	std::cout << "[WORKLOAD] Total flows: " << flows.size() << std::endl;
 
 	topof.close();
 	tracef.close();
@@ -1996,4 +2189,10 @@ int main(int argc, char *argv[])
 	NS_LOG_INFO("Done.");
 	endt = clock();
 	std::cout << (double)(endt - begint) / CLOCKS_PER_SEC << "\n";
+	
+	// Close query flow FCT file
+	if (g_queryFlowFctFile != nullptr) {
+		fclose(g_queryFlowFctFile);
+		std::cout << "[QUERY FLOW] Closed query flow FCT file: " << queryFlowFctFile << std::endl;
+	}
 }

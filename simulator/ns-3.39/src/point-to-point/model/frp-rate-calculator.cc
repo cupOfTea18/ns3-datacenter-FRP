@@ -20,7 +20,7 @@ FrpRateCalculator::FrpRateCalculator() {
     // FRP算法参数
     m_alpha = 0.1;
     m_beta = 0;
-    m_scaleFactor = 20.0;           // scaleFactor = 20
+    m_scaleFactor = 12.0;           // scaleFactor = 20
     m_tPeriodS = 40e-6;         // 40微秒 = 0.00004秒
     
 
@@ -105,6 +105,29 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
         }
     }
     // ROCC模式 (ccMode=14): lanbackoff保持为0
+
+    // ========== 跨域流识别 (ccMode=13) ==========
+    // 单计数器：仅在 qCurCell > qOldCell 且 qCurCell > (qRefCell + qThCell)
+    // 两个条件同时成立时累加，任一不满足则重置
+    // 连续10次达标则判定当前端口只为跨域流服务，抑制 lanbackoff
+    // 注意：先读计数器用于本轮决策，再更新计数器（避免误清零后读取到0）
+    if (ccMode == 13) {
+        const uint32_t CROSS_DC_CONSEC_LIMIT = 10;
+        // 1. 先用上一轮累计的计数器值决定是否抑制 lanbackoff
+        if (state.consecutiveCrossDcTrigger >= CROSS_DC_CONSEC_LIMIT) {
+            lanbackoff = 0.0;
+            std::cout << "[FRP CROSS-DC-ONLY] port=" << portId
+                      << " suppress lanbackoff (qCur=" << qCurCell
+                      << " > qRef+qTh=" << (qRefCell + qThCell)
+                      << " for " << state.consecutiveCrossDcTrigger << " cycles)" << std::endl;
+        }
+        // 2. 再更新计数器：两个条件同时成立则累加，否则重置
+        if (qCurCell > qOldCell && qCurCell > (qRefCell + qThCell)) {
+            state.consecutiveCrossDcTrigger++;
+        } else {
+            state.consecutiveCrossDcTrigger = 0;
+        }
+    }
     // 4. 计算新的公平速率 (在10Mbps局部量纲下)
     // 公式: F_new = F_old - α*(q_cur - q_ref + lanbackoff) - β*(q_cur - q_old)
     double alpha_term = m_alpha * (qCurCell - qRefCell + lanbackoff);

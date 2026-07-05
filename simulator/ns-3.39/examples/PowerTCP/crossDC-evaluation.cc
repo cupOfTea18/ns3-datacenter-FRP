@@ -383,6 +383,10 @@ uint32_t ip_to_node_id(Ipv4Address ip) {
 }
 
 void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q) {
+	if (fout == NULL) {
+		// FCT输出文件打开失败（路径不存在）时静默跳过
+		return;
+	}
 	uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
 	uint64_t base_rtt = pairRtt[sid][did], b = pairBw[sid][did];
 	uint32_t total_bytes = q->m_size + ((q->m_size - 1) / packet_payload_size + 1) * (CustomHeader::GetStaticWholeHeaderSize() - IntHeader::GetStaticSize()); // translate to the minimum bytes required (with header but no INT)

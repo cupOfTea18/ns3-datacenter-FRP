@@ -26,7 +26,11 @@ struct FrpPortState {
     double qOldBytes;           // 上一周期队列深度 (单位: Byte)
     bool isInitialized;         // 是否已初始化
 
-    FrpPortState() : currentFairRateBps(0.0), qOldBytes(0.0), isInitialized(false) {}
+    // 跨域流连续识别计数器：仅在两个条件同时成立时累加，任一不满足则重置
+    uint32_t consecutiveCrossDcTrigger;
+
+    FrpPortState() : currentFairRateBps(0.0), qOldBytes(0.0), isInitialized(false),
+                    consecutiveCrossDcTrigger(0) {}
 };
 
 /**
