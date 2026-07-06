@@ -37,7 +37,7 @@ FrpRateCalculator::FrpRateCalculator() {
 
 FrpRateCalculator::~FrpRateCalculator() {}
 
-double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, uint32_t currentQBytes, bool hasWanFlow, uint8_t ccMode) {
+double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, uint32_t currentQBytes, bool hasWanFlow, uint8_t ccMode, uint8_t consecutiveCrossDcTrigger) {
     
     FrpPortState& state = m_portStates[portId];
 
@@ -103,47 +103,19 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
         if ((qCurCell - qRefCell) > qThCell) {
             lanbackoff = m_scaleFactor * (qCurCell - qRefCell) * m_tPeriodS * k - qOldCell;
         }
+        // 上游判断为"跨域流独占"时，抑制本地退避项
+        if (consecutiveCrossDcTrigger >= 10) {
+            lanbackoff = 0.0;
+        }
     }
     // ROCC模式 (ccMode=14): lanbackoff保持为0
 
-    // ========== 跨域流识别 (ccMode=13) ==========
-    // 单计数器：仅在 qCurCell > qOldCell 且 qCurCell > (qRefCell + qThCell)
-    // 两个条件同时成立时累加，任一不满足则重置
-    // 连续10次达标则判定当前端口只为跨域流服务，抑制 lanbackoff
-    // 注意：先读计数器用于本轮决策，再更新计数器（避免误清零后读取到0）
-    if (ccMode == 13) {
-        const uint32_t CROSS_DC_CONSEC_LIMIT = 10;
-        // 1. 先用上一轮累计的计数器值决定是否抑制 lanbackoff
-        if (state.consecutiveCrossDcTrigger >= CROSS_DC_CONSEC_LIMIT) {
-            lanbackoff = 0.0;
-            std::cout << "[FRP CROSS-DC-ONLY] port=" << portId
-                      << " suppress lanbackoff (qCur=" << qCurCell
-                      << " > qRef+qTh=" << (qRefCell + qThCell)
-                      << " for " << state.consecutiveCrossDcTrigger << " cycles)" << std::endl;
-        }
-        // 2. 再更新计数器：两个条件同时成立则累加，否则重置
-        if (qCurCell > qOldCell && qCurCell > (qRefCell + qThCell)) {
-            state.consecutiveCrossDcTrigger++;
-        } else {
-            state.consecutiveCrossDcTrigger = 0;
-        }
-    }
     // 4. 计算新的公平速率 (在10Mbps局部量纲下)
     // 公式: F_new = F_old - α*(q_cur - q_ref + lanbackoff) - β*(q_cur - q_old)
     double alpha_term = m_alpha * (qCurCell - qRefCell + lanbackoff);
     double beta_term = m_beta * (qCurCell - qOldCell);
     double fNew_10Mbps = fOld_10Mbps - alpha_term - beta_term;
 
-    // 详细的逐项计算日志
-    std::cout << "[FRP FORMULA] port=" << portId
-              << " fOld=" << (fOld_10Mbps/100.0) << "G"
-              << " α*(qCur-qRef+lanbackoff)=" << (alpha_term/100.0) << "G"
-              << " [α=" << m_alpha << " * (" << qCurCell << "-" << qRefCell << "+" << lanbackoff << ")=" << (qCurCell-qRefCell+lanbackoff) << "]"
-              << " β*(qCur-qOld)=" << (beta_term/100.0) << "G"
-              << " [β=" << m_beta << " * (" << qCurCell << "-" << qOldCell << ")=" << (qCurCell-qOldCell) << "]"
-              << " fNew=" << (fNew_10Mbps/100.0) << "G"
-              << " hasWan=" << hasWanFlow
-              << std::endl;
 
     // ==================== 还原为标准全局量纲 ====================
     double fNewBps = fNew_10Mbps * 10000000.0;

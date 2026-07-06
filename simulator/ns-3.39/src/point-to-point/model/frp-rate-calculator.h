@@ -26,11 +26,7 @@ struct FrpPortState {
     double qOldBytes;           // 上一周期队列深度 (单位: Byte)
     bool isInitialized;         // 是否已初始化
 
-    // 跨域流连续识别计数器：仅在两个条件同时成立时累加，任一不满足则重置
-    uint32_t consecutiveCrossDcTrigger;
-
-    FrpPortState() : currentFairRateBps(0.0), qOldBytes(0.0), isInitialized(false),
-                    consecutiveCrossDcTrigger(0) {}
+    FrpPortState() : currentFairRateBps(0.0), qOldBytes(0.0), isInitialized(false) {}
 };
 
 /**
@@ -44,15 +40,16 @@ public:
 
     /**
      * 计算公平速率
-     * 
+     *
      * @param portId 端口号
      * @param linkBps 链路带宽 (单位: bps)
      * @param currentQBytes 当前队列深度 (单位: Byte)
      * @param hasWanFlow 是否有广域流
      * @param ccMode 拥塞控制模式 (13=FRP, 14=ROCC)
+     * @param consecutiveCrossDcTrigger 上游统计的"跨域流连续识别"计数 (由调用方负责维护)
      * @return 公平速率 (单位: bps)
      */
-    double CalculateFairRate(uint32_t portId, uint64_t linkBps, uint32_t currentQBytes, bool hasWanFlow, uint8_t ccMode = 13);
+    double CalculateFairRate(uint32_t portId, uint64_t linkBps, uint32_t currentQBytes, bool hasWanFlow, uint8_t ccMode, uint8_t consecutiveCrossDcTrigger);
 
     /**
      * 重置指定端口状态

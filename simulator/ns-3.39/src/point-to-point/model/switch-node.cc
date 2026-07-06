@@ -481,10 +481,6 @@ int SwitchNode::log2apprx(int x, int b, int m, int l) {
 void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
     if (!m_switchFeedbackEnabled) return;
 
-    // 提取入口端口（InterfaceTag在包被入队时由QbbNetDevice写上，标识这个包从哪个口进来）
-    InterfaceTag intfTag;
-    uint32_t inPort = (p->PeekPacketTag(intfTag) ? intfTag.GetPortId() : (uint32_t)-1);
-
     Ptr<Packet> cp = p->Copy();
     PppHeader ppp;
     cp->RemoveHeader(ppp);
@@ -499,7 +495,6 @@ void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
     static uint32_t dbgCount = 0;
     if (dbgCount < 5) {
         std::cout << "[TRACK DEBUG] Switch " << m_id << " port=" << outPort
-                  << " inPort=" << inPort
                   << " proto=0x" << std::hex << (uint32_t)proto << std::dec
                   << " src=" << srcIp << " dst=" << dstIp << std::endl;
         dbgCount++;
@@ -507,11 +502,10 @@ void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
 
     // 只跟踪UDP/TCP数据流
     if (proto == 0x11 || proto == 0x06) {
-        // 记录流端点 (srcIp=数据流源IP, dstIp=数据流目的IP, inPort=入口端口)
+        // 记录流端点 (srcIp=数据流源IP, dstIp=数据流目的IP)
         FlowEndpoints fe;
         fe.srcIp = srcIp;
         fe.dstIp = dstIp;
-        fe.inPort = inPort;
         m_activeFlows[outPort].insert(fe);
 
         // 提取源IP的DC-ID（IP第2段：11.{dc_id}.*.*）
@@ -601,11 +595,10 @@ void SwitchNode::PeriodicFeedbackLoop(Time interval) {
 
             std::cout << "  [FRP SEND] port=" << idx << " -> srcIp=" << fe.srcIp
                       << " FRP<SIp=" << frpSrcAddr << ", DIp=" << frpDstAddr << ">"
-                      << " inPort=" << fe.inPort
                       << " route:" << routeInfo << std::endl;
 
-            // 3. 调用发送函数完成发送（“入口即出口”原则：使用数据流入口端口作为反馈出口）
-            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, 0xFF, fe.inPort);
+            // 3. 调用发送函数完成发送，按 DIP 查路由表转发
+            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, 0xFF);
         }
     }
     
@@ -644,24 +637,47 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
     // 根据ccMode装配不同的控制包
     if (ccMode == 13 || ccMode == 14) {
         // ========== FRP 模式(13是ours, 14是ROCC) ==========
-        
-        // 1. 将全局标准单位的 link_bps 传给算法组件
+
+        // ===== 跨域流连续识别 (FRP 专用) =====
+        // 1. 读出上周期累计的计数器和上周期队列深度
+        const uint32_t CROSS_DC_CONSEC_LIMIT = 10;
+        uint32_t crossDcCounter = m_crossDcCounter[ifIndex];
+        uint32_t prevQBytes    = m_prevQBytes[ifIndex];
+
+        // 2. 本轮采样转换成 cell 单位，与 frp-rate-calculator.cc 保持一致
+        const double qRefBytesLocal = (link_bps >= 200ULL * 1000000000ULL) ? 1048576.0 : 307200.0;
+        const double qThBytesLocal  = 307200.0;   // 300KB 与 frp-rate-calculator.cc 一致
+        const double qCurCellLocal  = static_cast<double>(currentQDepth) / 600.0;
+        const double qRefCellLocal  = qRefBytesLocal / 600.0;
+        const double qThCellLocal   = qThBytesLocal / 600.0;
+        const double qOldCellLocal  = static_cast<double>(prevQBytes) / 600.0;
+
+        // 3. 调用 FRP 计算器。本轮决策使用"上一轮累计"的计数器。
         double calculatedRateBps = m_frpCalculator.CalculateFairRate(
-            ifIndex, 
-            link_bps, 
-            currentQDepth, 
-            ccMode-13,
-            ccMode
+            ifIndex,
+            link_bps,
+            currentQDepth,
+            ccMode - 13,
+            ccMode,
+            static_cast<uint8_t>(crossDcCounter > 255 ? 255 : crossDcCounter)
         );
-        
+
+        // 4. 更新计数器：两个条件同时成立才累加，任一不满足则重置
+        if (qCurCellLocal > qOldCellLocal && qCurCellLocal > (qRefCellLocal + qThCellLocal)) {
+            m_crossDcCounter[ifIndex] = (crossDcCounter < CROSS_DC_CONSEC_LIMIT + 5)
+                                         ? crossDcCounter + 1 : crossDcCounter;
+        } else {
+            m_crossDcCounter[ifIndex] = 0;
+        }
+        // 5. 保存本周期队列深度，供下周期对比
+        m_prevQBytes[ifIndex] = currentQDepth;
+
         // 2. 严格遵循控制包字段的局部量纲换算
         uint16_t fairRateField = static_cast<uint16_t>(calculatedRateBps / 10000000.0);  // 换算为 10Mbps 单元
-        // q_dev = qCur - qRef (Cell单位), 小于0则=0
-        double qRefBytes = (link_bps >= 200ULL * 1000000000ULL) ? 1048576.0 : 307200.0;  // 200G:1MB, 100G:300KB (must match frp-rate-calculator.cc)
-        double qCurCell = static_cast<double>(currentQDepth) / 600.0;
-        double qRefCell = qRefBytes / 600.0;
+        double qRefBytes = qRefBytesLocal;
+        double qCurCell = qCurCellLocal;
+        double qRefCell = qRefCellLocal;
         double qDevCell = qCurCell - qRefCell;
-      //  if (qDevCell < 0) qDevCell = 0;
         int16_t qDevField   = static_cast<int16_t>(qDevCell);  // 换算为 600B Cell 单元 (可为负值)
         uint16_t linkRateField = static_cast<uint16_t>(link_bps / 10000000.0);  // 换算为 10Mbps 单元
 
@@ -670,21 +686,21 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         // 节点ID范围通常在0-63，确保12位足够且无冲突
         uint16_t switchNodeId = static_cast<uint16_t>(m_id & 0x0FFF);
         uint16_t cpId = (switchNodeId << 4) | (ifIndex & 0x0F);
-        
+
         // 调试：输出linkRate计算
-        std::cout << "  [FRP CALC] Switch " << m_id << " port=" << ifIndex 
-                  << " link_bps=" << link_bps << " linkRateField=" << linkRateField 
+        std::cout << "  [FRP CALC] Switch " << m_id << " port=" << ifIndex
+                  << " link_bps=" << link_bps << " linkRateField=" << linkRateField
                   << " fairRateField=" << fairRateField << " qDevField=" << qDevField
                   << " (qCur=" << qCurCell << " qRef=" << qRefCell << ")"
                   << " type=" << ccMode << std::endl;
-        
+
         // 结构化数据日志 (CSV格式，便于画图，使用stderr确保无缓冲)
         double fairRateMbps = calculatedRateBps / 1e6;
         double qCurKB = static_cast<double>(currentQDepth) / 1024.0;
         fprintf(stderr, "[FRP_DATA_SW] %.9f %u %u %.2f %.2f %.2f %d\n",
                 Simulator::Now().GetSeconds(), m_id, ifIndex,
                 fairRateMbps, qCurKB, (qDevField * 600.0 / 1024.0), ccMode);
-        
+
         // 3. 装载并打包
         Icmpv4FrpFeedback frpHeader;
         frpHeader.SetFairRate(fairRateField);
@@ -693,7 +709,7 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         frpHeader.SetType(ccMode - 13);
         frpHeader.SetLinkRate(linkRateField);  // 把带宽塞进 15bit 空间传出
         payload->AddHeader(frpHeader);
-        
+
         // 4. 广域流标志已随周期清空，无需单独清除
 
         // 5. 添加 ICMP 头部
@@ -702,12 +718,11 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         icmpHeader.SetCode(0);
         icmpHeader.EnableChecksum();
         payload->AddHeader(icmpHeader);
-        
+
         NS_LOG_DEBUG("FRP Encap -> FairRate: " << fairRateField << "*10Mbps, "
                      << "LinkRate: " << linkRateField << "*10Mbps, "
                      << "QDev: " << qDevField << " cells(600B)");
     }
-
     else if (ccMode == 15) {
         // ========== 未来扩展：其他自定义模式 ==========
         NS_LOG_DEBUG("Custom mode " << ccMode << " not implemented");
@@ -729,8 +744,7 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
 void SwitchNode::SendControlPacket(Ipv4Address srcAddr,
                                     Ipv4Address dstAddr,
                                     Ptr<Packet> payload,
-                                    uint8_t l3Prot,
-                                    uint32_t inPort) {
+                                    uint8_t l3Prot) {
     Ptr<Packet> p = payload->Copy();
 
     // 构造CustomHeader (仿真平台的标准封装)
@@ -764,32 +778,20 @@ void SwitchNode::SendControlPacket(Ipv4Address srcAddr,
     std::cout << "  [FRP SEND] SendToDev: src=" << srcAddr << " dst=" << dstAddr
               << " pktSize=" << p->GetSize() << " ch.l3Prot=0x" << std::hex << (int)ch.l3Prot << std::dec << std::endl;
 
-    // 选择出端口
-    // 原则：入口即出口 (input port = output port)
-    //   当交换机记录了入端口 (inPort != -1) 且入端口不是该流的出端口时，
-    //   使用入端口作为反馈出口，能保证反馈沿相同路径反向回源。
-    //   退化逻辑：若 inPort 不可用 (==-1 或 ==出端口)，则退化到查路由表走第一个可用端口。
+    // 选择出端口：仅根据 DIP 查路由表
     uint32_t outPort = (uint32_t)-1;
-    bool useInPortAsOut = (inPort != (uint32_t)-1) && (inPort < m_devices.size()) && m_devices[inPort]->IsLinkUp();
-
-    if (useInPortAsOut) {
-        outPort = inPort;
-        std::cout << "  [FRP SEND] Using inPort=" << inPort << " as outPort (input-equals-output principle)" << std::endl;
-    } else {
-        // 退化：查路由表
-        auto entry = m_rtTable.find(dstAddr.Get());
-        if (entry != m_rtTable.end() && !entry->second.empty()) {
-            outPort = entry->second[0];  // 取第一个可用端口
-            std::cout << "  [FRP SEND] Fallback to route table outPort=" << outPort << std::endl;
-        }
+    auto entry = m_rtTable.find(dstAddr.Get());
+    if (entry != m_rtTable.end() && !entry->second.empty()) {
+        outPort = entry->second[0];  // 取第一个可用端口
+        std::cout << "  [FRP SEND] Route-table outPort=" << outPort
+                  << " (dst=" << dstAddr << ")" << std::endl;
     }
 
     if (outPort != (uint32_t)-1 && outPort < m_devices.size()) {
         m_devices[outPort]->SwitchSend(0, p, ch);  // qIndex=0, 最高优先级
         std::cout << "  [FRP SEND] Sent via port " << outPort << std::endl;
     } else {
-        std::cout << "  [FRP SEND] ERROR: No valid outPort for dst=" << dstAddr
-                  << " (inPort=" << inPort << ")" << std::endl;
+        std::cout << "  [FRP SEND] ERROR: No valid outPort for dst=" << dstAddr << std::endl;
     }
 }
 

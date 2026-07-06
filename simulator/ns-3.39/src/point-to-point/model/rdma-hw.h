@@ -62,7 +62,6 @@ public:
 	int ReceiveCnp(Ptr<Packet> p, CustomHeader &ch);
 	int ReceiveAck(Ptr<Packet> p, CustomHeader &ch); // handle both ACK and NACK
 	int ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch); // handle ICMP packets
-	int ReceiveFrpFeedback(Ptr<Packet> p, CustomHeader &ch); // handle FRP feedback
 	int Receive(Ptr<Packet> p, CustomHeader &ch); // callback function that the QbbNetDevice should use when receive packets. Only NIC can call this function. And do not call this upon PFC
 
 	void CheckandSendQCN(Ptr<RdmaRxQueuePair> q);

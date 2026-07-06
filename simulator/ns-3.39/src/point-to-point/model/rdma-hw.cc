@@ -1399,22 +1399,7 @@ int RdmaHw::ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch) {
 	return 0;
 }
 
-/**
- * FRP调速策略核心逻辑
- *
- * 调速规则：
- * 1. 非退避流（type=1 或 源/目的不在同一DC）：r = F（公平速率）
- * 2. 退避内部流（type=0 且 源/目的在同一DC）+ qDev < q_th(300KB)：
- *    - qDev=0: r = 当前速率 + deltaR (AI)
- *    - qDev>0: r = 当前速率 - deltaR (MD)
- *    - deltaR = 200Mbps
- * 3. 退避内部流 + qDev >= q_th：r = max(F_min, F - gamma*qDev)
- *    - gamma = scaleFactor / N, scaleFactor=6
- *    - N = linkRate / F, N∈[1,100]
- *
- * 瓶颈更新：若 r < 当前速率 或 cpId == 上次瓶颈cpId，则更新瓶颈
- * 速率边界：max = linkBps*0.95, min = 100Mbps
- */
+
 void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t qDev, uint16_t cpId, bool type, uint16_t linkRate, Ipv4Address flowDstIp) {
 	// 1. 还原为全局标准单位 (bps, Bytes)
 	double fairRateBps = static_cast<double>(fairRate) * 10000000.0;       // 10Mbps -> bps
@@ -1473,7 +1458,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		} else {
 			// 策略2: 基于公平速率的退避 r = max(F_min, F - gamma*qDev)
 			
-			double scaleFactor = 20.0;
+			double scaleFactor = 12.0;
 			double gamma = scaleFactor / N;
 			// gamma*qDev 在 600B Cell 单位下计算，再转为 bps
 			// r = F - gamma * qDev (qDev是cell数，gamma是无量纲，结果在10Mbps单位)
@@ -1573,43 +1558,6 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		currentRateBps/1e9,
 		rBps/1e9,
 		shouldUpdateBottleneck ? "UPDATED" : "SKIP");
-}
-
-/**
- * 接收并解析FRP反馈包
- * 
- * FRP包结构：[Ethernet][IPv4][ICMP(Type=42)][FRP Payload(8 bytes)]
- * FRP Payload: fairRate(16bit) + qDepth(16bit) + cpId(16bit) + hasWan(1bit) + linkRate(15bit)
- * 
- * 当前只解析参数并打印日志，不进行速率限制
- */
-int RdmaHw::ReceiveFrpFeedback(Ptr<Packet> p, CustomHeader &ch) {
-	// 解析FRP头部 (ns-3自动调用Deserialize)
-	Icmpv4FrpFeedback frpFb;
-	p->RemoveHeader(frpFb);
-	
-	// 提取FRP参数
-	uint16_t fairRate = frpFb.GetFairRate();      // 公平速率 (单位: 10Mbps)
-	uint16_t qDepth = frpFb.GetQDepth();          // 队列深度 (单位: 600B Cell)
-	uint16_t cpId = frpFb.GetCpId();              // 拥塞点ID (端口号)
-	bool type = frpFb.GetType();                  // 算法类型 (false=FRP, true=ROCC)
-	uint16_t linkRate = frpFb.GetLinkRate();      // 链路带宽 (单位: 10Mbps)
-	
-	// 打印解析结果
-	std::cout << "[FRP RECV] Host t=" << Simulator::Now().GetSeconds()
-	          << " fairRate=" << fairRate << "*10Mbps (=" 
-	          << (fairRate * 10.0) << "Mbps), "
-	          << "qDepth=" << qDepth << " cells (=" 
-	          << (qDepth * 600) << "Bytes), "
-	          << "cpId=" << cpId << ", "
-	          << "type=" << (type ? "true" : "false") << ", "
-	          << "linkRate=" << linkRate << "*10Mbps (="
-	          << (linkRate * 10.0) << "Mbps)" << std::endl;
-	
-	// TODO: 后续根据fairRate进行速率调整
-	// 当前版本只解析参数，不执行速率限制
-	
-	return 0;
 }
 
 }
