@@ -1888,7 +1888,7 @@ int main(int argc, char *argv[])
 			else if (algorithm == 10) algo_suffix = "dctcp";
 			else algo_suffix = "unknown";
 			
-			queryFlowFctFile = "/home/gj/ns3/results/workload/fct/query-flow-" + algo_suffix + ".txt";
+			queryFlowFctFile = "/home/shemuping/newCode/ns3-FRP/results/workload/fct/query-flow-" + algo_suffix + ".txt";
 		}
 		g_queryFlowFctFile = fopen(queryFlowFctFile.c_str(), "w");
 		if (g_queryFlowFctFile != nullptr) {

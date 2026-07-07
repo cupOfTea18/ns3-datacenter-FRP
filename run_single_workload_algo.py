@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 crossDC workload algorithm runner script.
-Default hybrid traffic mode (flow-file background + Alistorage CDF foreground), just specify algorithm:
+Default hybrid traffic mode (flow-file foreground + Alistorage CDF background), just specify algorithm:
     python3 run_single_workload_algo.py 13 FRP --load 0.2 --duration 0.02 
 
 Disable background flow, back to workload-only mode:

@@ -14,9 +14,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-NS3_DIR = "/home/gj/ns3/simulator/ns-3.39"
-DUMP_DIR = "/home/gj/ns3/dump" 
-RESULTS_DIR = "/home/gj/ns3/results"
+NS3_DIR = "/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39"
+DUMP_DIR = "/home/shemuping/newCode/ns3-FRP/dump" 
+RESULTS_DIR = "/home/shemuping/newCode/ns3-FRP/results"
 FCT_DIR = os.path.join(RESULTS_DIR, "fct")
 PFC_DIR = os.path.join(RESULTS_DIR, "pfc")
 CONFIG_FILE = "examples/PowerTCP/config.txt"  # 使用config.txt而不是config-burst.txt
@@ -151,7 +151,7 @@ def run_and_plot(ccMode, algo_name):
     # 4.5 解析 FCT 文件 (单位: ns-3 timestep, 默认 = ns)
     fct_ns_list = []  # 各流实际 FCT (纳秒)
     fct_standalone_list = []  # 独立传输 FCT (纳秒)
-    fct_file_path = "/home/gj/ns3/results/fct/fct.txt"
+    fct_file_path = "/home/shemuping/newCode/ns3-FRP/results/fct/fct.txt"
     if os.path.exists(fct_file_path):
         with open(fct_file_path, 'r') as ff:
             for fl in ff:
@@ -244,7 +244,7 @@ def run_and_plot(ccMode, algo_name):
             print(f"Slowdown 平均: {np.mean(slowdown):.2f}x")
             print(f"Slowdown 最大: {max(slowdown):.2f}x")
     else:
-        print("FCT 数据: 无 (检查 /home/gj/ns3/results/fct/fct.txt)")
+        print("FCT 数据: 无 (检查 /home/shemuping/newCode/ns3-FRP/results/fct/fct.txt)")
 
     print(f"\n图像文件: {output_file}")
     print(f"{'='*80}\n")

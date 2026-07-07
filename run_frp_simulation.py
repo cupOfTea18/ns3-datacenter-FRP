@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # 配置
-NS3_DIR = "/home/gj/ns3/simulator/ns-3.39"
-RESULTS_DIR = "/home/gj/ns3/results"
+NS3_DIR = "/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39"
+RESULTS_DIR = "/home/shemuping/newCode/ns3-FRP/results"
 DEFAULT_CONF = "examples/PowerTCP/config.txt"
 DEFAULT_ALGORITHM = 13
 DEFAULT_DURATION = 0.020  # 20ms

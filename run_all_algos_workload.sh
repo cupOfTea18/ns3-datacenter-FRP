@@ -2,7 +2,7 @@
 # 批量运行5种算法的 workload 仿真
 # 用法:
 #   ./run_all_algos_workload.sh                     # 使用默认参数 (load=0.2, duration=0.02)
-#   ./run_all_algos_workload.sh --load 0.3 --duration 0.05
+#   ./run_all_algos_workload.sh --load 0.2 --duration 0.02
 #   ./run_all_algos_workload.sh --enableFlowFileBackground 0
 
 echo "=========================================="
