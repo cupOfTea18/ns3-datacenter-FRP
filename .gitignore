@@ -62,6 +62,7 @@ results/
 
 # ---------- IDE 配置 ----------
 .vscode/
+.codex/
 .idea/
 *.sublime-project
 *.sublime-workspace

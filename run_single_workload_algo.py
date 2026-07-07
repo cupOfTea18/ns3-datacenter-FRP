@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 crossDC workload algorithm runner script.
-Default hybrid traffic mode (flow-file foreground + Alistorage CDF background), just specify algorithm:
-    python3 run_single_workload_algo.py 13 FRP --load 0.2 --duration 0.02 
-
-Disable background flow, back to workload-only mode:
-    python3 run_single_workload_algo.py 13 FRP --enableFlowFileBackground 0 --load 0.2 --duration 0.02
+Workload parameters live in simulator/ns-3.39/examples/PowerTCP/config-workload.txt.
+Specify only the algorithm here, for example:
+    python3 run_single_workload_algo.py 13 FRP
 """
 
 import argparse
@@ -18,63 +16,58 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Import for query flow FCT analysis
-def analyze_query_flow_fct(algo_name, load):
-    """Analyze query flow FCT and print statistics"""
-    query_fct_file = os.path.join(FCT_DIR, f"query-flow-{algo_name.lower()}.txt")
-    
+
+def analyze_query_flow_fct(query_fct_file):
+    """Analyze query flow FCT and print statistics."""
     if not os.path.exists(query_fct_file):
         print(f"Query flow FCT file not found: {query_fct_file}")
         return
-    
+
     print(f"\n{'='*80}")
-    print(f"Query Flow FCT Analysis")
+    print("Query Flow FCT Analysis")
     print(f"{'='*80}")
     print(f"File: {query_fct_file}\n")
-    
-    # Read FCT file
+
     flows = []
-    with open(query_fct_file, 'r') as f:
+    with open(query_fct_file, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            if line.startswith('#'):
+            if line.startswith("#"):
                 continue
             parts = line.strip().split()
             if len(parts) >= 8:
                 flows.append({
-                    'src': int(parts[0]),
-                    'dst': int(parts[1]),
-                    'pg': int(parts[2]),
-                    'dport': int(parts[3]),
-                    'size': int(parts[4]),
-                    'start_ns': int(parts[5]),
-                    'fct_ns': int(parts[6]),
-                    'is_cross_dc': int(parts[7]),
+                    "src": int(parts[0]),
+                    "dst": int(parts[1]),
+                    "pg": int(parts[2]),
+                    "dport": int(parts[3]),
+                    "size": int(parts[4]),
+                    "start_ns": int(parts[5]),
+                    "fct_ns": int(parts[6]),
+                    "is_cross_dc": int(parts[7]),
                 })
-    
+
     if not flows:
         print("No query flows found!")
         return
-    
-    # Print details
+
     print(f"{'No.':<6} {'Src':<8} {'Dst':<8} {'PG':<6} {'Dport':<8} {'Size(MB)':<10} {'Start(ms)':<12} {'FCT(ms)':<12} {'Cross-DC':<10}")
-    print('='*80)
-    
+    print("=" * 80)
+
     for idx, flow in enumerate(flows, 1):
-        size_mb = flow['size'] / (1024 * 1024)
-        start_ms = flow['start_ns'] / 1e6
-        fct_ms = flow['fct_ns'] / 1e6
-        cross_dc = "Yes" if flow['is_cross_dc'] == 1 else "No"
+        size_mb = flow["size"] / (1024 * 1024)
+        start_ms = flow["start_ns"] / 1e6
+        fct_ms = flow["fct_ns"] / 1e6
+        cross_dc = "Yes" if flow["is_cross_dc"] == 1 else "No"
         print(f"{idx:<6} {flow['src']:<8} {flow['dst']:<8} {flow['pg']:<6} {flow['dport']:<8} "
               f"{size_mb:<10.2f} {start_ms:<12.3f} {fct_ms:<12.3f} {cross_dc:<10}")
-    
-    print('='*80)
-    
-    # Statistics
-    fct_values = np.array([f['fct_ns'] / 1e6 for f in flows])
-    cross_dc_flows = [f for f in flows if f['is_cross_dc'] == 1]
-    intra_dc_flows = [f for f in flows if f['is_cross_dc'] == 0]
-    
-    print(f"\nStatistics:")
+
+    print("=" * 80)
+
+    fct_values = np.array([f["fct_ns"] / 1e6 for f in flows])
+    cross_dc_flows = [f for f in flows if f["is_cross_dc"] == 1]
+    intra_dc_flows = [f for f in flows if f["is_cross_dc"] == 0]
+
+    print("\nStatistics:")
     print(f"  Total query flows: {len(flows)}")
     print(f"  Cross-DC flows: {len(cross_dc_flows)}")
     print(f"  Intra-DC flows: {len(intra_dc_flows)}")
@@ -84,33 +77,63 @@ def analyze_query_flow_fct(algo_name, load):
     print(f"  P50 FCT: {np.percentile(fct_values, 50):.3f} ms")
     print(f"  P95 FCT: {np.percentile(fct_values, 95):.3f} ms")
     print(f"  P99 FCT: {np.percentile(fct_values, 99):.3f} ms")
-    
-    # Cross-DC vs Intra-DC comparison
+
     if cross_dc_flows and intra_dc_flows:
-        cross_fct = np.array([f['fct_ns'] / 1e6 for f in cross_dc_flows])
-        intra_fct = np.array([f['fct_ns'] / 1e6 for f in intra_dc_flows])
-        print(f"\n  Cross-DC vs Intra-DC FCT Comparison:")
+        cross_fct = np.array([f["fct_ns"] / 1e6 for f in cross_dc_flows])
+        intra_fct = np.array([f["fct_ns"] / 1e6 for f in intra_dc_flows])
+        print("\n  Cross-DC vs Intra-DC FCT Comparison:")
         print(f"    Cross-DC:  avg={np.mean(cross_fct):.3f} ms, min={np.min(cross_fct):.3f} ms, max={np.max(cross_fct):.3f} ms")
         print(f"    Intra-DC:  avg={np.mean(intra_fct):.3f} ms, min={np.min(intra_fct):.3f} ms, max={np.max(intra_fct):.3f} ms")
-        print(f"    Note: Cross-DC FCT has been compensated (subtracted long-distance RTT)")
-    
+        print("    Note: Cross-DC FCT has been compensated (subtracted long-distance RTT)")
+
     print(f"{'='*80}\n")
+
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 NS3_DIR = os.path.join(REPO_ROOT, "simulator/ns-3.39")
 CONFIG_FILE = "examples/PowerTCP/config-workload.txt"
-DEFAULT_CDF = "examples/PowerTCP/Alistorage.txt"
 DUMP_DIR = os.path.join(REPO_ROOT, "dump/workload")
 RESULTS_DIR = os.path.join(REPO_ROOT, "results/workload")
 FCT_DIR = os.path.join(RESULTS_DIR, "fct")
 PFC_DIR = os.path.join(RESULTS_DIR, "pfc")
 
 
-def run_and_plot(args):
-    """Run workload simulation and generate plots"""
+def load_tag(value):
+    try:
+        percent = float(value) * 100
+    except (TypeError, ValueError):
+        return str(value).replace(".", "p")
+    if percent.is_integer():
+        return f"{int(percent)}pct"
+    return f"{percent:g}pct".replace(".", "p")
 
+
+def read_config_value(content, key, default=None):
+    pattern = rf"^\s*{re.escape(key)}\s+(\S+)"
+    match = re.search(pattern, content, re.MULTILINE)
+    return match.group(1) if match else default
+
+
+def resolve_output_path(path):
+    if os.path.isabs(path):
+        return path
+    return os.path.join(REPO_ROOT, path)
+
+
+def render_template(template, suffix, args, load):
+    return template.format(
+        suffix=suffix,
+        algo=args.algo_name.lower(),
+        ccMode=args.ccMode,
+        load=load,
+        seed=args.randomSeed,
+    )
+
+
+def run_and_plot(args):
+    """Run workload simulation and generate plots."""
     print(f"\n{'='*80}")
-    print(f"Simulation: {args.algo_name} (ccMode={args.ccMode}, load={args.load})")
+    print(f"Simulation: {args.algo_name} (ccMode={args.ccMode})")
     print(f"{'='*80}\n")
 
     os.makedirs(DUMP_DIR, exist_ok=True)
@@ -118,74 +141,55 @@ def run_and_plot(args):
     os.makedirs(FCT_DIR, exist_ok=True)
     os.makedirs(PFC_DIR, exist_ok=True)
 
-    # 1. Update configuration file
     config_path = os.path.join(NS3_DIR, CONFIG_FILE)
     with open(config_path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    suffix = f"{args.algo_name.lower()}_load{args.load}"
-    fct_out = os.path.join(FCT_DIR, f"fct_{suffix}.txt")
-    pfc_out = os.path.join(PFC_DIR, f"pfc_{suffix}.txt")
-    content = re.sub(r"FCT_OUTPUT_FILE\s+\S+", f"FCT_OUTPUT_FILE {fct_out}", content)
-    content = re.sub(r"PFC_OUTPUT_FILE\s+\S+", f"PFC_OUTPUT_FILE {pfc_out}", content)
+    load = read_config_value(content, "LOAD", "default")
+    suffix = f"{args.algo_name.lower()}_load{load_tag(load)}"
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        f.write(content)
+    fct_template = read_config_value(
+        content,
+        "FCT_OUTPUT_TEMPLATE",
+        os.path.join(FCT_DIR, "fct_{suffix}.txt"),
+    )
+    pfc_template = read_config_value(
+        content,
+        "PFC_OUTPUT_TEMPLATE",
+        os.path.join(PFC_DIR, "pfc_{suffix}.txt"),
+    )
+    query_template = read_config_value(
+        content,
+        "QUERY_FCT_OUTPUT_TEMPLATE",
+        os.path.join(FCT_DIR, "query-flow-{suffix}.txt"),
+    )
+
+    fct_out = resolve_output_path(render_template(fct_template, suffix, args, load))
+    pfc_out = resolve_output_path(render_template(pfc_template, suffix, args, load))
+    query_fct_out = resolve_output_path(render_template(query_template, suffix, args, load))
+    for path in (fct_out, pfc_out, query_fct_out):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
 
     config = CONFIG_FILE
-    log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}.log")
+    log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{load_tag(load)}.log")
 
     try:
-        # 2. Build
         with open(log_file, "w", encoding="utf-8") as log:
             log.write("Building crossDC-evaluation-workload...\n")
             subprocess.run(["./ns3", "build", "crossDC-evaluation-workload"], cwd=NS3_DIR,
                            stdout=log, stderr=subprocess.STDOUT, check=True)
-            log.write("✓ Build complete\n\n")
+            log.write("Build complete\n\n")
 
-        # 3. Run simulation
-        flow_end = args.flowEnd if args.flowEnd is not None else max(args.start, args.duration * 0.9)
-        cdf_path = args.cdf
-        if not os.path.isabs(cdf_path):
-            root_cdf_path = os.path.join(REPO_ROOT, cdf_path)
-            if os.path.exists(root_cdf_path):
-                cdf_path = root_cdf_path
-
-        # Handle query flow file path
-        query_path = args.queryFlowFile
-        if not os.path.isabs(query_path):
-            # Try REPO_ROOT first
-            root_query_path = os.path.join(REPO_ROOT, query_path)
-            if os.path.exists(root_query_path):
-                query_path = root_query_path
-            else:
-                # Then try PowerTCP directory
-                powertcp_query_path = os.path.join(
-                    REPO_ROOT, "simulator/ns-3.39/examples/PowerTCP", query_path
-                )
-                if os.path.exists(powertcp_query_path):
-                    query_path = powertcp_query_path
-                else:
-                    print(f"⚠ Warning: Cannot find query flow file {query_path}")
-                    query_path = ""  # If not found, don't add this parameter
-
-        log_file = os.path.join(DUMP_DIR, f"algo_cc{args.ccMode}_load{args.load}.log")
         binary = os.path.join(NS3_DIR, "build/examples/PowerTCP/ns3.39-crossDC-evaluation-workload-optimized")
         cmd = [
             binary,
             f"--conf={config}",
             f"--algorithm={args.ccMode}",
-            f"--cdfFileName={cdf_path}",
-            f"--load={args.load}",
-            f"--START_TIME={args.start}",
-            f"--END_TIME={args.duration}",
-            f"--FLOW_LAUNCH_END_TIME={flow_end}",
             f"--randomSeed={args.randomSeed}",
+            f"--fctOutputFile={fct_out}",
+            f"--pfcOutputFile={pfc_out}",
+            f"--queryFlowFctFile={query_fct_out}",
         ]
-        
-        # Add query flow file (if found)
-        if query_path:
-            cmd.append(f"--queryFlowFile={query_path}")
 
         print("Running workload simulation...")
         with open(log_file, "a", encoding="utf-8") as log:
@@ -193,15 +197,12 @@ def run_and_plot(args):
                            timeout=args.timeout, check=True)
 
         log_size = os.path.getsize(log_file)
-        print(f"✓ Simulation complete ({log_size/1024:.1f}KB)\n")
+        print(f"Simulation complete ({log_size/1024:.1f}KB)\n")
 
-        # 4. Parse log
         print("Parsing log...")
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
-        # Collect queue data from ALL switches/ports to auto-identify congestion points
-        # Key: (switch_id, port_id) -> {"times": [], "queues": []}
         all_queue_data = {}
         flow_tp = {}
         workload_lines = []
@@ -212,13 +213,13 @@ def run_and_plot(args):
             if "[WORKLOAD]" in line or "[WORKLOAD LEAF]" in line:
                 workload_lines.append(line)
 
-            m = re.search(r"Total flow:\s+(\d+)", line)
+            m = re.search(r"Total flows?:\s+(\d+)", line, re.IGNORECASE)
             if m:
                 totals["flow"] = int(m.group(1))
             m = re.search(r"Total Query:\s+(\d+)", line)
             if m:
                 totals["query"] = int(m.group(1))
-            m = re.search(r"Total background flow:\s+(\d+)", line)
+            m = re.search(r"Total background flows?:\s+(\d+)", line, re.IGNORECASE)
             if m:
                 totals["background"] = int(m.group(1))
 
@@ -239,7 +240,7 @@ def run_and_plot(args):
                     sw = int(parts[2])
                     port = int(parts[3])
                     t_ms = float(parts[1]) * 1000
-                    q_kb = float(parts[5])  # qCur in KB
+                    q_kb = float(parts[5])
                     all_queue_data.setdefault((sw, port), {"times": [], "queues": []})
                     all_queue_data[(sw, port)]["times"].append(t_ms)
                     all_queue_data[(sw, port)]["queues"].append(q_kb)
@@ -253,41 +254,32 @@ def run_and_plot(args):
                 flow_tp[key]["times"].append(float(m.group(7)) * 1000)
                 flow_tp[key]["rates"].append(float(m.group(6)) / 1e9)
 
-        # Identify congestion points: filter switch+port pairs with sufficient samples
-        # and sort by average queue length (top bottlenecks)
         MIN_SAMPLES = 5
         congestion_points = []
         for (sw, port), data in all_queue_data.items():
             queues = data["queues"]
             if len(queues) < MIN_SAMPLES:
                 continue
-            avg_q = float(np.mean(queues))
-            max_q = float(np.max(queues))
             congestion_points.append({
-                "switch": sw, "port": port,
-                "avg_q_kb": avg_q, "max_q_kb": max_q,
+                "switch": sw,
+                "port": port,
+                "avg_q_kb": float(np.mean(queues)),
+                "max_q_kb": float(np.max(queues)),
                 "n_samples": len(queues),
-                "times": data["times"], "queues": queues,
+                "times": data["times"],
+                "queues": queues,
             })
-        # Sort by average queue length, descending
         congestion_points.sort(key=lambda x: x["avg_q_kb"], reverse=True)
-        top_n = min(5, len(congestion_points))
-        top_congestion = congestion_points[:top_n]
-
-        # Backward compatibility: keep queue_time/queue_kb pointing to top congestion point
-        if top_congestion:
-            queue_time = top_congestion[0]["times"]
-            queue_kb = top_congestion[0]["queues"]
+        top_congestion = congestion_points[:min(5, len(congestion_points))]
 
         active_flows = sorted(flow_tp)
         if top_congestion:
             top_desc = ", ".join([f"SW{cp['switch']}p{cp['port']}(avg={cp['avg_q_kb']:.0f}KB)"
                                   for cp in top_congestion[:3]])
-            print(f"✓ Parse complete: {len(all_queue_data)} switch-port pairs monitored, top bottlenecks: {top_desc}, receiver-side flows {len(active_flows)}")
+            print(f"Parse complete: {len(all_queue_data)} switch-port pairs monitored, top bottlenecks: {top_desc}, receiver-side flows {len(active_flows)}")
         else:
-            print(f"✓ Parse complete: {len(all_queue_data)} switch-port pairs, receiver-side flows {len(active_flows)}")
+            print(f"Parse complete: {len(all_queue_data)} switch-port pairs, receiver-side flows {len(active_flows)}")
 
-        # 5. Plot
         print("Generating plots...")
         plt.rcParams["font.family"] = "DejaVu Sans"
         plt.rcParams["axes.unicode_minus"] = False
@@ -295,7 +287,7 @@ def run_and_plot(args):
                   "magenta", "olive", "teal", "navy", "maroon", "coral", "gold", "indigo"]
 
         fig, axes = plt.subplots(2, 1, figsize=(18, 12), sharex=True)
-        fig.suptitle(f"{args.algo_name} (ccMode={args.ccMode}) - Workload Traffic Analysis, load={args.load}",
+        fig.suptitle(f"{args.algo_name} (ccMode={args.ccMode}) - Workload Traffic Analysis, load={load}",
                      fontsize=18, fontweight="bold")
 
         ax2 = axes[0]
@@ -306,9 +298,7 @@ def run_and_plot(args):
             n = min(len(times), len(rates))
             if n == 0:
                 continue
-            times = times[:n]
-            rates = rates[:n]
-            ax2.plot(times, rates,
+            ax2.plot(times[:n], rates[:n],
                      color=colors[idx % len(colors)], lw=2,
                      label=f"Flow {key[0]}->{key[1]} (sp={key[2]})", alpha=0.85)
         ax2.set_ylabel("Receive Throughput (Gbps)", fontsize=14, fontweight="bold")
@@ -319,7 +309,6 @@ def run_and_plot(args):
         ax2.tick_params(labelsize=11)
 
         ax3 = axes[1]
-        # Plot all top congestion points
         if top_congestion:
             plot_colors = ["purple", "red", "orange", "green", "blue"]
             for i, cp in enumerate(top_congestion):
@@ -331,8 +320,7 @@ def run_and_plot(args):
             ax3.axhline(y=300, color="red", ls=":", lw=1.5, alpha=0.5, label="qRef = 300KB (current)")
         ax3.set_ylabel("Queue Length (KB)", fontsize=14, fontweight="bold")
         ax3.set_xlabel("Time (ms)", fontsize=14, fontweight="bold")
-        n_cp = len(top_congestion)
-        ax3.set_title(f"Top {n_cp} Congestion Points Queue Length (auto-detected)", fontsize=15, fontweight="bold")
+        ax3.set_title(f"Top {len(top_congestion)} Congestion Points Queue Length (auto-detected)", fontsize=15, fontweight="bold")
         ax3.legend(loc="upper right", fontsize=10, framealpha=0.9)
         ax3.grid(True, alpha=0.3, linestyle="--")
         max_q = max([cp["max_q_kb"] for cp in top_congestion], default=1000)
@@ -340,12 +328,10 @@ def run_and_plot(args):
         ax3.tick_params(labelsize=11)
 
         plt.tight_layout()
-        output_suffix = f"{args.algo_name.lower()}_cc{args.ccMode}_load{args.load}"
-        output_file = os.path.join(RESULTS_DIR, f"workload_{output_suffix}.png")
+        output_file = os.path.join(RESULTS_DIR, f"workload_{args.algo_name.lower()}_cc{args.ccMode}_load{load_tag(load)}.png")
         plt.savefig(output_file, dpi=150, bbox_inches="tight")
-        print(f"✓ Plot saved: {output_file}\n")
+        print(f"Plot saved: {output_file}\n")
 
-        # 6. Print statistics
         fct_ns = []
         if os.path.exists(fct_out):
             with open(fct_out, "r", encoding="utf-8", errors="replace") as f:
@@ -365,13 +351,13 @@ def run_and_plot(args):
         print(f"Discovered info/load lines: {len(workload_lines)}")
         print(f"Active flow count: {len(active_flows)}")
         print(f"\n{'='*80}")
-        print(f"Congestion Point Detection (auto-identified by avg queue length)")
+        print("Congestion Point Detection (auto-identified by avg queue length)")
         print(f"{'='*80}")
         print(f"Total switch-port pairs monitored: {len(all_queue_data)}")
         print(f"Congestion points identified (>= {MIN_SAMPLES} samples): {len(congestion_points)}")
         if congestion_points:
             print(f"\n{'Rank':<6} {'Switch':<8} {'Port':<6} {'Avg Queue':<12} {'Max Queue':<12} {'Samples':<10}")
-            print('-' * 70)
+            print("-" * 70)
             for rank, cp in enumerate(congestion_points[:10], 1):
                 marker = "  <-- TOP BOTTLENECK" if rank == 1 else ""
                 print(f"  {rank:<4} SW{cp['switch']:<6} {cp['port']:<6} {cp['avg_q_kb']:<10.1f}KB "
@@ -385,13 +371,11 @@ def run_and_plot(args):
         print(f"FCT: {fct_out}")
         print(f"PFC: {pfc_out}")
         print(f"Image file: {output_file}")
-        
-        # Analyze query flow FCT if query flows were used
-        if hasattr(args, 'queryFlowFile') and args.queryFlowFile:
-            analyze_query_flow_fct(args.algo_name, args.load)
-        
-        print(f"{'='*80}\n")
 
+        if os.path.exists(query_fct_out):
+            analyze_query_flow_fct(query_fct_out)
+
+        print(f"{'='*80}\n")
         return output_file
     finally:
         pass
@@ -399,41 +383,29 @@ def run_and_plot(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="""Workload simulation script (simplified version)
-        
+        description="""Workload simulation script.
+
 Algorithm ccMode Mapping:
-  dcqcn      → ccMode=1   (DCQCN)
-  hpcc       → ccMode=3   (HPCC)
-  timely     → ccMode=7   (Timely)
-  dctcp      → ccMode=8   (DCTCP)
-  frp        → ccMode=13  (FRP)
-  rocc       → ccMode=14  (ROCC)
+  dcqcn      -> ccMode=1   (DCQCN)
+  hpcc       -> ccMode=3   (HPCC)
+  timely     -> ccMode=7   (Timely)
+  dctcp      -> ccMode=8   (DCTCP)
+  frp        -> ccMode=13  (FRP)
+  rocc       -> ccMode=14  (ROCC)
 
 Examples:
-  python3 run_single_workload_algo.py 1 DCQCN --load 0.2 --duration 0.02
-  python3 run_single_workload_algo.py 13 FRP --load 0.2 --duration 0.02 --queryFlowFile query-flow.txt
+  python3 run_single_workload_algo.py 1 DCQCN
+  python3 run_single_workload_algo.py 13 FRP
 """,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("ccMode", type=int, 
-                       help="Congestion control algorithm mode (see mapping above)")
+    parser.add_argument("ccMode", type=int,
+                        help="Congestion control algorithm mode (see mapping above)")
     parser.add_argument("algo_name", type=str, help="Algorithm name (e.g., DCQCN, FRP, ROCC)")
-    parser.add_argument("--load", type=float, default=0.2, 
-                       help="Background flow load factor (default: 0.2)")
-    parser.add_argument("--duration", type=float, default=0.02, 
-                       help="Simulation duration in seconds (default: 0.02)")
-    parser.add_argument("--start", type=float, default=0.001, 
-                       help="Start time in seconds (default: 0.001)")
-    parser.add_argument("--flowEnd", type=float, default=None, 
-                       help="Flow end time in seconds (default: duration*0.9)")
-    parser.add_argument("--cdf", default=DEFAULT_CDF, 
-                       help="CDF file path (default: Alistorage.txt)")
-    parser.add_argument("--queryFlowFile", default="query-flow.txt", 
-                       help="Query flow file name (default: query-flow.txt)")
-    parser.add_argument("--randomSeed", type=int, default=7, 
-                       help="Random seed (default: 7)")
-    parser.add_argument("--timeout", type=int, default=180, 
-                       help="Timeout in seconds (default: 180 = 3 minutes)")
+    parser.add_argument("--randomSeed", type=int, default=7,
+                        help="Random seed (default: 7)")
+    parser.add_argument("--timeout", type=int, default=180,
+                        help="Timeout in seconds (default: 180 = 3 minutes)")
     args = parser.parse_args()
 
     run_and_plot(args)

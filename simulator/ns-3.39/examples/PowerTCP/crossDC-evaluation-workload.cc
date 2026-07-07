@@ -65,6 +65,8 @@ double pause_time = 5, simulator_stop_time = 3.01;
 std::string data_rate, link_delay, topology_file, flow_file, trace_file, trace_output_file;
 std::string fct_output_file = "fct.txt";
 std::string pfc_output_file = "pfc.txt";
+bool enable_flow_file_background = true;
+std::string background_flow_file = "examples/PowerTCP/flow-background.txt";
 
 // Bifrost (ccMode=12) 配置
 uint32_t bifrost_deploy_switch = 13;     // 默认部署在13号交换机
@@ -1160,7 +1162,7 @@ int main(int argc, char *argv[])
 	uint32_t windowCheck = 1;
 	std::string confFile = "examples/PowerTCP/config-workload.txt";
 	std::string cdfFileName = "examples/PowerTCP/Alistorage.txt";
-	std::cout << confFile;
+	
 	CommandLine cmd;
 	cmd.AddValue("conf", "config file path", confFile);
 	cmd.AddValue("wien", "enable wien --> wien enables PowerTCP.", wien);
@@ -1171,34 +1173,14 @@ int main(int argc, char *argv[])
 	cmd.AddValue("SPINE_COUNT", "fallback uplink count when topology capacity cannot be inferred", SPINE_COUNT);
 	cmd.AddValue("LEAF_SERVER_CAPACITY", "fallback leaf-server capacity in Gbps if <1e9, or bps", LEAF_SERVER_CAPACITY);
 	cmd.AddValue("SPINE_LEAF_CAPACITY", "fallback spine-leaf capacity in Gbps if <1e9, or bps", SPINE_LEAF_CAPACITY);
-	cmd.AddValue("START_TIME", "workload start time", START_TIME);
-	cmd.AddValue("END_TIME", "simulation stop time", END_TIME);
-	cmd.AddValue("FLOW_LAUNCH_END_TIME", "workload launch end time", FLOW_LAUNCH_END_TIME);
-	cmd.AddValue("cdfFileName", "File name for flow distribution", cdfFileName);
-	cmd.AddValue("load", "offered load for background workload", load);
-	cmd.AddValue("queryFlowFile", "Query flow file path", queryFlowFile);
+	cmd.AddValue("fctOutputFile", "FCT output file path", fct_output_file);
+	cmd.AddValue("pfcOutputFile", "PFC output file path", pfc_output_file);
 	cmd.AddValue("queryFlowFctFile", "Query flow FCT output file path", queryFlowFctFile);
 	cmd.AddValue ("algorithm", "specify CC mode. This is added for my convinience. I prefer cmd rather than parsing files.", algorithm);
 	cmd.AddValue("windowCheck", "windowCheck", windowCheck);
 
 	cmd.Parse (argc, argv);
-
-	// 保存命令行值，用于配置文件解析后覆盖（-1 表示未显式传入）
-	double cmd_load = -1;
-	double cmd_START_TIME = -1;
-	double cmd_END_TIME = -1;
-	double cmd_FLOW_LAUNCH_END_TIME = -1;
-	std::string cmd_cdfFileName = "";
-	{
-		// 通过对比默认值判断是否显式传入
-		double def_load = 0.2, def_START = 0.001, def_END = 0.05, def_FLE = 0.045;
-		std::string def_cdf = "examples/PowerTCP/Alistorage.txt";
-		if (load != def_load)                   cmd_load = load;
-		if (START_TIME != def_START)            cmd_START_TIME = START_TIME;
-		if (END_TIME != def_END)                cmd_END_TIME = END_TIME;
-		if (FLOW_LAUNCH_END_TIME != def_FLE)     cmd_FLOW_LAUNCH_END_TIME = FLOW_LAUNCH_END_TIME;
-		if (cdfFileName != def_cdf)              cmd_cdfFileName = cdfFileName;
-	}
+	std::cout << confFile;
 
 	if (LEAF_SERVER_CAPACITY > 0 && LEAF_SERVER_CAPACITY < LINK_CAPACITY_BASE)
 		LEAF_SERVER_CAPACITY *= LINK_CAPACITY_BASE;
@@ -1532,22 +1514,47 @@ int main(int argc, char *argv[])
 			conf >> FLOW_LAUNCH_END_TIME;
 			std::cout << "FLOW_LAUNCH_END_TIME\t\t" << FLOW_LAUNCH_END_TIME << '\n';
 		}
+		else if (key.compare("QUERY_FLOW_FILE") == 0) {
+			conf >> queryFlowFile;
+			std::cout << "QUERY_FLOW_FILE		" << queryFlowFile << '\n';
+		}
+		else if (key.compare("ENABLE_FLOW_FILE_BACKGROUND") == 0) {
+			uint32_t v;
+			conf >> v;
+			enable_flow_file_background = v;
+			std::cout << "ENABLE_FLOW_FILE_BACKGROUND	" << enable_flow_file_background << '\n';
+		}
+		else if (key.compare("BACKGROUND_FLOW_FILE") == 0) {
+			conf >> background_flow_file;
+			std::cout << "BACKGROUND_FLOW_FILE		" << background_flow_file << '\n';
+		}
+		else if (key.compare("FCT_OUTPUT_TEMPLATE") == 0) {
+			std::string ignored;
+			conf >> ignored;
+			std::cout << "FCT_OUTPUT_TEMPLATE		" << ignored << '\n';
+		}
+		else if (key.compare("PFC_OUTPUT_TEMPLATE") == 0) {
+			std::string ignored;
+			conf >> ignored;
+			std::cout << "PFC_OUTPUT_TEMPLATE		" << ignored << '\n';
+		}
+		else if (key.compare("QUERY_FCT_OUTPUT_TEMPLATE") == 0) {
+			std::string ignored;
+			conf >> ignored;
+			std::cout << "QUERY_FCT_OUTPUT_TEMPLATE	" << ignored << '\n';
+		}
 		fflush(stdout);
 	}
 	conf.close();
 
-	// overriding config file. I prefer to use cmd arguments
+	// Python selects the CC algorithm for each run; workload parameters stay in config-workload.txt.
 	cc_mode = algorithm; // overrides configuration file
 	has_win = windowCheck; // overrides configuration file
 	var_win = windowCheck; // overrides configuration file
-	simulator_stop_time = END_TIME;
+	
 
-	// workload 参数：命令行覆盖配置文件（仅当命令行显式传入了非默认值时）
-	if (cmd_load >= 0)                load = cmd_load;
-	if (cmd_START_TIME >= 0)          START_TIME = cmd_START_TIME;
-	if (cmd_END_TIME >= 0)            END_TIME = cmd_END_TIME;
-	if (cmd_FLOW_LAUNCH_END_TIME >= 0) FLOW_LAUNCH_END_TIME = cmd_FLOW_LAUNCH_END_TIME;
-	if (!cmd_cdfFileName.empty())     cdfFileName = cmd_cdfFileName;
+	// workload parameters are owned by config-workload.txt.
+	simulator_stop_time = END_TIME;
 
 
 	Config::SetDefault("ns3::QbbNetDevice::PauseTime", UintegerValue(pause_time));
@@ -2161,7 +2168,11 @@ int main(int argc, char *argv[])
 
 	long flowCount = 0;
 	long totalFlowSize = 0;
-	InstallBackgroundWorkload(load, cdfTable, START_TIME, FLOW_LAUNCH_END_TIME, flowCount, totalFlowSize);
+	if (enable_flow_file_background) {
+		InstallBackgroundWorkload(load, cdfTable, START_TIME, FLOW_LAUNCH_END_TIME, flowCount, totalFlowSize);
+	} else {
+		std::cout << "[BACKGROUND] Background workload disabled by config" << std::endl;
+	}
 	std::cout << "[BACKGROUND] Total background flows: " << flowCount << std::endl;
 	if (flowCount > 0)
 		std::cout << "[BACKGROUND] Average flow size: " << static_cast<double>(totalFlowSize) / flowCount << " bytes" << std::endl;
