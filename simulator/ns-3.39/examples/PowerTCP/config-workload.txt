@@ -11,13 +11,12 @@ FCT_OUTPUT_TEMPLATE results/workload/fct/fct_{suffix}.txt
 PFC_OUTPUT_TEMPLATE results/workload/pfc/pfc_{suffix}.txt
 QUERY_FCT_OUTPUT_TEMPLATE results/workload/fct/query-flow-{suffix}.txt
 
-SIMULATOR_STOP_TIME 0.020
+SIMULATOR_STOP_TIME 0.10
 
 # ===== workload 参数=====
 CDF_FILE_NAME examples/PowerTCP/Alistorage.txt
 LOAD 0.2
 START_TIME 0.005
-END_TIME 0.02
 FLOW_LAUNCH_END_TIME 0.01
 QUERY_REQUEST_RATE 0
 REQUEST_SIZE 0

@@ -120,6 +120,46 @@ def resolve_output_path(path):
     return os.path.join(REPO_ROOT, path)
 
 
+def resolve_ns3_path(path):
+    if os.path.isabs(path):
+        return path
+    return os.path.join(NS3_DIR, path)
+
+
+def load_query_flow_keys(query_flow_file):
+    """Return {(src, dst, dport)} for query flows."""
+    keys = set()
+    if not query_flow_file:
+        return keys
+
+    path = resolve_ns3_path(query_flow_file)
+    if not os.path.exists(path):
+        print(f"Warning: query flow file not found, throughput plot will be empty: {path}")
+        return keys
+
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        first = True
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if first:
+                first = False
+                if len(parts) == 1:
+                    continue
+            if len(parts) < 6:
+                continue
+            try:
+                src = int(parts[0])
+                dst = int(parts[1])
+                dport = int(parts[3])
+            except ValueError:
+                continue
+            keys.add((src, dst, dport))
+    return keys
+
+
 def render_template(template, suffix, args, load):
     return template.format(
         suffix=suffix,
@@ -163,6 +203,9 @@ def run_and_plot(args):
         "QUERY_FCT_OUTPUT_TEMPLATE",
         os.path.join(FCT_DIR, "query-flow-{suffix}.txt"),
     )
+    query_flow_file = read_config_value(content, "QUERY_FLOW_FILE", "")
+    query_flow_keys = load_query_flow_keys(query_flow_file)
+    # print(f"Loaded {len(query_flow_keys)} query flow definitions for throughput plotting.")
 
     fct_out = resolve_output_path(render_template(fct_template, suffix, args, load))
     pfc_out = resolve_output_path(render_template(pfc_template, suffix, args, load))
@@ -249,7 +292,13 @@ def run_and_plot(args):
                 r"\[FLOW TP\] Src (\d+) Dst (\d+) pg (\d+) sport (\d+) dport (\d+) "
                 r"throughput ([\d.e+\-]+) time ([\d.e+\-]+)", line)
             if m:
-                key = tuple(map(int, (m.group(1), m.group(2), m.group(4), m.group(5))))
+                src = int(m.group(1))
+                dst = int(m.group(2))
+                sport = int(m.group(4))
+                dport = int(m.group(5))
+                if (src, dst, dport) not in query_flow_keys:
+                    continue
+                key = (src, dst, sport, dport)
                 flow_tp.setdefault(key, {"times": [], "rates": []})
                 flow_tp[key]["times"].append(float(m.group(7)) * 1000)
                 flow_tp[key]["rates"].append(float(m.group(6)) / 1e9)
@@ -276,9 +325,9 @@ def run_and_plot(args):
         if top_congestion:
             top_desc = ", ".join([f"SW{cp['switch']}p{cp['port']}(avg={cp['avg_q_kb']:.0f}KB)"
                                   for cp in top_congestion[:3]])
-            print(f"Parse complete: {len(all_queue_data)} switch-port pairs monitored, top bottlenecks: {top_desc}, receiver-side flows {len(active_flows)}")
+            print(f"Parse complete: {len(all_queue_data)} switch-port pairs monitored, top bottlenecks: {top_desc}, query receiver-side flows {len(active_flows)}")
         else:
-            print(f"Parse complete: {len(all_queue_data)} switch-port pairs, receiver-side flows {len(active_flows)}")
+            print(f"Parse complete: {len(all_queue_data)} switch-port pairs, query receiver-side flows {len(active_flows)}")
 
         print("Generating plots...")
         plt.rcParams["font.family"] = "DejaVu Sans"
@@ -291,8 +340,8 @@ def run_and_plot(args):
                      fontsize=18, fontweight="bold")
 
         ax2 = axes[0]
-        print(f"Plotting receiver throughput for {len(active_flows)} flows...")
-        for idx, key in enumerate(active_flows[:15]):
+        print(f"Plotting receiver throughput for {len(active_flows)} query flows...")
+        for idx, key in enumerate(active_flows):
             times = flow_tp[key]["times"]
             rates = flow_tp[key]["rates"]
             n = min(len(times), len(rates))
@@ -300,9 +349,9 @@ def run_and_plot(args):
                 continue
             ax2.plot(times[:n], rates[:n],
                      color=colors[idx % len(colors)], lw=2,
-                     label=f"Flow {key[0]}->{key[1]} (sp={key[2]})", alpha=0.85)
+                     label=f"Query {key[0]}->{key[1]} (dp={key[3]})", alpha=0.85)
         ax2.set_ylabel("Receive Throughput (Gbps)", fontsize=14, fontweight="bold")
-        ax2.set_title(f"RX Throughput - per-flow ({len(active_flows)} flows)", fontsize=15, fontweight="bold")
+        ax2.set_title(f"RX Throughput - query flows ({len(active_flows)} flows)", fontsize=15, fontweight="bold")
         ax2.legend(loc="upper right", fontsize=10, ncol=3, framealpha=0.9)
         ax2.grid(True, alpha=0.3, linestyle="--")
         ax2.set_ylim(0, 110)
@@ -349,7 +398,7 @@ def run_and_plot(args):
         print(f"{'='*80}")
         print(f"Total background flow: {totals['background']}  Total flow: {totals['flow']}  Total Query: {totals['query']}")
         print(f"Discovered info/load lines: {len(workload_lines)}")
-        print(f"Active flow count: {len(active_flows)}")
+        print(f"Active query flow count: {len(active_flows)}")
         print(f"\n{'='*80}")
         print("Congestion Point Detection (auto-identified by avg queue length)")
         print(f"{'='*80}")

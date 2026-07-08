@@ -67,7 +67,7 @@ Python 运行 C++ 时只传这些关键命令行参数：
 --queryFlowFctFile
 ```
 
-`LOAD`、`START_TIME`、`END_TIME`、`FLOW_LAUNCH_END_TIME`、`CDF_FILE_NAME`、`QUERY_FLOW_FILE` 等实验参数由 config 文件控制。
+`LOAD`、`START_TIME`、`SIMULATOR_STOP_TIME`、`FLOW_LAUNCH_END_TIME`、`CDF_FILE_NAME`、`QUERY_FLOW_FILE` 等实验参数由 config 文件控制。
 
 ### `config-workload.txt`
 
@@ -169,7 +169,7 @@ simulator/ns-3.39/examples/PowerTCP/config-workload.txt
 | `CDF_FILE_NAME` | 背景流大小分布 CDF 文件 |
 | `LOAD` | 背景流负载 |
 | `START_TIME` | 背景流开始时间 |
-| `END_TIME` | 仿真结束时间，C++ 中 `simulator_stop_time = END_TIME` |
+| `SIMULATOR_STOP_TIME` | 仿真结束时间，C++ 中直接赋给 `simulator_stop_time`，控制 `Simulator::Stop()` |
 | `FLOW_LAUNCH_END_TIME` | 背景流发起结束时间 |
 | `QUERY_FLOW_FILE` | query flow 输入文件 |
 | `ENABLE_FLOW_FILE_BACKGROUND` | 是否生成背景流，当前控制 CDF 背景流开关 |
@@ -415,7 +415,7 @@ python3 run_single_workload_algo.py 14 ROCC
 - CDF。
 - LOAD。
 - START_TIME。
-- END_TIME。
+- SIMULATOR_STOP_TIME。
 - FLOW_LAUNCH_END_TIME。
 - query flow。
 - random seed，除非你手动修改。
@@ -445,7 +445,7 @@ simulator/ns-3.39/examples/PowerTCP/config-workload.txt
 ```text
 LOAD 0.2
 START_TIME 0.005
-END_TIME 0.02
+SIMULATOR_STOP_TIME 0.020
 FLOW_LAUNCH_END_TIME 0.01
 CDF_FILE_NAME examples/PowerTCP/Alistorage.txt
 QUERY_FLOW_FILE examples/PowerTCP/query-flow.txt
@@ -473,13 +473,7 @@ QUERY_FCT_OUTPUT_TEMPLATE results/workload/fct/query-flow-{suffix}.txt
 
 1. `CC_MODE` 在 config 中仍存在，但单次运行时 Python 传入的 `--algorithm` 会覆盖它。
 
-2. `SIMULATOR_STOP_TIME` 在 config 中仍存在，但 workload 当前使用：
-
-```cpp
-simulator_stop_time = END_TIME;
-```
-
-所以实际仿真结束时间以 `END_TIME` 为准。
+2. `SIMULATOR_STOP_TIME` 控制仿真停止时间，C++ 解析后直接赋给 `simulator_stop_time`，并在 `Simulator::Stop(Seconds(simulator_stop_time))` 处生效。早期版本中存在 `simulator_stop_time = END_TIME;` 的覆盖逻辑，现已注释移除，`END_TIME` 字段不再使用。
 
 3. `BACKGROUND_FLOW_FILE` 当前不是实际背景流输入文件。背景流由 CDF 和 `LOAD` 生成。
 
@@ -496,7 +490,7 @@ simulator_stop_time = END_TIME;
 
 ```text
 QUERY_FLOW_FILE
-END_TIME
+SIMULATOR_STOP_TIME
 query flow start_time
 flow size
 ```

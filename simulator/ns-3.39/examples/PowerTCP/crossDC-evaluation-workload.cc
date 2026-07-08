@@ -1151,7 +1151,6 @@ int main(int argc, char *argv[])
 	uint64_t LEAF_SERVER_CAPACITY = 0;
 	uint64_t SPINE_LEAF_CAPACITY = 0;
 	double START_TIME = 0.001;
-	double END_TIME = 0.05;
 	double FLOW_LAUNCH_END_TIME = 0.045;
 	double load = 0.2;
 	unsigned randomSeed = 7;
@@ -1180,7 +1179,7 @@ int main(int argc, char *argv[])
 	cmd.AddValue("windowCheck", "windowCheck", windowCheck);
 
 	cmd.Parse (argc, argv);
-	std::cout << confFile;
+	std::cout << confFile << endl;
 
 	if (LEAF_SERVER_CAPACITY > 0 && LEAF_SERVER_CAPACITY < LINK_CAPACITY_BASE)
 		LEAF_SERVER_CAPACITY *= LINK_CAPACITY_BASE;
@@ -1506,10 +1505,6 @@ int main(int argc, char *argv[])
 			conf >> START_TIME;
 			std::cout << "START_TIME\t\t\t" << START_TIME << '\n';
 		}
-		else if (key.compare("END_TIME") == 0) {
-			conf >> END_TIME;
-			std::cout << "END_TIME\t\t\t" << END_TIME << '\n';
-		}
 		else if (key.compare("FLOW_LAUNCH_END_TIME") == 0) {
 			conf >> FLOW_LAUNCH_END_TIME;
 			std::cout << "FLOW_LAUNCH_END_TIME\t\t" << FLOW_LAUNCH_END_TIME << '\n';
@@ -1554,7 +1549,7 @@ int main(int argc, char *argv[])
 	
 
 	// workload parameters are owned by config-workload.txt.
-	simulator_stop_time = END_TIME;
+	//simulator_stop_time = END_TIME;
 
 
 	Config::SetDefault("ns3::QbbNetDevice::PauseTime", UintegerValue(pause_time));
@@ -1824,6 +1819,16 @@ int main(int argc, char *argv[])
 			double alpha = 1.0 / 8;
 			sw->m_mmu->SetAlphaIngress(alpha);
 			sw->m_mmu->SetAlphaEgress(UINT16_MAX);
+
+			bool isDciSwitch = false;
+			for (auto it = nbr2if[sw].begin(); it != nbr2if[sw].end(); it++) {
+				if (it->second.up && it->second.delay > 100000) { // long-distance link (>0.1ms)
+					isDciSwitch = true;
+					break;
+				}
+			}
+			uint32_t headroomMultiplier = isDciSwitch ? 3 : 20;
+
 			uint64_t totalHeadroom = 0;
 			for (uint32_t j = 1; j < sw->GetNDevices(); j++) {
 
@@ -1837,7 +1842,7 @@ int main(int argc, char *argv[])
 					sw->m_mmu->ConfigEcn(j, rate2kmin[rate], rate2kmax[rate], rate2pmax[rate]);
 					// set pfc
 					uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetTimeStep();
-					uint32_t headroom = rate * delay / 8 / 1000000000 * 3;
+					uint32_t headroom = rate * delay / 8 / 1000000000 * headroomMultiplier;
 
 					sw->m_mmu->SetHeadroom(headroom, j, qu);
 					totalHeadroom += headroom;
@@ -1849,32 +1854,32 @@ int main(int argc, char *argv[])
 			sw->m_mmu->SetEgressLosslessPool(buffer_size * 1024 * 1024);
 			sw->m_mmu->node_id = sw->GetId();
 
-			// ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
-			// 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小
-			//       导致队列可以推到7MB+才丢包。改为2MB+100KB+100ms。
-			if (sw->GetId() == 93) {
-				const uint32_t HOST_PORT = 1;     // SW93 port1 = SW85 (接 host53)
-				const uint32_t PFC_PG    = 1;     // host 流量所在 PG
-				const uint32_t TWO_MB    = 2 * 1024 * 1024;
-				const uint32_t HEADROOM  = 100 * 1024;  // 2MB 阈值后再绥冲 100KB
-				const uint32_t XON_BYTES = 256 * 1024;  // 队列跌到 256KB 以下才 resume
+			// // ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
+			// // 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小
+			// //       导致队列可以推到7MB+才丢包。改为2MB+100KB+100ms。
+			// if (sw->GetId() == 93) {
+			// 	const uint32_t HOST_PORT = 1;     // SW93 port1 = SW85 (接 host53)
+			// 	const uint32_t PFC_PG    = 1;     // host 流量所在 PG
+			// 	const uint32_t TWO_MB    = 2 * 1024 * 1024;
+			// 	const uint32_t HEADROOM  = 100 * 1024;  // 2MB 阈值后再绥冲 100KB
+			// 	const uint32_t XON_BYTES = 256 * 1024;  // 队列跌到 256KB 以下才 resume
 
-				// 设 alphaIngress 使 threshold≈2MB (18MB pool × 2/18 ≈ 2MB)
-				sw->m_mmu->SetAlphaIngress(2.0 / 18.0, HOST_PORT, PFC_PG);
-				// 同步设 headroom (2MB阈值后允许多绥100KB)
-				sw->m_mmu->SetHeadroom(HEADROOM, HOST_PORT, PFC_PG);
-				// 调高 resume 阈值避免频繁 resume/pause 振荡
-				sw->m_mmu->SetXon(XON_BYTES, HOST_PORT, PFC_PG);
-				sw->m_mmu->SetXonOffset(XON_BYTES, HOST_PORT, PFC_PG);
-				std::cout << "[PFC] SW93 port 1: threshold=2MB, headroom="
-				          << HEADROOM << "B, xon=" << XON_BYTES << "B" << std::endl;
+			// 	// 设 alphaIngress 使 threshold≈2MB (18MB pool × 2/18 ≈ 2MB)
+			// 	sw->m_mmu->SetAlphaIngress(2.0 / 18.0, HOST_PORT, PFC_PG);
+			// 	// 同步设 headroom (2MB阈值后允许多绥100KB)
+			// 	sw->m_mmu->SetHeadroom(HEADROOM, HOST_PORT, PFC_PG);
+			// 	// 调高 resume 阈值避免频繁 resume/pause 振荡
+			// 	sw->m_mmu->SetXon(XON_BYTES, HOST_PORT, PFC_PG);
+			// 	sw->m_mmu->SetXonOffset(XON_BYTES, HOST_PORT, PFC_PG);
+			// 	std::cout << "[PFC] SW93 port 1: threshold=2MB, headroom="
+			// 	          << HEADROOM << "B, xon=" << XON_BYTES << "B" << std::endl;
 
-				// 同时调高 PauseTime：默认5μs太短，跨域RTT≈1ms+，不够上游响应
-				for (uint32_t k = 1; k < sw->GetNDevices(); k++) {
-					Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(k));
-					dev->SetAttribute("PauseTime", UintegerValue(100000));  // 100ms
-				}
-			}
+			// 	// 同时调高 PauseTime：默认5μs太短，跨域RTT≈1ms+，不够上游响应
+			// 	for (uint32_t k = 1; k < sw->GetNDevices(); k++) {
+			// 		Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(k));
+			// 		dev->SetAttribute("PauseTime", UintegerValue(100000));  // 100ms
+			// 	}
+			// }
 		}
 	}
 
