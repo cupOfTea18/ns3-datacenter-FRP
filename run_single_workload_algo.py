@@ -449,7 +449,7 @@ Algorithm ccMode Mapping:
   dctcp      -> ccMode=8   (DCTCP)
   frp        -> ccMode=13  (FRP)
   rocc       -> ccMode=14  (ROCC)
-  atc        -> ccMode=15  (ATC + DCQCN)
+  atc        -> ccMode=15  (ATC)
 
 Examples:
   python3 run_single_workload_algo.py 1 DCQCN

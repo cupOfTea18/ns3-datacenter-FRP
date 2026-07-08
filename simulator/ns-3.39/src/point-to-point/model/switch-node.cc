@@ -214,15 +214,15 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 
 		// admission control
 		InterfaceTag t;
-		p->PeekPacketTag(t);
-		uint32_t inDev = t.GetPortId();
+		bool hasIngressTag = p->PeekPacketTag(t);
+		uint32_t inDev = hasIngressTag ? t.GetPortId() : idx;
 			
 		// Bifrost: 统计ingress端口收到的字节数（仅在部署Bifrost的交换机上）
-		if (m_bifrostEnabled && m_id == m_bifrostDeploySwitchId) {
+		if (m_bifrostEnabled && m_id == m_bifrostDeploySwitchId && inDev < m_devices.size()) {
 			DynamicCast<QbbNetDevice>(m_devices[inDev])->totalBytesRcvd += p->GetSize();
 		}
 			
-		if (qIndex != 0) { //not highest priority
+		if (qIndex != 0 && hasIngressTag) { //not highest priority
 			// IMPORTANT: MyPriorityTag should only be attached by lossy traffic. This tag indicates the qIndex but also indicates that it is "lossy". Never attach MyPriorityTag on lossless traffic.
 			if (m_mmu->CheckIngressAdmission(inDev, qIndex, p->GetSize(), found,unsched) && m_mmu->CheckEgressAdmission(idx, qIndex, p->GetSize(), found,unsched)) {			// Admission control
 				m_mmu->UpdateIngressAdmission(inDev, qIndex, p->GetSize(), found, unsched);
@@ -232,7 +232,9 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 			}
 			CheckAndSendPfc(inDev, qIndex);
 		}
-		m_bytes[inDev][idx][qIndex] += p->GetSize();
+		if (inDev < m_devices.size()) {
+			m_bytes[inDev][idx][qIndex] += p->GetSize();
+		}
 		m_devices[idx]->SwitchSend(qIndex, p, ch);
 		DynamicCast<QbbNetDevice>(m_devices[idx])->totalBytesRcvd += p->GetSize(); // Attention: this is the egress port's total received packets. Not the ingress port.
 	} else

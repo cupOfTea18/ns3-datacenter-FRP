@@ -77,6 +77,13 @@ uint32_t gatewayFlag = 0; // 0: disabled, 2: ATC gateway
 unordered_map<uint32_t, int> gatewayNodeType; // 1: local/source DCI, 2: remote/destination DCI
 uint32_t max_voq_count = 128;
 uint64_t max_voq_rate = 100000000000ULL;
+uint32_t atc_voq_max_size = 10 * 1500;
+double atc_cnp_notify_interval_us = 4.0;
+std::string atc_min_rate = "100Mb/s";
+double atc_rate_decrease_interval_us = 4.0;
+double atc_rpg_time_reset_us = 480.0;
+bool atc_cnp_on_global_congestion = true;
+bool atc_voq_react_to_cnp = true;
 uint64_t longHaulBandwidth = 100000000000ULL;
 Time longHaulDelay = MicroSeconds(5000);
 
@@ -1409,6 +1416,31 @@ int main(int argc, char *argv[])
 		} else if (key.compare("MAX_ATC_VOQ_RATE") == 0) {
 			conf >> max_voq_rate;
 			std::cout << "MAX_ATC_VOQ_RATE		" << max_voq_rate << "\n";
+		} else if (key.compare("ATC_VOQ_MAX_SIZE") == 0) {
+			conf >> atc_voq_max_size;
+			std::cout << "ATC_VOQ_MAX_SIZE		" << atc_voq_max_size << "\n";
+		} else if (key.compare("ATC_CNP_NOTIFY_INTERVAL") == 0) {
+			conf >> atc_cnp_notify_interval_us;
+			std::cout << "ATC_CNP_NOTIFY_INTERVAL	" << atc_cnp_notify_interval_us << "us\n";
+		} else if (key.compare("ATC_MIN_RATE") == 0) {
+			conf >> atc_min_rate;
+			std::cout << "ATC_MIN_RATE		" << atc_min_rate << "\n";
+		} else if (key.compare("ATC_RATE_DECREASE_INTERVAL") == 0) {
+			conf >> atc_rate_decrease_interval_us;
+			std::cout << "ATC_RATE_DECREASE_INTERVAL	" << atc_rate_decrease_interval_us << "us\n";
+		} else if (key.compare("ATC_RPG_TIME_RESET") == 0) {
+			conf >> atc_rpg_time_reset_us;
+			std::cout << "ATC_RPG_TIME_RESET		" << atc_rpg_time_reset_us << "us\n";
+		} else if (key.compare("ATC_CNP_ON_GLOBAL_CONGESTION") == 0) {
+			uint32_t v;
+			conf >> v;
+			atc_cnp_on_global_congestion = (v != 0);
+			std::cout << "ATC_CNP_ON_GLOBAL_CONGESTION	" << (atc_cnp_on_global_congestion ? 1 : 0) << "\n";
+		} else if (key.compare("ATC_VOQ_REACT_TO_CNP") == 0) {
+			uint32_t v;
+			conf >> v;
+			atc_voq_react_to_cnp = (v != 0);
+			std::cout << "ATC_VOQ_REACT_TO_CNP		" << (atc_voq_react_to_cnp ? 1 : 0) << "\n";
 		} else if (key.compare("RATE_DECREASE_INTERVAL") == 0) {
 			double v;
 			conf >> v;
@@ -1915,14 +1947,17 @@ int main(int argc, char *argv[])
 				auto gatewayIt = gatewayNodeType.find(i);
 				if (gatewayIt != gatewayNodeType.end()) {
 					if (gatewayIt->second == 1) {
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
 						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized source gateway switch " << i << std::endl;
 					}
 					else if (gatewayIt->second == 2) {
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
 						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized destination gateway switch " << i << std::endl;
 					}
 					else if (gatewayIt->second == 3) {
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
 						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized bidirectional gateway switch " << i << std::endl;

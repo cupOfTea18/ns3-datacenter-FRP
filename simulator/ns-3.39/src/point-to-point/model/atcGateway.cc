@@ -21,6 +21,12 @@ atcGateway::atcGateway()
     m_congested = false;
     m_ecnbits = 0;
     m_packet_size = 0; // 报文净荷大小
+    m_voqMaxSize = VOQ_MAX_SIZE;
+    m_cnpNotifyInterval = CNP_NOTIFY_INTERVAL;
+    m_cnpOnGlobalCongestion = true;
+    m_voqReactToCnp = true;
+    m_cnpByGlobalCongestion = 0;
+    m_cnpByPacketEcn = 0;
 
      /******************************
 	 * Mellanox's version of DCQCN
@@ -39,6 +45,29 @@ atcGateway::atcGateway()
 
 atcGateway::~atcGateway(){}
 
+void atcGateway::ConfigureAtcParams(uint32_t voqMaxSize,
+                                    double cnpNotifyIntervalUs,
+                                    const std::string& minRate,
+                                    double rateDecreaseIntervalUs,
+                                    double rpgTimeResetUs,
+                                    bool cnpOnGlobalCongestion,
+                                    bool voqReactToCnp)
+{
+    m_voqMaxSize = voqMaxSize;
+    m_cnpNotifyInterval = MicroSeconds(cnpNotifyIntervalUs);
+    m_minRate = DataRate(minRate);
+    m_rateDecreaseInterval = rateDecreaseIntervalUs;
+    m_rpgTimeReset = rpgTimeResetUs;
+    m_cnpOnGlobalCongestion = cnpOnGlobalCongestion;
+    m_voqReactToCnp = voqReactToCnp;
+
+    if (m_debug & 0x2) {
+        printf("+++atcGateway params voqMaxSize:%u cnpNotifyInterval:%.3fus minRate:%s rateDecreaseInterval:%.3fus rpgTimeReset:%.3fus cnpOnGlobal:%u voqReactToCnp:%u\n",
+               m_voqMaxSize, cnpNotifyIntervalUs, minRate.c_str(), m_rateDecreaseInterval, m_rpgTimeReset,
+               m_cnpOnGlobalCongestion ? 1 : 0, m_voqReactToCnp ? 1 : 0);
+    }
+}
+
 void atcGateway::init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uint64_t longHaulBandwidth,Time longHaulDelay)
 {
     m_gatewayStatus = 1;
@@ -51,7 +80,7 @@ void atcGateway::init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uin
     for (uint32_t i = 0; i < m_maxVoqCount; i++) {
         voqPool[i].voqId = i;
         voqPool[i].currentSize = 0;
-        voqPool[i].maxSize = VOQ_MAX_SIZE;
+        voqPool[i].maxSize = m_voqMaxSize;
         voqPool[i].currentInflightBytes = 0;
         voqPool[i].maxInflightBytes =  m_maxVoqRate * INTRA_DC_DELAY.GetSeconds() *2/8.0;
         voqPool[i].isAllocated = false;
@@ -463,10 +492,23 @@ bool atcGateway::packetIn(Ptr<NetDevice> device, Ptr<Packet> pkt, CustomHeader &
     if (m_gatewayType == 1) { // 发送端门廊
         if (ch.l3Prot == 0x11) { // RDMA UDP数据报文
             m_ecnbits = ch.GetIpv4EcnBits();
-            if (m_congested || m_ecnbits) {
-                if (!(cnpNotifyTime.count(ch.sip) > 0 && (Simulator::Now() - cnpNotifyTime[ch.sip]) < CNP_NOTIFY_INTERVAL)) {
+            bool triggerByPacketEcn = (m_ecnbits != 0);
+            bool triggerByGlobalCongestion = (m_cnpOnGlobalCongestion && m_congested);
+            if (triggerByPacketEcn || triggerByGlobalCongestion) {
+                if (!(cnpNotifyTime.count(ch.sip) > 0 && (Simulator::Now() - cnpNotifyTime[ch.sip]) < m_cnpNotifyInterval)) {
                     cnpNotifyTime[ch.sip] = Simulator::Now();
+                    if (triggerByPacketEcn) {
+                        m_cnpByPacketEcn++;
+                    } else {
+                        m_cnpByGlobalCongestion++;
+                    }
                     sendCnp(ch, device); // 回复CNP
+                    uint64_t cnpTotal = m_cnpByPacketEcn + m_cnpByGlobalCongestion;
+                    if ((m_debug & 0x2) && (cnpTotal <= 20 || cnpTotal % 500 == 0)) {
+                        printf("+++atcGateway CNP reason total:%lu packetEcn:%lu globalCong:%lu lastEcn:%u globalState:%u time:%f\n",
+                               cnpTotal, m_cnpByPacketEcn, m_cnpByGlobalCongestion,
+                               m_ecnbits, m_congested ? 1 : 0, Simulator::Now().GetSeconds());
+                    }
                 }
             }
             longHaulState.localSentBytes += pkt->GetSize();
@@ -507,15 +549,22 @@ bool atcGateway::HandleDataPacketWithVoq(Ptr<NetDevice> device, Ptr<Packet> pkt,
         ch.m_tos &= 0xFC;
     }
 
-    
 
-    if (DynamicCast<QbbChannel>(DynamicCast<QbbNetDevice>(device)->GetChannel())->GetDelay().GetTimeStep() > 100000) // 远端的报文
-    {
+
+        Ptr<QbbNetDevice> qbbDevice = DynamicCast<QbbNetDevice>(device);
+        Ptr<QbbChannel> qbbChannel;
+        if (qbbDevice) {
+            qbbChannel = DynamicCast<QbbChannel>(qbbDevice->GetChannel());
+        }
+
+        if (qbbChannel && qbbChannel->GetDelay().GetTimeStep() > 100000) // 远端的报文
+        {
         if (!longHaulState.longHaulChFlag) {
             longHaulState.longHaulCh = ch;
             longHaulState.longHaulChFlag = true;
             StartLongHaulFeedbackTimer();
         }
+        longHaulState.longHaulIngressIfIndex = qbbDevice->GetIfIndex();
 
         // 记录远端源IP地址
         if (longHaulState.longHaulSrcIps.find(ch.sip) == longHaulState.longHaulSrcIps.end()) {
@@ -578,7 +627,9 @@ bool atcGateway::HandleAckPacketWithVoq(Ptr<NetDevice> device, Ptr<Packet> pkt, 
         // 处理CNP
         if (cnp) {
             // 使用VOQ版本的DCQCN处理CNP
-            //cnp_received_mlx_voq(&voq);
+            if (m_voqReactToCnp) {
+                cnp_received_mlx_voq(&voq);
+            }
             
             if (m_debug & 0x2) {
                 printf("+++atcGateway CNP received for VOQ voqId:%d destIp:%d newRate:%lu time:%.9f\n", 
@@ -704,6 +755,7 @@ void atcGateway::InitLongHaulState(uint64_t longHaulBandwidth,Time longHaulDelay
     longHaulState.maxTotalVoqBytes = 0;
     longHaulState.activeVoqCount = 0;
     longHaulState.longHaulChFlag = false;
+    longHaulState.longHaulIngressIfIndex = 0;
     longHaulState.firstFeedback = true;
     longHaulState.lastFeedbackTime = Simulator::Now();
     longHaulState.maxInflightBytes = (M * (longHaulState.longHaulBandwidth * longHaulState.longHaulDelay.GetSeconds()) + 
@@ -748,6 +800,7 @@ void atcGateway::GenerateLongHaulFeedback() {
         MyPriorityTag pri;
         pri.SetPriority(0);
         newp->AddPacketTag(pri);
+        newp->AddPacketTag(InterfaceTag(longHaulState.longHaulIngressIfIndex));
 
         CustomHeader bfCh(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
         newp->PeekHeader(bfCh);

@@ -20,7 +20,7 @@ FrpRateCalculator::FrpRateCalculator() {
     // FRP算法参数
     m_alpha = 0.1;
     m_beta = 0;
-    m_scaleFactor = 12.0;           // scaleFactor = 20
+    m_scaleFactor = 12.0;           // scaleFactor = 12 (端侧 rdma-hw.cc 策略2 同步使用 12.0)
     m_tPeriodS = 40e-6;         // 40微秒 = 0.00004秒
     
 

@@ -3,6 +3,7 @@
 
 #include <map>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <bitset>
@@ -105,6 +106,7 @@ struct LongHaulState {
     bool firstFeedback;
     CustomHeader longHaulCh;
     bool longHaulChFlag;
+    uint32_t longHaulIngressIfIndex;
     std::unordered_set<uint32_t> longHaulSrcIps; // 远端源IP地址
 };
 
@@ -119,6 +121,12 @@ public:
     bool m_congested; // 是否拥塞
     uint8_t m_ecnbits; // 报文 ECN 位
     uint32_t m_packet_size; // 报文净荷大小
+    uint32_t m_voqMaxSize; // 每个VOQ最大大小（字节）
+    Time m_cnpNotifyInterval; // source gateway CNP限频间隔
+    bool m_cnpOnGlobalCongestion; // 是否允许source gateway全局拥塞状态触发CNP
+    bool m_voqReactToCnp; // destination VOQ是否对ACK/CNP降速
+    uint64_t m_cnpByGlobalCongestion;
+    uint64_t m_cnpByPacketEcn;
     
     // ========== VOQ相关成员变量 ==========
     uint32_t m_maxVoqCount;             // 最大VOQ数量
@@ -172,6 +180,13 @@ public:
     /**
      * @brief 门廊网关初始化
      */
+    void ConfigureAtcParams(uint32_t voqMaxSize,
+                            double cnpNotifyIntervalUs,
+                            const std::string& minRate,
+                            double rateDecreaseIntervalUs,
+                            double rpgTimeResetUs,
+                            bool cnpOnGlobalCongestion,
+                            bool voqReactToCnp);
     void init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uint64_t longHaulBandwidth,Time longHaulDelay);
     void setSwitchSendToDevCallback(Callback<void, Ptr<Packet>, CustomHeader&> cb);
     void DoSwitchSendToDev(Ptr<Packet> p, CustomHeader& ch);
