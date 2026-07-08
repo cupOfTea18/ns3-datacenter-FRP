@@ -37,6 +37,7 @@ build_lib(
     model/switch-node.cc
     model/frp-rate-calculator.cc
     helper/qbb-helper.cc
+    model/atcGateway.cc
   HEADER_FILES
     ${mpi_headers}
     helper/point-to-point-helper.h
@@ -59,6 +60,7 @@ build_lib(
     model/trace-format.h
     helper/qbb-helper.h
     helper/sim-setting.h
+    model/atcGateway.h
   LIBRARIES_TO_LINK ${libnetwork}
                     ${mpi_libraries}
                     ${internet}

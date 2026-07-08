@@ -72,6 +72,14 @@ std::string background_flow_file = "examples/PowerTCP/flow-background.txt";
 uint32_t bifrost_deploy_switch = 13;     // 默认部署在13号交换机
 uint32_t bifrost_pfc_period_us = 10;    // PFC发送周期（微秒）
 
+// ATC gateway 配置。ATC 使用 DCQCN 端侧调速，在 DCI 交换机启用 gateway。
+uint32_t gatewayFlag = 0; // 0: disabled, 2: ATC gateway
+unordered_map<uint32_t, int> gatewayNodeType; // 1: local/source DCI, 2: remote/destination DCI
+uint32_t max_voq_count = 128;
+uint64_t max_voq_rate = 100000000000ULL;
+uint64_t longHaulBandwidth = 100000000000ULL;
+Time longHaulDelay = MicroSeconds(5000);
+
 double alpha_resume_interval = 55, rp_timer, ewma_gain = 1 / 16;
 double rate_decrease_interval = 4;
 uint32_t fast_recovery_times = 5;
@@ -1159,6 +1167,7 @@ int main(int argc, char *argv[])
 
 	uint32_t algorithm = 3;
 	uint32_t windowCheck = 1;
+	uint32_t gatewayTypeOverride = UINT32_MAX;
 	std::string confFile = "examples/PowerTCP/config-workload.txt";
 	std::string cdfFileName = "examples/PowerTCP/Alistorage.txt";
 	
@@ -1177,6 +1186,7 @@ int main(int argc, char *argv[])
 	cmd.AddValue("queryFlowFctFile", "Query flow FCT output file path", queryFlowFctFile);
 	cmd.AddValue ("algorithm", "specify CC mode. This is added for my convinience. I prefer cmd rather than parsing files.", algorithm);
 	cmd.AddValue("windowCheck", "windowCheck", windowCheck);
+	cmd.AddValue("gatewayType", "Gateway type override, 0 disables gateway, 2 enables ATC gateway", gatewayTypeOverride);
 
 	cmd.Parse (argc, argv);
 	std::cout << confFile << endl;
@@ -1366,6 +1376,39 @@ int main(int argc, char *argv[])
 		else if (key.compare("BIFROST_PFC_PERIOD") == 0) {
 			conf >> bifrost_pfc_period_us;
 			std::cout << "BIFROST_PFC_PERIOD\t\t" << bifrost_pfc_period_us << "us\n";
+		} else if (key.compare("GATEWAY_TYPE") == 0) {
+			conf >> gatewayFlag;
+			std::cout << "GATEWAY_TYPE		" << gatewayFlag << "\n";
+		} else if (key.compare("GATEWAY_SRC") == 0) {
+			int n_nodes;
+			conf >> n_nodes;
+			std::cout << "GATEWAY_SRC				";
+			for (int i = 0; i < n_nodes; i++) {
+				uint32_t nodeId;
+				conf >> nodeId;
+				auto it = gatewayNodeType.find(nodeId);
+				gatewayNodeType[nodeId] = (it == gatewayNodeType.end()) ? 1 : (it->second | 1);
+				std::cout << ' ' << nodeId;
+			}
+			std::cout << '\n';
+		} else if (key.compare("GATEWAY_DST") == 0) {
+			int n_nodes;
+			conf >> n_nodes;
+			std::cout << "GATEWAY_DST				";
+			for (int i = 0; i < n_nodes; i++) {
+				uint32_t nodeId;
+				conf >> nodeId;
+				auto it = gatewayNodeType.find(nodeId);
+				gatewayNodeType[nodeId] = (it == gatewayNodeType.end()) ? 2 : (it->second | 2);
+				std::cout << ' ' << nodeId;
+			}
+			std::cout << '\n';
+		} else if (key.compare("MAX_ATC_VOQ_COUNT") == 0) {
+			conf >> max_voq_count;
+			std::cout << "MAX_ATC_VOQ_COUNT		" << max_voq_count << "\n";
+		} else if (key.compare("MAX_ATC_VOQ_RATE") == 0) {
+			conf >> max_voq_rate;
+			std::cout << "MAX_ATC_VOQ_RATE		" << max_voq_rate << "\n";
 		} else if (key.compare("RATE_DECREASE_INTERVAL") == 0) {
 			double v;
 			conf >> v;
@@ -1541,6 +1584,10 @@ int main(int argc, char *argv[])
 		fflush(stdout);
 	}
 	conf.close();
+	if (gatewayTypeOverride != UINT32_MAX) {
+		gatewayFlag = gatewayTypeOverride;
+		std::cout << "GATEWAY_TYPE_OVERRIDE	" << gatewayFlag << "\n";
+	}
 
 	// Python selects the CC algorithm for each run; workload parameters stay in config-workload.txt.
 	cc_mode = algorithm; // overrides configuration file
@@ -1728,6 +1775,16 @@ int main(int argc, char *argv[])
 		std::cout << src << " " << dst << " " << n.GetN() << " " << data_rate << " " << link_delay << " " << error_rate << std::endl;
 		Ptr<Node> snode = n.Get(src), dnode = n.Get(dst);
 
+		if (gatewayNodeType.find(src) != gatewayNodeType.end() &&
+			gatewayNodeType.find(dst) != gatewayNodeType.end())
+		{
+			longHaulBandwidth = DataRate(data_rate).GetBitRate();
+			longHaulDelay = Time(link_delay);
+			std::cout << "[ATC] long-haul link " << src << "<->" << dst
+			          << " bandwidth=" << longHaulBandwidth
+			          << " delay=" << longHaulDelay.GetTimeStep() << " timestep\n";
+		}
+
 		qbb.SetDeviceAttribute("DataRate", StringValue(data_rate));
 		qbb.SetChannelAttribute("Delay", StringValue(link_delay));
 		if (error_rate > 0)
@@ -1853,6 +1910,25 @@ int main(int argc, char *argv[])
 			sw->m_mmu->SetIngressPool(buffer_size * 1024 * 1024);
 			sw->m_mmu->SetEgressLosslessPool(buffer_size * 1024 * 1024);
 			sw->m_mmu->node_id = sw->GetId();
+
+			if (gatewayFlag == 2) {
+				auto gatewayIt = gatewayNodeType.find(i);
+				if (gatewayIt != gatewayNodeType.end()) {
+					if (gatewayIt->second == 1) {
+						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
+						std::cout << "[ATC] Initialized source gateway switch " << i << std::endl;
+					}
+					else if (gatewayIt->second == 2) {
+						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
+						std::cout << "[ATC] Initialized destination gateway switch " << i << std::endl;
+					}
+					else if (gatewayIt->second == 3) {
+						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
+						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
+						std::cout << "[ATC] Initialized bidirectional gateway switch " << i << std::endl;
+					}
+				}
+			}
 
 			// // ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
 			// // 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小

@@ -7,6 +7,7 @@
 #include "switch-mmu.h"
 #include "pint.h"
 #include "frp-rate-calculator.h"
+#include "ns3/atcGateway.h"
 
 namespace ns3 {
 
@@ -75,6 +76,7 @@ protected:
 
 private:
 	int GetOutDev(Ptr<const Packet>, CustomHeader &ch);
+	Ptr<QbbNetDevice> GetOutDevice(Ptr<Packet> p, CustomHeader &ch);
 	void SendToDev(Ptr<Packet>p, CustomHeader &ch);
 	static uint32_t EcmpHash(const uint8_t* key, size_t len, uint32_t seed);
 	void CheckAndSendPfc(uint32_t inDev, uint32_t qIndex);
@@ -93,6 +95,7 @@ private:
 	bool CheckHasWan(Ipv4Address srcIp);
 public:
 	Ptr<SwitchMmu> m_mmu;
+	atcGateway m_atcGateway;
 
 	static TypeId GetTypeId (void);
 	SwitchNode();

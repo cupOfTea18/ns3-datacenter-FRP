@@ -103,6 +103,9 @@ SwitchNode::SwitchNode() {
 	for (uint32_t i = 0; i < pCnt; i++)
 		m_u[i] = 0;
 	
+
+	m_atcGateway.setSwitchSendToDevCallback(MakeCallback(&SwitchNode::SendToDev,this));
+	m_atcGateway.setGetOutDevCallback(MakeCallback(&SwitchNode::GetOutDevice,this));
 	// ========== 通用反馈包初始化 ==========
 	m_switchFeedbackEnabled = false;
 	m_feedbackInterval = MicroSeconds(10);
@@ -152,6 +155,15 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch) {
 	uint32_t idx = EcmpHash(buf.u8, 12, m_ecmpSeed) % nexthops.size();
 	// if (nexthops.size()>1){ std::cout << "selected " << idx << std::endl; }
 	return nexthops[idx];
+}
+
+Ptr<QbbNetDevice>  SwitchNode::GetOutDevice(Ptr< Packet> p, CustomHeader &ch) {
+	int idx = GetOutDev(p, ch);
+	if (idx >= 0) {
+		return DynamicCast<QbbNetDevice>(m_devices[idx]);
+	}
+
+	return nullptr;
 }
 
 void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex) {
@@ -281,6 +293,13 @@ void SwitchNode::ClearTable() {
 
 // This function can only be called in switch mode
 bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> packet, CustomHeader &ch) {
+	// atcGateway处理
+	bool ret = m_atcGateway.packetIn(device, packet, ch);
+	if (ret)
+	{
+		return true;
+	}
+	
 	SendToDev(packet, ch);
 	return true;
 }
@@ -309,19 +328,32 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize(), found);
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize(), found);
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
-		if (m_ecnEnabled) {
-			bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
-			if (egressCongested) {
-				PppHeader ppp;
-				Ipv4Header h;
-				p->RemoveHeader(ppp);
-				p->RemoveHeader(h);
-				h.SetEcn((Ipv4Header::EcnType)0x03);
-				p->AddHeader(h);
-				p->AddHeader(ppp);
+        if (m_ecnEnabled)
+        {
+            bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
+            if (egressCongested)
+            {
+                PppHeader ppp;
+                Ipv4Header h;
+                p->RemoveHeader(ppp);
+                p->RemoveHeader(h);
+                h.SetEcn((Ipv4Header::EcnType)0x03);
+                p->AddHeader(h);
+                p->AddHeader(ppp);
+                if (m_atcGateway.m_gatewayType == 1)
+                {                                    // ← 新增
+                    m_atcGateway.m_congested = true; // ←
+                }
+            }
+			else
+			{
+				if (m_atcGateway.m_gatewayType == 1)
+				{
+					m_atcGateway.m_congested = false;
+				}
 			}
-		}
-		//CheckAndSendPfc(inDev, qIndex);
+        }
+        //CheckAndSendPfc(inDev, qIndex);
 		CheckAndSendResume(inDev, qIndex);
 	}
 	if (1) {
