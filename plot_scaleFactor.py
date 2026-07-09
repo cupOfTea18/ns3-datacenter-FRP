@@ -81,7 +81,7 @@ plot_stacked_bars(
     "FCT (ms)",
     "Average and P99 FCT vs. scaleFactor",
     "Average FCT",
-    "P99 - Average",
+    "P99 FCT",
     "{:.3f}",
     "#1f77b4",
 )
@@ -94,7 +94,7 @@ plot_stacked_bars(
     "Queue Length (KB)",
     "Average and Maximum Queue Length vs. scaleFactor",
     "Average Queue Length",
-    "Maximum - Average",
+    "Maximum Queue Length",
     "{:.1f}",
     "#F58518",
 )
