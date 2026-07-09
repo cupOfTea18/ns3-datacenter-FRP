@@ -25,8 +25,17 @@ atcGateway::atcGateway()
     m_cnpNotifyInterval = CNP_NOTIFY_INTERVAL;
     m_cnpOnGlobalCongestion = true;
     m_voqReactToCnp = true;
+    m_voqInflightRtt = INTRA_DC_DELAY * 2;
     m_cnpByGlobalCongestion = 0;
     m_cnpByPacketEcn = 0;
+    m_diagLongHaulFeedbackRecv = 0;
+    m_diagLongHaulFeedbackSent = 0;
+    m_diagLongHaulOverInflight = 0;
+    m_diagLongHaulVoqOverload = 0;
+    m_diagLongHaulResume = 0;
+    m_diagThrottleCalls = 0;
+    m_diagMaxLongHaulInflight = 0;
+    m_diagMaxActiveVoqCount = 0;
 
      /******************************
 	 * Mellanox's version of DCQCN
@@ -51,7 +60,8 @@ void atcGateway::ConfigureAtcParams(uint32_t voqMaxSize,
                                     double rateDecreaseIntervalUs,
                                     double rpgTimeResetUs,
                                     bool cnpOnGlobalCongestion,
-                                    bool voqReactToCnp)
+                                    bool voqReactToCnp,
+                                    double voqInflightRttUs)
 {
     m_voqMaxSize = voqMaxSize;
     m_cnpNotifyInterval = MicroSeconds(cnpNotifyIntervalUs);
@@ -60,12 +70,53 @@ void atcGateway::ConfigureAtcParams(uint32_t voqMaxSize,
     m_rpgTimeReset = rpgTimeResetUs;
     m_cnpOnGlobalCongestion = cnpOnGlobalCongestion;
     m_voqReactToCnp = voqReactToCnp;
+    m_voqInflightRtt = MicroSeconds(voqInflightRttUs);
 
     if (m_debug & 0x2) {
-        printf("+++atcGateway params voqMaxSize:%u cnpNotifyInterval:%.3fus minRate:%s rateDecreaseInterval:%.3fus rpgTimeReset:%.3fus cnpOnGlobal:%u voqReactToCnp:%u\n",
+        printf("+++atcGateway params voqMaxSize:%u cnpNotifyInterval:%.3fus minRate:%s rateDecreaseInterval:%.3fus rpgTimeReset:%.3fus cnpOnGlobal:%u voqReactToCnp:%u voqInflightRtt:%.3fus\n",
                m_voqMaxSize, cnpNotifyIntervalUs, minRate.c_str(), m_rateDecreaseInterval, m_rpgTimeReset,
-               m_cnpOnGlobalCongestion ? 1 : 0, m_voqReactToCnp ? 1 : 0);
+               m_cnpOnGlobalCongestion ? 1 : 0, m_voqReactToCnp ? 1 : 0, voqInflightRttUs);
     }
+}
+
+void atcGateway::PrintAtcDebugSummary(const char* reason)
+{
+    if (!(m_debug & 0x2)) {
+        return;
+    }
+
+    uint64_t totalEnqueued = 0;
+    uint64_t totalSent = 0;
+    uint64_t totalBlocked = 0;
+    uint64_t totalAck = 0;
+    uint64_t totalCnpAck = 0;
+    uint64_t totalAckDeducted = 0;
+    uint64_t maxQueueBytes = 0;
+    uint64_t maxQueueLen = 0;
+    uint64_t maxVoqInflight = 0;
+    uint32_t activeVoqs = 0;
+
+    for (std::vector<VoqEntry>::const_iterator it = voqPool.begin(); it != voqPool.end(); ++it) {
+        totalEnqueued += it->diagBytesEnqueued;
+        totalSent += it->diagBytesSent;
+        totalBlocked += it->diagBlockedByInflight;
+        totalAck += it->diagAckCount;
+        totalCnpAck += it->diagCnpAckCount;
+        totalAckDeducted += it->diagAckBytesDeducted;
+        maxQueueBytes = std::max(maxQueueBytes, it->diagMaxCurrentSize);
+        maxQueueLen = std::max(maxQueueLen, it->diagMaxQueueLen);
+        maxVoqInflight = std::max(maxVoqInflight, it->diagMaxInflightBytes);
+        if (it->isAllocated) {
+            activeVoqs++;
+        }
+    }
+
+    printf("+++atcGateway diag reason:%s gatewayType:%d activeVoqs:%u enqBytes:%lu sentBytes:%lu blockedInflight:%lu ack:%lu cnpAck:%lu ackDeducted:%lu maxQueueBytes:%lu maxQueuePkts:%lu maxVoqInflight:%lu lhRecv:%lu lhSent:%lu lhOver:%lu lhVoqOver:%lu lhResume:%lu throttle:%lu maxLhInflight:%lu maxActiveVoq:%u time:%f\n",
+           reason, m_gatewayType, activeVoqs, totalEnqueued, totalSent, totalBlocked, totalAck, totalCnpAck,
+           totalAckDeducted, maxQueueBytes, maxQueueLen, maxVoqInflight, m_diagLongHaulFeedbackRecv,
+           m_diagLongHaulFeedbackSent, m_diagLongHaulOverInflight, m_diagLongHaulVoqOverload,
+           m_diagLongHaulResume, m_diagThrottleCalls, m_diagMaxLongHaulInflight, m_diagMaxActiveVoqCount,
+           Simulator::Now().GetSeconds());
 }
 
 void atcGateway::init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uint64_t longHaulBandwidth,Time longHaulDelay)
@@ -82,7 +133,7 @@ void atcGateway::init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uin
         voqPool[i].currentSize = 0;
         voqPool[i].maxSize = m_voqMaxSize;
         voqPool[i].currentInflightBytes = 0;
-        voqPool[i].maxInflightBytes =  m_maxVoqRate * INTRA_DC_DELAY.GetSeconds() *2/8.0;
+        voqPool[i].maxInflightBytes =  m_maxVoqRate * m_voqInflightRtt.GetSeconds() / 8.0;
         voqPool[i].isAllocated = false;
         voqPool[i].lastTransmitTime = Seconds(0);
     }
@@ -247,6 +298,8 @@ void atcGateway::TransmitFromVoq(uint32_t voqId) {
     {
         voq.packetQueue.pop();
         voq.currentSize -= pktSize;
+        voq.diagPacketsSent++;
+        voq.diagBytesSent += pktSize;
 
         if (longHaulState.longHaulSrcIps.find(ch.sip) != longHaulState.longHaulSrcIps.end()) {
             longHaulState.remoteForwardedBytes += pktSize;
@@ -257,6 +310,11 @@ void atcGateway::TransmitFromVoq(uint32_t voqId) {
 
         // 报文统计
         voq.currentInflightBytes += pktSize;
+        voq.diagMaxInflightBytes = std::max(voq.diagMaxInflightBytes, voq.currentInflightBytes);
+    }
+    else
+    {
+        voq.diagBlockedByInflight++;
     }
     
     // 更新最后转发时间
@@ -585,6 +643,10 @@ bool atcGateway::HandleDataPacketWithVoq(Ptr<NetDevice> device, Ptr<Packet> pkt,
     // 将清理后的数据包存储到VOQ
     voq.packetQueue.push(cleanPkt);
     voq.currentSize += cleanPkt->GetSize();
+    voq.diagPacketsEnqueued++;
+    voq.diagBytesEnqueued += cleanPkt->GetSize();
+    voq.diagMaxCurrentSize = std::max(voq.diagMaxCurrentSize, voq.currentSize);
+    voq.diagMaxQueueLen = std::max<uint64_t>(voq.diagMaxQueueLen, voq.packetQueue.size());
     VoqStat();
 
     if (m_packet_size == 0) {
@@ -617,15 +679,19 @@ bool atcGateway::HandleAckPacketWithVoq(Ptr<NetDevice> device, Ptr<Packet> pkt, 
         uint32_t voqId = voqIt->second;
         VoqEntry& voq = voqPool[voqId];
 
+        uint64_t beforeInflight = voq.currentInflightBytes;
         if (voq.currentInflightBytes >= m_packet_size) {
             voq.currentInflightBytes -= m_packet_size;
         }
         else {
             voq.currentInflightBytes = 0;
         }
+        voq.diagAckCount++;
+        voq.diagAckBytesDeducted += beforeInflight - voq.currentInflightBytes;
         
         // 处理CNP
         if (cnp) {
+            voq.diagCnpAckCount++;
             // 使用VOQ版本的DCQCN处理CNP
             if (m_voqReactToCnp) {
                 cnp_received_mlx_voq(&voq);
@@ -649,6 +715,7 @@ void atcGateway::ThrottleLocalForwarding(Ptr<NetDevice> dev, uint64_t rate) {
     
     Ptr<QbbNetDevice> qbbDev = DynamicCast<QbbNetDevice>(dev);
     if (qbbDev) {
+        m_diagThrottleCalls++;
         // 使用QBB设备的速率控制
         qbbDev->SetDataRate(DataRate(rate));
     }
@@ -661,6 +728,11 @@ bool atcGateway::HandleLongHaulFeedback(Ptr<NetDevice> device, Ptr<Packet> pkt, 
     uint32_t activeVoqCount = ch.tcp.dport;
     uint64_t rateLimit = 0;
     bool limit = false;
+    m_diagLongHaulFeedbackRecv++;
+    m_diagMaxActiveVoqCount = std::max(m_diagMaxActiveVoqCount, activeVoqCount);
+    if ((m_diagLongHaulFeedbackRecv % 1000) == 0) {
+        PrintAtcDebugSummary("periodic-longhaul-recv");
+    }
 
     if (m_debug & 0x2)
          printf("+++atcGateway recv LongHaulFeedback localSentBytes:%lu remoteForwardedBytes:%lu  inflightBytes:%lu activeVoqCount:%d  time:%f\n",
@@ -668,9 +740,11 @@ bool atcGateway::HandleLongHaulFeedback(Ptr<NetDevice> device, Ptr<Packet> pkt, 
 
     if (longHaulState.localSentBytes > remoteForwardedBytes) {
         uint64_t inflightBytes = longHaulState.localSentBytes - remoteForwardedBytes;
+        m_diagMaxLongHaulInflight = std::max(m_diagMaxLongHaulInflight, inflightBytes);
         
         // 若在途字节数超过阈值，限流
         if (inflightBytes > longHaulState.maxInflightBytes) {
+            m_diagLongHaulOverInflight++;
             
             if (longHaulState.inflightBytes > 0 && longHaulState.lastLocalSentBytes > 0 && inflightBytes > longHaulState.inflightBytes && longHaulState.localSentBytes > longHaulState.lastLocalSentBytes)
             {
@@ -704,6 +778,7 @@ bool atcGateway::HandleLongHaulFeedback(Ptr<NetDevice> device, Ptr<Packet> pkt, 
         longHaulState.activeVoqCount = activeVoqCount;
         bool voqOverload = activeVoqCount > (N_THRESHOLD_RATIO * m_maxVoqCount);
         if (voqOverload) {
+            m_diagLongHaulVoqOverload++;
             double K = 1.0 / m_maxVoqCount;
             rateLimit = K*longHaulState.longHaulBandwidth;
             if (rateLimit != longHaulState.rateLimit) //波动才限流
@@ -718,6 +793,7 @@ bool atcGateway::HandleLongHaulFeedback(Ptr<NetDevice> device, Ptr<Packet> pkt, 
     }
 
     if (!limit && longHaulState.rateLimit < longHaulState.longHaulBandwidth) {
+        m_diagLongHaulResume++;
         longHaulState.rateLimit = longHaulState.longHaulBandwidth;
         ThrottleLocalForwarding(device, longHaulState.rateLimit);
         if (m_debug & 0x2)
@@ -805,6 +881,10 @@ void atcGateway::GenerateLongHaulFeedback() {
         CustomHeader bfCh(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
         newp->PeekHeader(bfCh);
         DoSwitchSendToDev(newp, bfCh);
+        m_diagLongHaulFeedbackSent++;
+        if ((m_diagLongHaulFeedbackSent % 1000) == 0) {
+            PrintAtcDebugSummary("periodic-longhaul");
+        }
 
         if (longHaulState.firstFeedback) {
             longHaulState.firstFeedback = false;

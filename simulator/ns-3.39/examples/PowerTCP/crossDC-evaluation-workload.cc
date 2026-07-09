@@ -84,6 +84,7 @@ double atc_rate_decrease_interval_us = 4.0;
 double atc_rpg_time_reset_us = 480.0;
 bool atc_cnp_on_global_congestion = true;
 bool atc_voq_react_to_cnp = true;
+double atc_voq_inflight_rtt_us = 12.0;
 uint64_t longHaulBandwidth = 100000000000ULL;
 Time longHaulDelay = MicroSeconds(5000);
 
@@ -1441,6 +1442,9 @@ int main(int argc, char *argv[])
 			conf >> v;
 			atc_voq_react_to_cnp = (v != 0);
 			std::cout << "ATC_VOQ_REACT_TO_CNP		" << (atc_voq_react_to_cnp ? 1 : 0) << "\n";
+		} else if (key.compare("ATC_VOQ_INFLIGHT_RTT_US") == 0) {
+			conf >> atc_voq_inflight_rtt_us;
+			std::cout << "ATC_VOQ_INFLIGHT_RTT_US	" << atc_voq_inflight_rtt_us << "us\n";
 		} else if (key.compare("RATE_DECREASE_INTERVAL") == 0) {
 			double v;
 			conf >> v;
@@ -1947,17 +1951,17 @@ int main(int argc, char *argv[])
 				auto gatewayIt = gatewayNodeType.find(i);
 				if (gatewayIt != gatewayNodeType.end()) {
 					if (gatewayIt->second == 1) {
-						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp, atc_voq_inflight_rtt_us);
 						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized source gateway switch " << i << std::endl;
 					}
 					else if (gatewayIt->second == 2) {
-						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp, atc_voq_inflight_rtt_us);
 						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized destination gateway switch " << i << std::endl;
 					}
 					else if (gatewayIt->second == 3) {
-						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp);
+						sw->m_atcGateway.ConfigureAtcParams(atc_voq_max_size, atc_cnp_notify_interval_us, atc_min_rate, atc_rate_decrease_interval_us, atc_rpg_time_reset_us, atc_cnp_on_global_congestion, atc_voq_react_to_cnp, atc_voq_inflight_rtt_us);
 						sw->m_atcGateway.init(1, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						sw->m_atcGateway.init(2, max_voq_count, max_voq_rate, longHaulBandwidth, longHaulDelay);
 						std::cout << "[ATC] Initialized bidirectional gateway switch " << i << std::endl;

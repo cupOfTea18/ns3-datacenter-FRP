@@ -59,6 +59,7 @@ results/
 /tmp/*.log
 /tmp/frp_simulation.log
 /tmp/algo_cc*.log
+dump/
 
 # ---------- IDE 配置 ----------
 .vscode/

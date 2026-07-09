@@ -60,6 +60,18 @@ struct VoqEntry {
 
     uint64_t currentInflightBytes; // 当前在飞行中的字节数（字节）
     uint64_t maxInflightBytes; // 最大飞行字节数（字节）
+
+    uint64_t diagPacketsEnqueued;
+    uint64_t diagBytesEnqueued;
+    uint64_t diagPacketsSent;
+    uint64_t diagBytesSent;
+    uint64_t diagBlockedByInflight;
+    uint64_t diagAckCount;
+    uint64_t diagCnpAckCount;
+    uint64_t diagAckBytesDeducted;
+    uint64_t diagMaxCurrentSize;
+    uint64_t diagMaxQueueLen;
+    uint64_t diagMaxInflightBytes;
     
     // ========== DCQCN状态（基于VOQ的拥塞控制） ==========
     MLX1 mlx;                          // DCQCN状态
@@ -69,7 +81,10 @@ struct VoqEntry {
     
     // 构造函数，初始化DCQCN状态
     VoqEntry() : voqId(0), currentSize(0), maxSize(0), isAllocated(false), 
-                lastTransmitTime(Seconds(0)), 
+                lastTransmitTime(Seconds(0)), currentInflightBytes(0), maxInflightBytes(0),
+                diagPacketsEnqueued(0), diagBytesEnqueued(0), diagPacketsSent(0), diagBytesSent(0),
+                diagBlockedByInflight(0), diagAckCount(0), diagCnpAckCount(0), diagAckBytesDeducted(0),
+                diagMaxCurrentSize(0), diagMaxQueueLen(0), diagMaxInflightBytes(0),
                  m_rate(DataRate(0)), dcqcn_initialized(false) {
         // 初始化DCQCN状态
         mlx.m_alpha = 1.0;
@@ -125,8 +140,17 @@ public:
     Time m_cnpNotifyInterval; // source gateway CNP限频间隔
     bool m_cnpOnGlobalCongestion; // 是否允许source gateway全局拥塞状态触发CNP
     bool m_voqReactToCnp; // destination VOQ是否对ACK/CNP降速
+    Time m_voqInflightRtt; // destination VOQ下游在途窗口使用的RTT估计
     uint64_t m_cnpByGlobalCongestion;
     uint64_t m_cnpByPacketEcn;
+    uint64_t m_diagLongHaulFeedbackRecv;
+    uint64_t m_diagLongHaulFeedbackSent;
+    uint64_t m_diagLongHaulOverInflight;
+    uint64_t m_diagLongHaulVoqOverload;
+    uint64_t m_diagLongHaulResume;
+    uint64_t m_diagThrottleCalls;
+    uint64_t m_diagMaxLongHaulInflight;
+    uint32_t m_diagMaxActiveVoqCount;
     
     // ========== VOQ相关成员变量 ==========
     uint32_t m_maxVoqCount;             // 最大VOQ数量
@@ -186,7 +210,8 @@ public:
                             double rateDecreaseIntervalUs,
                             double rpgTimeResetUs,
                             bool cnpOnGlobalCongestion,
-                            bool voqReactToCnp);
+                            bool voqReactToCnp,
+                            double voqInflightRttUs);
     void init(int type,uint32_t max_voq_count,uint64_t max_voq_rate, uint64_t longHaulBandwidth,Time longHaulDelay);
     void setSwitchSendToDevCallback(Callback<void, Ptr<Packet>, CustomHeader&> cb);
     void DoSwitchSendToDev(Ptr<Packet> p, CustomHeader& ch);
@@ -204,6 +229,7 @@ public:
     void ScheduleVoqForward(uint32_t voqId);
     // VOQ统计
     void VoqStat();
+    void PrintAtcDebugSummary(const char* reason);
     
     // ========== 调度表管理 ==========
     ScheduleEntry GetOrCreateScheduleEntry(Ipv4Address destIp);
