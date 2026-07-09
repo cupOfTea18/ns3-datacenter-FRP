@@ -1969,32 +1969,32 @@ int main(int argc, char *argv[])
 				}
 			}
 
-			// // ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
-			// // 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小
-			// //       导致队列可以推到7MB+才丢包。改为2MB+100KB+100ms。
-			// if (sw->GetId() == 93) {
-			// 	const uint32_t HOST_PORT = 1;     // SW93 port1 = SW85 (接 host53)
-			// 	const uint32_t PFC_PG    = 1;     // host 流量所在 PG
-			// 	const uint32_t TWO_MB    = 2 * 1024 * 1024;
-			// 	const uint32_t HEADROOM  = 100 * 1024;  // 2MB 阈值后再绥冲 100KB
-			// 	const uint32_t XON_BYTES = 256 * 1024;  // 队列跌到 256KB 以下才 resume
+			// ========== SW93 port 1 (接 SW85→host53) PFC特殊配置 ==========
+			// 原因: 默认 threshold=2.25MB (alpha=1/8) + headroom=BDP×3=37.5KB 过小
+			//       导致队列可以推到7MB+才丢包。改为2MB+100KB+100ms。
+			if (sw->GetId() == 93) {
+				const uint32_t HOST_PORT = 1;     // SW93 port1 = SW85 (接 host53)
+				const uint32_t PFC_PG    = 1;     // host 流量所在 PG
+				const uint32_t TWO_MB    = 2 * 1024 * 1024;
+				const uint32_t HEADROOM  = 100 * 1024;  // 2MB 阈值后再绥冲 100KB
+				const uint32_t XON_BYTES = 256 * 1024;  // 队列跌到 256KB 以下才 resume
 
-			// 	// 设 alphaIngress 使 threshold≈2MB (18MB pool × 2/18 ≈ 2MB)
-			// 	sw->m_mmu->SetAlphaIngress(2.0 / 18.0, HOST_PORT, PFC_PG);
-			// 	// 同步设 headroom (2MB阈值后允许多绥100KB)
-			// 	sw->m_mmu->SetHeadroom(HEADROOM, HOST_PORT, PFC_PG);
-			// 	// 调高 resume 阈值避免频繁 resume/pause 振荡
-			// 	sw->m_mmu->SetXon(XON_BYTES, HOST_PORT, PFC_PG);
-			// 	sw->m_mmu->SetXonOffset(XON_BYTES, HOST_PORT, PFC_PG);
-			// 	std::cout << "[PFC] SW93 port 1: threshold=2MB, headroom="
-			// 	          << HEADROOM << "B, xon=" << XON_BYTES << "B" << std::endl;
+				// 设 alphaIngress 使 threshold≈2MB (18MB pool × 2/18 ≈ 2MB)
+				sw->m_mmu->SetAlphaIngress(2.0 / 18.0, HOST_PORT, PFC_PG);
+				// 同步设 headroom (2MB阈值后允许多绥100KB)
+				sw->m_mmu->SetHeadroom(HEADROOM, HOST_PORT, PFC_PG);
+				// 调高 resume 阈值避免频繁 resume/pause 振荡
+				sw->m_mmu->SetXon(XON_BYTES, HOST_PORT, PFC_PG);
+				sw->m_mmu->SetXonOffset(XON_BYTES, HOST_PORT, PFC_PG);
+				std::cout << "[PFC] SW93 port 1: threshold=2MB, headroom="
+				          << HEADROOM << "B, xon=" << XON_BYTES << "B" << std::endl;
 
-			// 	// 同时调高 PauseTime：默认5μs太短，跨域RTT≈1ms+，不够上游响应
-			// 	for (uint32_t k = 1; k < sw->GetNDevices(); k++) {
-			// 		Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(k));
-			// 		dev->SetAttribute("PauseTime", UintegerValue(100000));  // 100ms
-			// 	}
-			// }
+				// 同时调高 PauseTime：默认5μs太短，跨域RTT≈1ms+，不够上游响应
+				for (uint32_t k = 1; k < sw->GetNDevices(); k++) {
+					Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(sw->GetDevice(k));
+					dev->SetAttribute("PauseTime", UintegerValue(100000));  // 100ms
+				}
+			}
 		}
 	}
 

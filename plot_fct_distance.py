@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Plot average FCT across different distances for five RDMA congestion control algorithms.
+"""Plot Average + Tail (P99) FCT across different distances for RDMA congestion control algorithms.
 Data is taken from the experimental result table.
 """
 
@@ -10,45 +9,79 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Experimental data
-distances = ["200 km", "400 km", "600 km","800 km"]
-algorithms = ["DCQCN", "HPCC", "TIMELY", "FRP", "ROCC"]
+distances = ["200 km", "400 km", "600 km", "800 km", "1000 km"]
+x = np.arange(len(distances))
+algorithms = ["DCQCN", "HPCC", "TIMELY", "FRP", "ROCC", "ATC"]
 
-# Rows: distance; columns: algorithm in the order above
-fct_data = np.array([
-    [1758.98, 2534.52, 2280.11, 1450.12, 1406.17],
-    [2668.47, 4379.74, 3159.77, 2535.77, 2424.82],
-    [3712.46, 4290.53, 4243.15, 3580.87, 3473.06],
-    [4790.36, 5219.56, 5237.9, 4618.76, 4534.6]
-])
+# 平均 FCT
+avg_fct = {
+    "DCQCN": [4.270, 4.896, 5.066, 5.220, 5.380],
+    "HPCC":  [6.829, 9.866, 7.270, 10.269, 12.326],
+    "TIMELY":[8.274, 6.051, 6.256, 6.361, 6.544],
+    "FRP":   [3.968, 4.830, 3.972, 3.706, 3.647],
+    "ROCC":  [4.816, 4.881, 4.151, 4.150, 6.149],
+    "ATC":   [6.292, 7.374, 6.415, 6.141, 6.057],
+}
+
+# P99 FCT
+p99_fct = {
+    "DCQCN": [7.080, 7.950, 9.732, 11.508, 13.287],
+    "HPCC":  [9.777, 14.999, 14.590, 16.397, 17.863],
+    "TIMELY":[16.300, 15.365, 15.379, 15.153, 15.392],
+    "FRP":   [6.736, 10.355, 5.822, 6.407, 6.230],
+    "ROCC":  [7.192, 7.173, 6.118, 6.123, 6.123],
+    "ATC":   [10.992, 15.601, 12.527, 10.217, 9.531],
+}
+
+colors = {
+    "DCQCN": "#1f77b4",
+    "HPCC":  "#9467bd",
+    "TIMELY":"#2ca02c",
+    "FRP":   "#d62728",
+    "ROCC":  "#e377c2",
+    "ATC":   "#8c564b",
+}
 
 # Plot settings
-x = np.arange(len(distances))
-width = 0.15
-colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+bar_width = 0.12
+offsets = np.linspace(-2.5 * bar_width, 2.5 * bar_width, len(algorithms))
 
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(12, 6))
 
-# Draw grouped bars for each algorithm
+# Draw stacked grouped bars for each algorithm
 for i, algo in enumerate(algorithms):
-    offset = (i - 2) * width
-    bars = ax.bar(x + offset, fct_data[:, i], width, label=algo, color=colors[i])
-    # Add value labels on top of each bar
-    for bar in bars:
-        height = bar.get_height()
-        ax.annotate(f"{height:.1f}",
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha="center", va="bottom",
-                    fontsize=9)
+    avg = np.array(avg_fct[algo])
+    p99 = np.array(p99_fct[algo])
+    pos = x + offsets[i]
+    ax.bar(
+        pos,
+        avg,
+        bar_width,
+        label=f"{algo} Average",
+        color=colors[algo],
+        edgecolor="black",
+        linewidth=0.5,
+    )
+    ax.bar(
+        pos,
+        p99,
+        bar_width,
+        bottom=avg,
+        label=f"{algo} Tail",
+        color=colors[algo],
+        edgecolor="black",
+        linewidth=0.5,
+        hatch="//",
+        alpha=0.85,
+    )
 
 # Axis and labels
 ax.set_xlabel("Distance", fontsize=14)
-ax.set_ylabel("Average FCT (us)", fontsize=14)
-ax.set_title("Average FCT vs. Distance", fontsize=16)
+ax.set_ylabel("FCT (ms)", fontsize=14)
+ax.set_title("Average and Tail Latency vs. Distance", fontsize=16)
 ax.set_xticks(x)
 ax.set_xticklabels(distances, fontsize=12)
-ax.legend(loc="upper left", fontsize=12)
+ax.legend(ncol=3, fontsize=9, loc="upper left")
 ax.grid(axis="y", linestyle="--", alpha=0.6)
 
 plt.tight_layout()
@@ -57,5 +90,3 @@ plt.tight_layout()
 output_path = "results/fct_distance_comparison.png"
 plt.savefig(output_path, dpi=300, bbox_inches="tight")
 print(f"Figure saved to: {output_path}")
-
-plt.show()
