@@ -162,6 +162,77 @@ def load_query_flow_keys(query_flow_file):
     return keys
 
 
+def parse_ip_to_node_map(lines):
+    """Return {IPv4 uint32: node_id} from the routing-table audit log."""
+    ip_to_node = {}
+    pattern = re.compile(r"OK:\s*Host\s+(\d+)\s+\(IP=(\d+\.\d+\.\d+\.\d+)\)")
+    for line in lines:
+        match = pattern.search(line)
+        if not match:
+            continue
+        octets = [int(octet) for octet in match.group(2).split(".")]
+        ip_value = ((octets[0] << 24) | (octets[1] << 16) |
+                    (octets[2] << 8) | octets[3])
+        ip_to_node[ip_value] = int(match.group(1))
+    return ip_to_node
+
+
+def parse_tx_rate(lines, ip_to_node, query_flow_keys):
+    """Return periodic send-side rates for query flows, in ms and Gbps."""
+    tx_rates = {}
+    pattern = re.compile(
+        r"\[TX RATE\] Host (\d+) sip (\d+) dip (\d+) sport (\d+) dport (\d+) "
+        r"pg (\d+) txRate ([\d.]+)bps t (\d+)ns"
+    )
+    for line in lines:
+        match = pattern.search(line)
+        if not match:
+            continue
+        host, sip, dip, sport, dport, _pg, rate_bps, time_ns = match.groups()
+        src_node = ip_to_node.get(int(sip), int(host))
+        dst_node = ip_to_node.get(int(dip))
+        if dst_node is None:
+            continue
+        dport = int(dport)
+        if (src_node, dst_node, dport) not in query_flow_keys:
+            continue
+        key = (src_node, dst_node, int(sport), dport)
+        data = tx_rates.setdefault(key, {"times": [], "rates": []})
+        data["times"].append(int(time_ns) / 1e6)
+        data["rates"].append(float(rate_bps) / 1e9)
+    return tx_rates
+
+
+def plot_tx_rate(tx_rates, output_path, algo_name, cc_mode, load):
+    """Save a separate send-side TX-rate plot for query flows."""
+    plt.rcParams["font.family"] = "DejaVu Sans"
+    plt.rcParams["axes.unicode_minus"] = False
+    colors = ["red", "blue", "green", "orange", "purple", "cyan", "lime", "brown",
+              "pink", "gray", "magenta", "olive", "teal", "navy", "maroon", "coral",
+              "gold", "indigo"]
+
+    fig, ax = plt.subplots(figsize=(18, 7))
+    fig.suptitle(f"{algo_name} (ccMode={cc_mode}) - TX Rate (Send Side), load={load}",
+                 fontsize=18, fontweight="bold")
+    active_flows = sorted(tx_rates)
+    for idx, key in enumerate(active_flows):
+        data = tx_rates[key]
+        ax.plot(data["times"], data["rates"], color=colors[idx % len(colors)], lw=2,
+                label=f"TX {key[0]}->{key[1]} (sp={key[2]}, dp={key[3]})", alpha=0.85)
+    ax.set_xlabel("Time (ms)", fontsize=14, fontweight="bold")
+    ax.set_ylabel("TX Rate (Gbps)", fontsize=14, fontweight="bold")
+    ax.set_title(f"TX Rate - query flows ({len(active_flows)} flows, sample=100us)",
+                 fontsize=15, fontweight="bold")
+    ax.legend(loc="upper right", fontsize=10, ncol=3, framealpha=0.9)
+    ax.grid(True, alpha=0.3, linestyle="--")
+    ax.set_ylim(bottom=0)
+    ax.tick_params(labelsize=11)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"TX RATE plot saved: {output_path}")
+
+
 def render_template(template, suffix, args, load):
     return template.format(
         suffix=suffix,
@@ -387,7 +458,20 @@ def run_and_plot(args):
         plt.tight_layout()
         output_file = os.path.join(RESULTS_DIR, f"workload_{args.algo_name.lower()}_cc{args.ccMode}_load{load_tag(load)}.png")
         plt.savefig(output_file, dpi=150, bbox_inches="tight")
+        plt.close(fig)
         print(f"Plot saved: {output_file}\n")
+
+        ip_to_node = parse_ip_to_node_map(lines)
+        tx_rates = parse_tx_rate(lines, ip_to_node, query_flow_keys)
+        tx_rate_output_file = os.path.join(
+            RESULTS_DIR,
+            f"workload_txrate_{args.algo_name.lower()}_cc{args.ccMode}_load{load_tag(load)}.png",
+        )
+        if tx_rates:
+            plot_tx_rate(tx_rates, tx_rate_output_file, args.algo_name, args.ccMode, load)
+        else:
+            print("Warning: no query-flow TX RATE data was parsed; skipping TX RATE plot. "
+                  "Check that periodic TX-rate sampling and routing-table audit logs are enabled.")
 
         fct_ns = []
         if os.path.exists(fct_out):
@@ -428,6 +512,8 @@ def run_and_plot(args):
         print(f"FCT: {fct_out}")
         print(f"PFC: {pfc_out}")
         print(f"Image file: {output_file}")
+        if tx_rates:
+            print(f"TX RATE image file: {tx_rate_output_file}")
 
         if os.path.exists(query_fct_out):
             analyze_query_flow_fct(query_fct_out)

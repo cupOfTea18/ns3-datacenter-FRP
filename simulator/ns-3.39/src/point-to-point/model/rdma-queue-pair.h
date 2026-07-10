@@ -115,6 +115,12 @@ public:
 		bool m_timerExpired;             // 定时器是否超时
 	} frp;
 
+	struct {
+		uint64_t lastSeq;
+		Time lastTime;
+		EventId m_eventId;
+	} txRate;
+
 	/***********
 	 * methods
 	 **********/

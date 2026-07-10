@@ -729,10 +729,11 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
                   << " (qCur=" << qCurCell << " qRef=" << qRefCell << ")"
                   << " type=" << ccMode << std::endl;
 
-        // 结构化数据日志 (CSV格式，便于画图，使用stderr确保无缓冲)
+        // 结构化数据日志。与 TX RATE 和 DCQCN 队列日志共用 stdout，避免
+        // runner 合并 stdout/stderr 时发生记录交叉。
         double fairRateMbps = calculatedRateBps / 1e6;
         double qCurKB = static_cast<double>(currentQDepth) / 1024.0;
-        fprintf(stderr, "[FRP_DATA_SW] %.9f %u %u %.2f %.2f %.2f %d\n",
+        printf("[FRP_DATA_SW] %.9f %u %u %.2f %.2f %.2f %d\n",
                 Simulator::Now().GetSeconds(), m_id, ifIndex,
                 fairRateMbps, qCurKB, (qDevField * 600.0 / 1024.0), ccMode);
 

@@ -181,6 +181,11 @@ TypeId RdmaHw::GetTypeId (void)
 	                                  MakeUintegerChecker<uint32_t>())
 	                    .AddAttribute("PowerTCPEnabled", "to enable PowerTCP", BooleanValue(false), MakeBooleanAccessor(&RdmaHw::PowerTCPEnabled), MakeBooleanChecker())
 	                    .AddAttribute("PowerTCPdelay", "to enable PowerTCP in delaymode", BooleanValue(false), MakeBooleanAccessor(&RdmaHw::PowerTCPdelay), MakeBooleanChecker())
+	                    .AddAttribute("TxRateSampleInterval",
+	                                  "TX rate sampling interval in microseconds. Set to 0 to disable.",
+	                                  DoubleValue(100.0),
+	                                  MakeDoubleAccessor(&RdmaHw::m_txRateSampleInterval),
+	                                  MakeDoubleChecker<double>(0.0))
 	                    ;
 	return tid;
 }
@@ -290,6 +295,12 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 
 	// Notify Nic
 	m_nic[nic_idx].dev->NewQp(qp);
+	if (m_txRateSampleInterval > 0) {
+		qp->txRate.lastSeq = qp->snd_nxt;
+		qp->txRate.lastTime = Simulator::Now();
+		qp->txRate.m_eventId = Simulator::Schedule(MicroSeconds(m_txRateSampleInterval),
+		                                            &RdmaHw::SampleTxRate, this, qp);
+	}
 }
 
 void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp) {
@@ -573,6 +584,7 @@ void RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp) {
 		Simulator::Cancel(qp->mlx.m_eventDecreaseRate);
 		Simulator::Cancel(qp->mlx.m_rpTimer);
 	}
+	Simulator::Cancel(qp->txRate.m_eventId);
 
 	// This callback will log info
 	// It may also delete the rxQp on the receiver
@@ -682,23 +694,32 @@ void RdmaHw::UpdateNextAvail(Ptr<RdmaQueuePair> qp, Time interframeGap, uint32_t
         else
                 sendingTime = interframeGap + qp->m_max_rate.CalculateBytesTxTime(pkt_size);
         qp->m_nextAvail = Simulator::Now() + sendingTime;
-        
-        // 输出所有流的发送速率（不同QP设置不同的计数器，各自每50个包输出一次）
-        static std::unordered_map<uint64_t, uint32_t> qpDebugCounters;
-        uint64_t qpKey = ((uint64_t)m_node->GetId() << 32) | GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
-        if (qpDebugCounters[qpKey]++ % 50 == 0) {
-                std::cout << "[TX RATE] Host " << m_node->GetId() 
-                          << " qp=" << qp->sip << "->" << qp->dip
-                          << " m_rate=" << (qp->m_rate.GetBitRate()/1e6) << "Mbps"
-                          << " m_max_rate=" << (qp->m_max_rate.GetBitRate()/1e6) << "Mbps"
-                          << " pkt_size=" << pkt_size
-                          << " snd_nxt=" << qp->snd_nxt
-                          << " snd_una=" << qp->snd_una
-                          << " bytesLeft=" << qp->GetBytesLeft()
-                          << " nextAvail=" << qp->m_nextAvail.GetMicroSeconds() << "us"
-                          << " t=" << Simulator::Now().GetMicroSeconds() << "us"
-                          << std::endl;
-        }
+}
+
+void RdmaHw::SampleTxRate(Ptr<RdmaQueuePair> qp) {
+	if (qp == NULL || qp->IsFinished() || m_txRateSampleInterval <= 0) {
+		return;
+	}
+
+	Time now = Simulator::Now();
+	uint64_t curSeq = qp->snd_nxt;
+	uint64_t sentBytes = curSeq >= qp->txRate.lastSeq ? curSeq - qp->txRate.lastSeq : 0;
+	double dtSec = (now - qp->txRate.lastTime).GetSeconds();
+	double rateBps = dtSec > 0 ? static_cast<double>(sentBytes) * 8.0 / dtSec : 0.0;
+
+	// Keep DCQCN queue logs and TX RATE logs on stdout.  Both use the same
+	// stdio stream, so each printf call is serialized instead of being
+	// interleaved after the runner redirects stdout and stderr to one file.
+	printf("[TX RATE] Host %u sip %u dip %u sport %u dport %u pg %u txRate %.0fbps t %luns\n",
+	        m_node->GetId(),
+	        qp->sip.Get(), qp->dip.Get(),
+	        qp->sport, qp->dport, qp->m_pg,
+	        rateBps, now.GetNanoSeconds());
+
+	qp->txRate.lastSeq = curSeq;
+	qp->txRate.lastTime = now;
+	qp->txRate.m_eventId = Simulator::Schedule(MicroSeconds(m_txRateSampleInterval),
+	                                            &RdmaHw::SampleTxRate, this, qp);
 }
 void RdmaHw::ChangeRate(Ptr<RdmaQueuePair> qp, DataRate new_rate) {
 #if 1
