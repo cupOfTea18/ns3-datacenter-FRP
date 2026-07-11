@@ -72,6 +72,7 @@ private:
     
     // 队列阈值和参考值 (单位: Byte)
     double m_qThBytes;           // q_th阈值
+    double m_qRef40GBytes;       // 40Gbps时的q_ref
     double m_qRef100GBytes;      // 100Gbps时的q_ref
     double m_qRef200GBytes;      // 200Gbps时的q_ref
 };

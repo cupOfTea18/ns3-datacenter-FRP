@@ -680,7 +680,14 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         uint32_t prevQBytes    = m_prevQBytes[ifIndex];
 
         // 2. 本轮采样转换成 cell 单位，与 frp-rate-calculator.cc 保持一致
-        const double qRefBytesLocal = (link_bps >= 200ULL * 1000000000ULL) ? 1048576.0 : 307200.0;
+        double qRefBytesLocal;
+        if (link_bps >= 200ULL * 1000000000ULL) {
+            qRefBytesLocal = 1048576.0;  // 1MB (200Gbps)
+        } else if (link_bps >= 100ULL * 1000000000ULL) {
+            qRefBytesLocal = 307200.0;   // 300KB (100Gbps)
+        } else {
+            qRefBytesLocal = 307200.0;   // 300KB (40Gbps)
+        }
         const double qThBytesLocal  = 307200.0;   // 300KB 与 frp-rate-calculator.cc 一致
         const double qCurCellLocal  = static_cast<double>(currentQDepth) / 600.0;
         const double qRefCellLocal  = qRefBytesLocal / 600.0;

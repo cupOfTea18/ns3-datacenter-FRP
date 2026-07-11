@@ -26,7 +26,8 @@ FrpRateCalculator::FrpRateCalculator() {
 
     // 队列阈值和参考值 (单位: Byte)
     m_qThBytes = 307200.0;       // 300KB = 307200 Byte
-    m_qRef100GBytes = 307200.0;   
+    m_qRef40GBytes = 307200.0;   // 40Gbps 用 300KB
+    m_qRef100GBytes = 307200.0;
     m_qRef200GBytes = 1048576.0; // 1MB = 1048576 Byte (200Gbps)
     
     NS_LOG_INFO("FRP Rate Calculator initialized: alpha=" << m_alpha 
@@ -55,7 +56,14 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     }
 
     // 根据带宽选择对应的q_ref (单位: Byte)
-    double qRefBytes = (linkBps >= 200ULL * 1000000000ULL) ? m_qRef200GBytes : m_qRef100GBytes;
+    double qRefBytes;
+    if (linkBps >= 200ULL * 1000000000ULL) {
+        qRefBytes = m_qRef200GBytes;
+    } else if (linkBps >= 100ULL * 1000000000ULL) {
+        qRefBytes = m_qRef100GBytes;
+    } else {
+        qRefBytes = m_qRef40GBytes;
+    }
 
     // ========== ROCC 模式 (ccMode=14) ==========
     if (ccMode == 14) {

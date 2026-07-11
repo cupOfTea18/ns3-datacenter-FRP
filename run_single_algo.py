@@ -20,7 +20,7 @@ RESULTS_DIR = "/home/shemuping/newCode/ns3-FRP/results"
 FCT_DIR = os.path.join(RESULTS_DIR, "fct")
 PFC_DIR = os.path.join(RESULTS_DIR, "pfc")
 CONFIG_FILE = "examples/PowerTCP/config.txt"  # 使用config.txt而不是config-burst.txt
-DURATION = 0.020
+DURATION = 0.150
 
 def run_and_plot(ccMode, algo_name):
     """运行仿真并绘图"""
@@ -34,7 +34,7 @@ def run_and_plot(ccMode, algo_name):
     with open(config_path, 'r') as f:
         content = f.read()
     
-    content = re.sub(r'SIMULATOR_STOP_TIME\s*=\s*[\d.]+', f'SIMULATOR_STOP_TIME={DURATION}', content)
+    content = re.sub(r'SIMULATOR_STOP_TIME\s*[=\s]+[\d.]+', f'SIMULATOR_STOP_TIME {DURATION}', content)
     content = re.sub(r'CC_MODE\s+\d+', f'CC_MODE {ccMode}', content)
     
     # 启用队列监控
@@ -76,46 +76,38 @@ def run_and_plot(ccMode, algo_name):
     with open(log_file, 'r') as f:
         lines = f.readlines()
     
-    # 解析队列数据 - 监控 Switch 93 Port 1（瓶颈点）
-    sw10_time, sw10_q = [], []
+    # 解析队列数据 - 监控 Switch 32（根据实际拓扑）
+    MONITORED_SWITCHES = {32}
+    HIGHLIGHT_SWITCHES = {32}
+    # key=(sw_id, port) -> {times:[], qs:[]}
+    queue_data = {}
     for l in lines:
         l = l.strip()
         # DCQCN/HPCC/TIMELY 使用 DCQCN_QLEN
         if '[DCQCN_QLEN]' in l and ccMode in [1, 3, 7]:
             parts = l.split()
-            # 监控的是Switch 93的Port 1
-            if len(parts) >= 5 and int(parts[2]) == 93 and int(parts[3]) == 1:
-                sw10_time.append(float(parts[1]) / 1e9 * 1000)  # timestep -> ms
-                sw10_q.append(float(parts[4]) / 1024.0)  # Bytes -> KB
+            if len(parts) >= 5:
+                sw = int(parts[2])
+                port = int(parts[3])
+                if sw in MONITORED_SWITCHES:
+                    key = (sw, port)
+                    if key not in queue_data:
+                        queue_data[key] = {'times': [], 'qs': []}
+                    queue_data[key]['times'].append(float(parts[1]) / 1e9 * 1000)  # timestep -> ms
+                    queue_data[key]['qs'].append(float(parts[4]) / 1024.0)         # Bytes -> KB
 
         # FRP/ROCC 使用 FRP_DATA_SW
         if '[FRP_DATA_SW]' in l and ccMode in [13, 14]:
             parts = l.split()
-            if len(parts) >= 8 and int(parts[2]) == 93 and int(parts[3]) == 1:
-                if int(parts[7]) == ccMode:
-                    sw10_time.append(float(parts[1]) * 1000)  # s -> ms
-                    sw10_q.append(float(parts[5]))  # KB
-    
-    # 解析主机速率 (查找所有包含速率信息的日志)
-    host_rates = {}
-    host_times = {}  # 存储每个host的时间戳
-    
-    for l in lines:
-        l = l.strip()
-        
-        # 所有算法（DCQCN/HPCC/TIMELY/FRP/ROCC）都使用TX RATE日志
-        if '[TX RATE]' in l:
-            match = re.search(r'\[TX RATE\].*Host (\d+).*m_rate=([\d.]+)Mbps.*t=(\d+)us', l)
-            if match:
-                host = int(match.group(1))
-                rate_gbps = float(match.group(2)) / 1000
-                time_us = int(match.group(3))
-                
-                if host not in host_rates:
-                    host_rates[host] = []
-                    host_times[host] = []
-                host_rates[host].append(rate_gbps)
-                host_times[host].append(time_us / 1000.0)
+            if len(parts) >= 8:
+                sw = int(parts[2])
+                port = int(parts[3])
+                if sw in MONITORED_SWITCHES and int(parts[7]) == ccMode:
+                    key = (sw, port)
+                    if key not in queue_data:
+                        queue_data[key] = {'times': [], 'qs': []}
+                    queue_data[key]['times'].append(float(parts[1]) * 1000)  # s -> ms
+                    queue_data[key]['qs'].append(float(parts[5]))             # KB
     
     # 解析接收侧 per-flow 速率 ([FLOW TP])
     flow_tp = {}  # key=(src,dst,sport,dport) → {times:[], rates:[]}
@@ -138,9 +130,8 @@ def run_and_plot(ccMode, algo_name):
             flow_tp[key]['rates'].append(tp_bps / 1e9)   # bps → Gbps
     
     # 时间轴：按时间周期采样，直接使用日志中的真实时间戳，不再用 linspace 兜底
-    active_hosts = sorted(host_rates.keys())
     active_flows = sorted(flow_tp.keys())
-    print(f"✓ 解析完成: Switch93 {len(sw10_time)} 点, 接收侧流 {len(active_flows)} 条")
+    print(f"✓ 解析完成: 队列 {len(queue_data)} 个 (sw,port), 接收侧流 {len(active_flows)} 条")
     # print(f"  活跃主机列表: {active_hosts}")
     # for h in active_hosts:
     #     print(f"    Host {h}: {len(host_rates[h])} 个速率数据点")
@@ -183,15 +174,15 @@ def run_and_plot(ccMode, algo_name):
         times = flow_tp[fk]['times']
         rates = flow_tp[fk]['rates']
         n = min(len(rates), len(times))
-        times = times[:n]
-        rates = rates[:n]
         if n == 0:
             continue
+        times = times[:n]
+        rates = rates[:n]
         c = colors[idx % len(colors)]
-        print(f"  Flow {fk}: {n} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps, 时间范围 [{min(times):.3f}, {max(times):.3f}] ms")
-        ax2.plot(times, rates,
-                 color=c, lw=2, label=f'Flow {fk[0]}->{fk[1]} (sp={fk[2]})', alpha=0.85)
-    
+        label = f'{fk[0]}->{fk[1]} (sp={fk[2]})'
+        ax2.plot(times, rates, color=c, lw=2, label=label, alpha=0.85)
+        print(f"  {label}: {n} 点, 速率范围 [{min(rates):.2f}, {max(rates):.2f}] Gbps")
+
     ax2.set_ylabel('Receive Throughput (Gbps)', fontsize=14, fontweight='bold')
     ax2.set_title(f'RX Throughput - per-flow ({len(active_flows)} flows)', fontsize=15, fontweight='bold')
     ax2.legend(loc='upper right', fontsize=10, ncol=3, framealpha=0.9)
@@ -201,19 +192,30 @@ def run_and_plot(ccMode, algo_name):
     
     # 子图2: 队列长度
     ax3 = axes[1]
-    if sw10_time and sw10_q:
-        ax3.fill_between(sw10_time, 0, sw10_q, alpha=0.35, color='purple')
-        ax3.plot(sw10_time, sw10_q, color='purple', lw=2, label='Switch 93 Port 1')
-        ax3.axhline(y=500, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 500KB')
-        ax3.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
-
+    queue_colors = {32: 'blue'}
+    for (sw, port), qd in sorted(queue_data.items()):
+        ts, qs = qd['times'], qd['qs']
+        if not ts:
+            continue
+        c = queue_colors.get(sw, 'gray')
+        is_highlight = sw in HIGHLIGHT_SWITCHES
+        lw = 2.5 if is_highlight else 1.5
+        ls = '-' if is_highlight else '--'
+        alpha = 0.9 if is_highlight else 0.6
+        label = f'Switch {sw} Port {port}' + (' (highlight)' if is_highlight else '')
+        ax3.plot(ts, qs, color=c, lw=lw, ls=ls, alpha=alpha, label=label)
+    
+    ax3.axhline(y=300, color='blue', ls='--', lw=2, alpha=0.7, label='qRef = 300KB')
+    ax3.axhline(y=300, color='red', ls=':', lw=1.5, alpha=0.6, label='q_th = 300KB')
+    
     ax3.set_ylabel('Queue Length (KB)', fontsize=14, fontweight='bold')
     ax3.set_xlabel('Time (ms)', fontsize=14, fontweight='bold')
-    ax3.set_title('Switch 93 Queue Length (Port 1 - Bottleneck, →SW85→Host 53)', fontsize=15, fontweight='bold')
-    ax3.legend(loc='upper right', fontsize=11, framealpha=0.9)
+    ax3.set_title('Switch 32 Queue Length', fontsize=15, fontweight='bold')
+    ax3.legend(loc='upper right', fontsize=10, framealpha=0.9, ncol=2)
     ax3.grid(True, alpha=0.3, linestyle='--')
     
-    max_q = max(sw10_q) if sw10_q else 1000
+    all_qs = [q for qd in queue_data.values() for q in qd['qs']]
+    max_q = max(all_qs) if all_qs else 1000
     ax3.set_ylim(-50, max_q * 1.15)
     ax3.tick_params(labelsize=11)
     
@@ -228,21 +230,67 @@ def run_and_plot(ccMode, algo_name):
     print(f"统计信息 - {algo_name}")
     print(f"{'='*80}")
     print(f"活跃流数量: {len(active_flows)}")
-    print(f"队列最大值: {max(sw10_q):.0f} KB" if sw10_q else "队列数据: 无")
-    print(f"队列均值: {np.mean(sw10_q):.0f} KB" if sw10_q else "")
+    print(f"监控交换机数量: {len(queue_data)} 个 (sw,port)")
+    for (sw, port), qd in sorted(queue_data.items()):
+        qs = qd['qs']
+        marker = '★' if sw in HIGHLIGHT_SWITCHES else ' '
+        print(f"  {marker} Switch {sw:>2} Port {port}: "
+              f"max={max(qs):.0f} KB, "
+              f"min={min(qs):.0f} KB, "
+              f"mean={np.mean(qs):.0f} KB, "
+              f"points={len(qs)}")
 
-    # FCT 统计 (转换为 ms)
-    if fct_ns_list:
-        fct_ms = [f / 1e6 for f in fct_ns_list]
-        print(f"\n--- FCT 统计 ({len(fct_ms)} 条流完成) ---")
-        print(f"FCT 平均: {np.mean(fct_ms):.3f} ms")
-        print(f"FCT 最大: {max(fct_ms):.3f} ms")
-        print(f"FCT 最小: {min(fct_ms):.3f} ms")
-        if fct_standalone_list:
-            sa_ms = [f / 1e6 for f in fct_standalone_list]
-            slowdown = [a / b if b > 0 else 0 for a, b in zip(fct_ms, sa_ms)]
-            print(f"Slowdown 平均: {np.mean(slowdown):.2f}x")
-            print(f"Slowdown 最大: {max(slowdown):.2f}x")
+    # 7. 解析 FCT 文件 (仿照 run_single_workload_algo.py 的做法)
+    fct_path = os.path.join(FCT_DIR, "fct.txt")
+    fct_records = []
+    if os.path.exists(fct_path):
+        with open(fct_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                try:
+                    fct_records.append({
+                        'sip':  int(parts[0], 16),     # hex
+                        'dip':  int(parts[1], 16),     # hex
+                        'sport': int(parts[2]),
+                        'dport': int(parts[3]),
+                        'size':  int(parts[4]),
+                        'start_ns': int(parts[5]),
+                        'fct_ns':   int(parts[6]),
+                        'sfct_ns':  int(parts[7]),
+                    })
+                except ValueError:
+                    continue
+
+    print(f"\n--- FCT (Flow Completion Time) ---")
+    if fct_records:
+        print(f"完成流数: {len(fct_records)}")
+        # Table header (fields separated by space for visual clarity)
+        print(f"{'No.':<5}{'SIP':<13}{'DIP':<13}{'Sport':<8}{'Dport':<8}"
+              f"{'Size(KB)':<11}{'Start(ms)':<11}{'FCT(ms)':<11}{'Standalone FCT(ms)':<19}{'Slowdown':<10}")
+        print('-' * 108)
+        for idx, fc in enumerate(fct_records, 1):
+            size_kb = fc['size'] / 1024.0
+            start_ms = fc['start_ns'] / 1e6
+            fct_ms = fc['fct_ns'] / 1e6
+            sfct_ms = fc['sfct_ns'] / 1e6
+            slowdown = (fct_ms / sfct_ms) if sfct_ms > 0 else 0.0
+            print(f"{idx:<5}0x{fc['sip']:08x}  0x{fc['dip']:08x}  "
+                  f"{fc['sport']:<8}{fc['dport']:<8}{size_kb:<11.1f}"
+                  f"{start_ms:<11.3f}{fct_ms:<11.3f}{sfct_ms:<19.3f}{slowdown:<10.2f}")
+
+        fct_ms_arr = np.array([f['fct_ns']/1e6 for f in fct_records])
+        sfct_ms_arr = np.array([f['sfct_ns']/1e6 for f in fct_records])
+        slowdown = fct_ms_arr / sfct_ms_arr
+        print(f"\n  FCT 统计 (ms):")
+        print(f"    avg={np.mean(fct_ms_arr):.3f}, min={np.min(fct_ms_arr):.3f}, "
+              f"max={np.max(fct_ms_arr):.3f}, "
+              f"p50={np.percentile(fct_ms_arr,50):.3f}, p95={np.percentile(fct_ms_arr,95):.3f}, "
+              f"p99={np.percentile(fct_ms_arr,99):.3f}")
+        print(f"  Slowdown (FCT / standalone FCT):")
+        print(f"    avg={np.mean(slowdown):.3f}x, min={np.min(slowdown):.3f}x, "
+              f"max={np.max(slowdown):.3f}x")
     else:
         print("FCT 数据: 无 (检查 /home/shemuping/newCode/ns3-FRP/results/fct/fct.txt)")
 
