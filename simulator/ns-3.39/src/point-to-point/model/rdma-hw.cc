@@ -1479,7 +1479,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		} else {
 			// 策略2: 基于公平速率的退避 r = max(F_min, F - gamma*qDev)
 			
-			double scaleFactor = 12.0;
+			double scaleFactor = 5.0;
 			double gamma = scaleFactor / N;
 			// gamma*qDev 在 600B Cell 单位下计算，再转为 bps
 			// r = F - gamma * qDev (qDev是cell数，gamma是无量纲，结果在10Mbps单位)

@@ -18,9 +18,9 @@ NS_LOG_COMPONENT_DEFINE("FrpRateCalculator");
 
 FrpRateCalculator::FrpRateCalculator() {
     // FRP算法参数
-    m_alpha = 0.1;
+    m_alpha = 0.2;
     m_beta = 0;
-    m_scaleFactor = 12.0;           // scaleFactor = 12 (端侧 rdma-hw.cc 策略2 同步使用 12.0)
+    m_scaleFactor = 5.0;           // scaleFactor = 12 (端侧 rdma-hw.cc 策略2 同步使用 12.0)
     m_tPeriodS = 40e-6;         // 40微秒 = 0.00004秒
     
 
@@ -44,7 +44,7 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
 
     // 边界限制 (使用全局量纲 bps)
     double maxRateBps = linkBps * 0.95;
-    double minRateBps = 100.0 * 1000000.0;  // 100 Mbps
+    double minRateBps = 10.0 * 1000000000.0;  // 10 Gbps
 
     // 初始化
     if (!state.isInitialized) {
@@ -67,7 +67,7 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
 
     // ========== ROCC 模式 (ccMode=14) ==========
     if (ccMode == 14) {
-        m_beta = 0.5;
+        minRateBps = 100.0 * 1000000.0;
         double fNewBps = state.currentFairRateBps;  // 默认保持当前速率
         
         // ROCC规则1: 队列过载且速率>12.5Gbps → 降至最小速率
@@ -107,6 +107,7 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     // 3. 计算 lanbackoff (ROCC模式下不使用lanbackoff)
     double lanbackoff = 0.0;
     if (ccMode == 13) {
+        m_beta = 0.0;
         // FRP模式: 当队列超过q_th时计算lanbackoff
         if ((qCurCell - qRefCell) > qThCell) {
             lanbackoff = m_scaleFactor * (qCurCell - qRefCell) * m_tPeriodS * k - qOldCell;
@@ -116,8 +117,13 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
             lanbackoff = 0.0;
         }
     }
-    // ROCC模式 (ccMode=14): lanbackoff保持为0
 
+    // ROCC模式 (ccMode=14): lanbackoff保持为0
+    if (ccMode == 14) {
+        lanbackoff = 0.0;
+        m_beta = 1.0;
+        
+    } 
     // 4. 计算新的公平速率 (在10Mbps局部量纲下)
     // 公式: F_new = F_old - α*(q_cur - q_ref + lanbackoff) - β*(q_cur - q_old)
     double alpha_term = m_alpha * (qCurCell - qRefCell + lanbackoff);

@@ -480,7 +480,7 @@ void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q) {
 		
 		// Check if cross-DC flow (one node in [0,52], other in [53,105])
 		bool cross_dc = false;
-		if ((sid <= 52 && did >= 53 && did <= 105) || (sid >= 53 && sid <= 105 && did <= 52)) {
+		if ((sid <= 275 && did >= 277 && did <= 532) || (sid >= 277 && sid <= 532 && did <= 275)) {
 			cross_dc = true;
 			// Compensate for long-distance RTT (subtract 2 * long-distance delay)
 			if (g_longDistanceRtt > 0 && fct_ns > g_longDistanceRtt) {
@@ -999,9 +999,9 @@ void InstallBackgroundWorkload(double load,
 	for (uint32_t leafId : hostFacingLeafIds) {
 		auto &hosts = leafToHostIds[leafId];
 		for (uint32_t hostId : hosts) {
-			if (hostId <= 52) {
+			if (hostId <= 275) {
 				dc0_hosts.push_back(hostId);
-			} else if (hostId >= 53 && hostId <= 105) {
+			} else if (hostId >= 277 && hostId <= 532) {
 				dc1_hosts.push_back(hostId);
 			}
 		}
@@ -1113,7 +1113,7 @@ void InstallQueryFlowFile(const std::string& queryFlowFile,
 		
 		// Check if this is a cross-DC flow
 		bool is_cross_dc = false;
-		if ((src <= 52 && dst >= 53 && dst <= 105) || (src >= 53 && src <= 105 && dst <= 52)) {
+		if ((src <= 275 && dst >= 277 && dst <= 532) || (src >= 277 && src <= 532 && dst <= 275)) {
 			is_cross_dc = true;
 		}
 		
@@ -1700,7 +1700,7 @@ int main(int argc, char *argv[])
 			
 			// Check if this is a cross-DC link (one endpoint in [0,52], other in [53,105])
 			bool is_cross_dc = false;
-			if ((n1 <= 52 && n2 >= 53 && n2 <= 105) || (n1 >= 53 && n1 <= 105 && n2 <= 52)) {
+			if ((n1 <= 275 && n2 >= 277 && n2 <= 532) || (n1 >= 277 && n1 <= 532 && n2 <= 275)) {
 				is_cross_dc = true;
 			}
 			// Also check if delay is significantly larger (0.5ms vs 1.5us)
