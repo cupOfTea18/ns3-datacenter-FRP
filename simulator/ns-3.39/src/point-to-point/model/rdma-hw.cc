@@ -681,8 +681,11 @@ void RdmaHw::PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap)
 	qp->lastPktSize = pkt->GetSize();
 //	SeqTsHeader seqTs;
 //	pkt->PeekHeader(seqTs);
-	uint32_t seq = qp->snd_nxt;
-	qp->rates[qp->snd_nxt] = Simulator::Now().GetNanoSeconds();
+	// The per-packet timestamp map is only needed by PowerTCP's RTT
+	// instrumentation.  Baseline DCQCN/HPCC/TIMELY runs never consume it;
+	// avoiding the map keeps long-haul runs bounded in memory.
+	if (PowerTCPEnabled)
+		qp->rates[qp->snd_nxt] = Simulator::Now().GetNanoSeconds();
 	UpdateNextAvail(qp, interframeGap, pkt->GetSize());
 
 }

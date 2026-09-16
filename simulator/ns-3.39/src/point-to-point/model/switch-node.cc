@@ -310,17 +310,9 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 	InterfaceTag t;
 	p->PeekPacketTag(t);
 
-	// DCQCN队列长度监控：输出switch 10/13/15/85的出口队列长度
-	// Switch 85 Port 1 → Host 53 接入链路（当前 flow.txt 瓶颈点）
-	// if (m_id == 10 || m_id == 13 || m_id == 15 || m_id == 85) {
-	if ( m_id == 32 || m_id == 85 || m_id == 93) {
-		Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
-		if (dev) {
-			uint32_t qBytes = dev->GetQueue()->GetNBytesTotal();
-			printf("[DCQCN_QLEN] %lu %u %u %u\n", 
-				Simulator::Now().GetTimeStep(), m_id, ifIndex, qBytes);
-		}
-	}
+	// Per-packet queue debug output is intentionally disabled.  Long-haul
+	// experiments sample queues in their structured DCI CSV; printing one line
+	// for every dequeue can turn a run into hundreds of megabytes of stdout.
 
 	MyPriorityTag priotag;
 	bool found = p->PeekPacketTag(priotag);

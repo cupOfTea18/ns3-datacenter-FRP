@@ -1,5 +1,24 @@
 # PowerTCP Simulations
 
+## Long-haul baseline
+
+The independent `longhaul-convergence` example compares DCQCN (`CC_MODE=1`),
+HPCC (`CC_MODE=3`) and TIMELY (`CC_MODE=7`) on the fixed 5 ms one-way DCI
+topology. Validate and run the smoke matrix from the `ns-3.39` tree with:
+
+```bash
+python3 examples/PowerTCP/validate_longhaul_topology.py
+python3 examples/PowerTCP/run-longhaul-baseline.py
+python3 examples/PowerTCP/analyze-longhaul.py
+python3 examples/PowerTCP/plot-longhaul.py
+```
+
+The runner defaults to S0 and S2 with one `RngRun` per algorithm. Use
+`--full` for S0--S5 and five runs, or pass `--scenarios`, `--algorithms`, and
+`--runs` explicitly. Each run directory contains the config snapshot,
+`sender-rate.csv`, `receiver-goodput.csv`, `dci-link.csv`, `fct.csv`,
+`pfc.csv`, metadata, and the stdout diagnostic log.
+
 To avoid any directory conflicts, first open `config.sh` and set the value of `NS3` to the FULL path to the current directory. Both Incast and Fairness simulations take only about a few minutes. So you can play around easily. Documentation on workload simulations coming soon.
 
 ## Incast
