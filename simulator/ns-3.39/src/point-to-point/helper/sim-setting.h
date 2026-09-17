@@ -7,6 +7,11 @@
 #include <cassert>
 #include <unordered_map>
 
+// The long-haul baseline owns its measurements and keeps model diagnostics in
+// stdout.log only when explicitly requested by the caller.  Other simulations
+// keep the historical verbose behavior because the default is false.
+inline bool g_longhaul_quiet = false;
+
 class SimSetting{
 public:
 	std::unordered_map<uint16_t, std::unordered_map<uint8_t, uint64_t> > port_speed; // port_speed[i][j] is node i's j-th port's speed

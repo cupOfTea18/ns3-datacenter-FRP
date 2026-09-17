@@ -16,6 +16,14 @@
 #include <map>
 
 namespace ns3 {
+// Shared experiment parameters, configured before creating nodes.
+struct FrpParameters {
+    double alpha = 0.2, beta = 0, scale = 5, periodUs = 40;
+    double qrefBytes = 307200, qref200Bytes = 1048576, thresholdBytes = 307200;
+    double targetUtil = 0.95, minRateBps = 1e8, timeoutUs = 100, recoveryBps = 2e8;
+};
+extern FrpParameters g_frpParameters;
+
 
 /**
  * FRP端口状态

@@ -9,14 +9,28 @@
 #include "ns3/data-rate.h"
 #include "ns3/pointer.h"
 #include "rdma-hw.h"
+#include "frp-rate-calculator.h"
 #include "ppp-header.h"
 #include "qbb-header.h"
 #include "cn-header.h"
 #include "ns3/unsched-tag.h"
 #include "ns3/icmpv4.h"  // 添加ICMP FRP支持
+#include "ns3/sim-setting.h"
 #include <cmath>         // std::abs
+#include <cstdio>
 
 namespace ns3 {
+
+template <typename... Args>
+void LonghaulVerbosePrintf(const char *format, Args... args) {
+	if (!g_longhaul_quiet)
+		std::printf(format, args...);
+}
+
+// The legacy RDMA implementation uses printf for model diagnostics.  Route
+// those calls through one switch so the long-haul runner does not inherit
+// hundreds of megabytes of per-packet debug output.
+#define printf(...) LonghaulVerbosePrintf(__VA_ARGS__)
 
 NS_LOG_COMPONENT_DEFINE("RdmaHw");
 
@@ -421,7 +435,7 @@ int RdmaHw::ReceiveCnp(Ptr<Packet> p, CustomHeader &ch) {
 	// get qp
 	Ptr<RdmaQueuePair> qp = GetQp(ch.sip, udpport, qIndex);
 	if (qp == NULL)
-		std::cout << "ERROR: QCN NIC cannot find the flow\n";
+		return 0; // A delayed CNP may arrive after flow completion.
 	// get nic
 	uint32_t nic_idx = GetNicIdxOfQp(qp);
 	Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
@@ -443,6 +457,8 @@ int RdmaHw::ReceiveCnp(Ptr<Packet> p, CustomHeader &ch) {
 			qp->hpccPint.m_curRate = dev->GetDataRate();
 		}
 	}
+	if (m_cc_mode == 1 && ecnbits != 0)
+		cnp_received_mlx(qp);
 	return 0;
 }
 
@@ -1429,17 +1445,9 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 	double fairRateBps = static_cast<double>(fairRate) * 10000000.0;       // 10Mbps -> bps
 	double qDevBytes  = static_cast<double>(qDev) * 600.0;  // 600B Cell -> Byte (qDev is int16_t, can be negative)
 	double linkRateBps = static_cast<double>(linkRate) * 10000000.0;      // 10Mbps -> bps
-	double maxRateBps  = linkRateBps * 0.95;
-	double minRateBps  = 100.0 * 1000000.0;  // 100 Mbps
-	double T = 40e-6;         // 40微秒 = 0.00004秒
-
-	// 跟踪所有接收到的FRP的最小linkRate (静态变量，跨调用保持)
-	static double minLinkRateObservedBps = 1e18;
-	if (linkRateBps < minLinkRateObservedBps) {
-		minLinkRateObservedBps = linkRateBps;
-	}
-	// 使用历史最小linkRate作为maxRateBps
-	maxRateBps = minLinkRateObservedBps * 0.95;
+    double maxRateBps = std::min(linkRateBps, double(qp->m_max_rate.GetBitRate())) * g_frpParameters.targetUtil;
+    double minRateBps = g_frpParameters.minRateBps;
+    double T = g_frpParameters.periodUs * 1e-6;
 
 	// 输出FRP接收日志：记录瓶颈节点ID、链路速率、公平速率
 	static uint32_t recvCounter = 0;
@@ -1470,7 +1478,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		rBps = fairRateBps;
 	} else {
 		// 退避的内部流
-		double qThBytes = 300.0 * 1024.0;  
+		double qThBytes = g_frpParameters.thresholdBytes;  
 		double deltaR = 1000.0 * 1000000.0;  // 1Gbps
 		double N = (fairRate > 0) ? (static_cast<double>(linkRate) / static_cast<double>(fairRate)) : 100.0;
 			if (N < 1.0) N = 1.0;
@@ -1482,7 +1490,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		} else {
 			// 策略2: 基于公平速率的退避 r = max(F_min, F - gamma*qDev)
 			
-			double scaleFactor = 5.0;
+			double scaleFactor = g_frpParameters.scale;
 			double gamma = scaleFactor / N;
 			// gamma*qDev 在 600B Cell 单位下计算，再转为 bps
 			// r = F - gamma * qDev (qDev是cell数，gamma是无量纲，结果在10Mbps单位)
@@ -1526,7 +1534,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		ChangeRate(qp, DataRate(rBps));
 	} else {
 		// 检查定时器是否超时（0.1ms = 100微秒）
-		Time timeout = MicroSeconds(100);  // 0.1ms定时器
+		Time timeout = MicroSeconds(g_frpParameters.timeoutUs);  // 0.1ms定时器
 		if (qp->frp.m_lastBottleneckUpdate.IsZero() || 
 		    (Simulator::Now() - qp->frp.m_lastBottleneckUpdate) > timeout) {
 			qp->frp.m_timerExpired = true;
@@ -1543,7 +1551,7 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 			// FRP：区分广域流和内部流
 			if (!isBackoffInternalFlow) {
 				// 广域流（跨DC）：r = 当前速率 + deltaR
-				double deltaR = 200.0 * 1000000.0;  // 200 Mbps
+				double deltaR = g_frpParameters.recoveryBps;  // 200 Mbps
 				timeoutRateBps = currentRateBps + deltaR;
 			} else {
 				// 内部流（同DC）：r = 当前速率 * 2

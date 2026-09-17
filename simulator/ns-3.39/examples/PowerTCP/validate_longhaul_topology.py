@@ -60,7 +60,8 @@ def fail(message: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("topology", nargs="?", default="topology-longhaul-2dc-64h.txt")
+    default_topology = Path(__file__).resolve().parent / "topology-longhaul-2dc-64h.txt"
+    parser.add_argument("topology", nargs="?", default=str(default_topology))
     args = parser.parse_args()
     path = Path(args.topology)
     if not path.is_file():

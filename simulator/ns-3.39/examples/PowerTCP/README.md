@@ -13,6 +13,10 @@ python3 examples/PowerTCP/analyze-longhaul.py
 python3 examples/PowerTCP/plot-longhaul.py
 ```
 
+详尽的新版使用说明和架构图见
+[LONGHAUL_USER_GUIDE.md](LONGHAUL_USER_GUIDE.md) 和
+[longhaul-architecture.mmd](longhaul-architecture.mmd)。
+
 The runner defaults to S0 and S2 with one `RngRun` per algorithm. Use
 `--full` for S0--S5 and five runs, or pass `--scenarios`, `--algorithms`, and
 `--runs` explicitly. Each run directory contains the config snapshot,

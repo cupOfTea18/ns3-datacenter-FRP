@@ -42,7 +42,10 @@ protected:
 	// ========== Bifrost (ccMode=12) 周期PFC机制 ==========
 	bool m_bifrostEnabled;              // 是否启用Bifrost周期PFC
 	uint32_t m_bifrostPfcPeriodUs;      // PFC发送周期（微秒）
-	uint32_t m_bifrostDeploySwitchId;   // Bifrost部署的交换机ID（从配置读取）
+	uint32_t m_bifrostIngress = 0, m_bifrostPriority = 3, m_bifrostLeakSlots = 10;
+    uint64_t m_bifrostBuffer = 0, m_bifrostReceived = 0, m_bifrostLastReceived = 0, m_bifrostSlot = 0;
+    double m_bifrostVirtual = 0, m_bifrostBound = 0;
+    uint32_t m_bifrostDeploySwitchId;   // Bifrost部署的交换机ID（从配置读取）
 	uint32_t m_bifrostLastPfcTimeUs;    // 上次PFC发送时间（微秒）
 	EventId m_bifrostPfcEvent;          // 周期性PFC事件
 
@@ -94,6 +97,7 @@ private:
 	void TrackActiveFlow(Ptr<Packet> p, uint32_t outPort);
 	bool CheckHasWan(Ipv4Address srcIp);
 public:
+	uint64_t m_admissionDropPackets = 0; // structured experiment counter
 	Ptr<SwitchMmu> m_mmu;
 	atcGateway m_atcGateway;
 
@@ -113,9 +117,10 @@ public:
 	void StartPeriodicFeedbackMechanism(Time interval);
 
 	// ========== Bifrost (ccMode=12) 接口 ==========
+	void ConfigureBifrost(uint32_t port, uint32_t priority, uint64_t bufferBytes, uint32_t leakSlots);
 	void StartBifrostPfcMechanism();                                            // 启动Bifrost周期PFC机制
 	void SendBifrostPfcWithCustomTime();                                        // 发送带自定义暂停时间的PFC
-	uint32_t CalculateBifrostPauseTime(uint32_t qIndex, uint32_t qLenBytes, uint32_t r);  // 计算暂停时间（r=上一个周期收到的字节数）
+	uint32_t CalculateBifrostPauseTime(uint32_t qIndex, uint32_t qLenBytes, uint64_t r);  // 计算暂停时间（r=上一个周期收到的字节数）
 
 	// for approximate calc in PINT
 	int logres_shift(int b, int l);

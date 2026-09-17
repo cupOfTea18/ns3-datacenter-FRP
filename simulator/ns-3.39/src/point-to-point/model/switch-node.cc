@@ -9,6 +9,7 @@
 #include "ns3/double.h"
 #include "switch-node.h"
 #include "qbb-net-device.h"
+#include "qbb-channel.h"
 #include "ppp-header.h"
 #include "ns3/int-header.h"
 #include "ns3/simulator.h"
@@ -167,6 +168,7 @@ Ptr<QbbNetDevice>  SwitchNode::GetOutDevice(Ptr< Packet> p, CustomHeader &ch) {
 }
 
 void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex) {
+    if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority) return;
 	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
 	if (m_mmu->CheckShouldPause(inDev, qIndex)) {
 		device->SendPfc(qIndex, 0);
@@ -175,6 +177,7 @@ void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex) {
 	}
 }
 void SwitchNode::CheckAndSendResume(uint32_t inDev, uint32_t qIndex) {
+    if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority) return;
 	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
 	if (m_mmu->CheckShouldResume(inDev, qIndex)) {
 		device->SendPfc(qIndex, 1);
@@ -217,17 +220,16 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 		bool hasIngressTag = p->PeekPacketTag(t);
 		uint32_t inDev = hasIngressTag ? t.GetPortId() : idx;
 			
-		// Bifrost: 统计ingress端口收到的字节数（仅在部署Bifrost的交换机上）
-		if (m_bifrostEnabled && m_id == m_bifrostDeploySwitchId && inDev < m_devices.size()) {
-			DynamicCast<QbbNetDevice>(m_devices[inDev])->totalBytesRcvd += p->GetSize();
-		}
-			
+        if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority)
+            m_bifrostReceived += p->GetSize();
+
 		if (qIndex != 0 && hasIngressTag) { //not highest priority
 			// IMPORTANT: MyPriorityTag should only be attached by lossy traffic. This tag indicates the qIndex but also indicates that it is "lossy". Never attach MyPriorityTag on lossless traffic.
 			if (m_mmu->CheckIngressAdmission(inDev, qIndex, p->GetSize(), found,unsched) && m_mmu->CheckEgressAdmission(idx, qIndex, p->GetSize(), found,unsched)) {			// Admission control
 				m_mmu->UpdateIngressAdmission(inDev, qIndex, p->GetSize(), found, unsched);
 				m_mmu->UpdateEgressAdmission(idx, qIndex, p->GetSize(), found);
 			} else {
+				++m_admissionDropPackets;
 				return; // Drop
 			}
 			CheckAndSendPfc(inDev, qIndex);
@@ -674,13 +676,13 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         // 2. 本轮采样转换成 cell 单位，与 frp-rate-calculator.cc 保持一致
         double qRefBytesLocal;
         if (link_bps >= 200ULL * 1000000000ULL) {
-            qRefBytesLocal = 1048576.0;  // 1MB (200Gbps)
+            qRefBytesLocal = g_frpParameters.qref200Bytes;  // 1MB (200Gbps)
         } else if (link_bps >= 100ULL * 1000000000ULL) {
-            qRefBytesLocal = 307200.0;   // 300KB (100Gbps)
+            qRefBytesLocal = g_frpParameters.qrefBytes;   // 300KB (100Gbps)
         } else {
-            qRefBytesLocal = 307200.0;   // 300KB (40Gbps)
+            qRefBytesLocal = g_frpParameters.qrefBytes;   // 300KB (40Gbps)
         }
-        const double qThBytesLocal  = 307200.0;   // 300KB 与 frp-rate-calculator.cc 一致
+        const double qThBytesLocal  = g_frpParameters.thresholdBytes;   // 300KB 与 frp-rate-calculator.cc 一致
         const double qCurCellLocal  = static_cast<double>(currentQDepth) / 600.0;
         const double qRefCellLocal  = qRefBytesLocal / 600.0;
         const double qThCellLocal   = qThBytesLocal / 600.0;
@@ -712,7 +714,7 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         double qCurCell = qCurCellLocal;
         double qRefCell = qRefCellLocal;
         double qDevCell = qCurCell - qRefCell;
-        int16_t qDevField   = static_cast<int16_t>(qDevCell);  // 换算为 600B Cell 单元 (可为负值)
+        int16_t qDevField   = static_cast<int16_t>(std::max(-32768.0, std::min(32767.0, qDevCell)));  // 换算为 600B Cell 单元 (可为负值)
         uint16_t linkRateField = static_cast<uint16_t>(link_bps / 10000000.0);  // 换算为 10Mbps 单元
 
         // cp_id: 使用Switch节点ID直接编码（避免哈希冲突）
@@ -869,77 +871,60 @@ Ipv4Address SwitchNode::GetSwitchRealIp() const {
  * 启动Bifrost周期PFC机制
  * 仅在启用了Bifrost的交换机（通常是指定的某个交换机）上调用
  */
+void SwitchNode::ConfigureBifrost(uint32_t port, uint32_t priority, uint64_t bufferBytes, uint32_t leakSlots) {
+    NS_ABORT_MSG_IF(port == 0 || port >= m_devices.size() || priority == 0 || priority >= qCnt ||
+                    leakSlots == 0 || m_bifrostPfcPeriodUs == 0, "Invalid Bifrost configuration");
+    m_bifrostIngress = port;
+    m_bifrostPriority = priority;
+    m_bifrostBuffer = bufferBytes;
+    m_bifrostLeakSlots = leakSlots;
+    auto dev = DynamicCast<QbbNetDevice>(m_devices[port]);
+    double rs = dev->GetDataRate().GetBitRate() / 8.0;
+    double t = m_bifrostPfcPeriodUs * 1e-6;
+    double rtt = 2 * DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetSeconds();
+    m_bifrostBound = rs * (rtt + t); // paper Delta uses link RTT, not one-way delay
+    NS_ABORT_MSG_IF(bufferBytes < rs * (rtt + 2*t), "Bifrost requires H >= Delta + 2 Rs T");
+    m_bifrostVirtual = m_bifrostBound;
+}
+
 void SwitchNode::StartBifrostPfcMechanism() {
-    if (!m_bifrostEnabled) {
-        return;
-    }
-    fprintf(stderr, "[BIFROST] Switch %u starting periodic PFC mechanism, period=%uus\n",
-            m_id, m_bifrostPfcPeriodUs);
-    m_bifrostLastPfcTimeUs = Simulator::Now().GetMicroSeconds();
-    m_bifrostPfcEvent = Simulator::Schedule(
-        MicroSeconds(m_bifrostPfcPeriodUs),
-        &SwitchNode::SendBifrostPfcWithCustomTime,
-        this);
+    if (!m_bifrostEnabled) return;
+    NS_ABORT_MSG_IF(m_bifrostIngress == 0, "Configure Bifrost before starting it");
+    m_bifrostPfcEvent = Simulator::Schedule(MicroSeconds(m_bifrostPfcPeriodUs),
+        &SwitchNode::SendBifrostPfcWithCustomTime, this);
 }
 
-/**
- * 发送Bifrost周期PFC到所有ingress端口和队列
- * 使用动态计算的暂停时间
- */
 void SwitchNode::SendBifrostPfcWithCustomTime() {
-    if (!m_bifrostEnabled) {
-        return;
-    }
-    uint32_t now = Simulator::Now().GetMicroSeconds();
-    m_bifrostLastPfcTimeUs = now;
-
-    // 遍历所有ingress端口和队列
-    for (uint32_t inDev = 0; inDev < m_devices.size(); inDev++) {
-        Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[inDev]);
-        if (!dev) {
-            continue;
-        }
-
-        // 获取该端口上一个PFC周期内收到的总字节数
-        // getNumRxBytes()内部逻辑：
-        //   返回值 = totalBytesRcvd - numRxBytesLast  
-        //          = 从上次调用到这次调用之间的字节数
-        //          = 上一个PFC周期（m_bifrostPfcPeriodUs）内收到的字节数
-        //   numRxBytesLast = totalBytesRcvd  (更新基准，为下一个周期做准备)
-        uint32_t r = dev->getNumRxBytes();
-
-        for (uint32_t qIndex = 0; qIndex < qCnt; qIndex++) {
-            uint32_t qLenBytes = dev->GetQueue()->GetNBytes(qIndex);
-
-            // 计算自定义暂停时间（动态计算逻辑待实现）
-            uint32_t customTime = CalculateBifrostPauseTime(qIndex, qLenBytes, r);
-
-            // 发送带自定义暂停时间的PFC
-            dev->SendPfcWithTime(qIndex, 0, customTime);
-
-            fprintf(stderr, "[BIFROST_PFC] t=%.3fus Sw=%u inDev=%u qIdx=%u "
-                    "qLen=%uB r=%uBytes pauseTime=%uus\n",
-                    (double)now, m_id, inDev, qIndex,
-                    qLenBytes, r, customTime);
-        }
-    }
-
-    // 调度下一次周期PFC
-    m_bifrostPfcEvent = Simulator::Schedule(
-        MicroSeconds(m_bifrostPfcPeriodUs),
-        &SwitchNode::SendBifrostPfcWithCustomTime,
-        this);
+    if (!m_bifrostEnabled) return;
+    auto dev = DynamicCast<QbbNetDevice>(m_devices[m_bifrostIngress]);
+    uint64_t received = m_bifrostReceived - m_bifrostLastReceived;
+    m_bifrostLastReceived = m_bifrostReceived;
+    uint32_t queued = 0;
+    for (uint32_t out = 1; out < m_devices.size(); ++out)
+        queued += m_bytes[m_bifrostIngress][out][m_bifrostPriority];
+    uint32_t pause = CalculateBifrostPauseTime(m_bifrostPriority, queued, received);
+    if (pause > 0) dev->SendPfcWithTime(m_bifrostPriority, 0, pause);
+    // One compact record per control slot, also useful for smoke-test validation.
+    std::cout << "[BIFROST_STATE] " << Simulator::Now().GetNanoSeconds() << " "
+        << m_id << " " << m_bifrostIngress << " " << queued << " " << received
+        << " " << m_bifrostVirtual << " " << pause << std::endl;
+    m_bifrostPfcEvent = Simulator::Schedule(MicroSeconds(m_bifrostPfcPeriodUs),
+        &SwitchNode::SendBifrostPfcWithCustomTime, this);
 }
 
-/**
- * 计算Bifrost PFC的暂停时间
- * 输入: 队列索引、当前队列长度（字节）、上一个周期收到的字节数
- * 输出: 暂停时间（微秒）
- * 当前为占位符实现 - 后续根据网络状态动态计算
- */
-uint32_t SwitchNode::CalculateBifrostPauseTime(uint32_t qIndex, uint32_t qLenBytes, uint32_t r) {
-    // TODO: 后续根据队列长度、r、链路速率等动态计算
-    return 50;  // 占位符：固定50us
+uint32_t SwitchNode::CalculateBifrostPauseTime(uint32_t, uint32_t queued, uint64_t received) {
+    auto dev = DynamicCast<QbbNetDevice>(m_devices[m_bifrostIngress]);
+    double rs = dev->GetDataRate().GetBitRate() / 8.0;
+    double slotBytes = rs * m_bifrostPfcPeriodUs * 1e-6;
+    double grant = std::min(slotBytes, double(m_bifrostBuffer) - queued - m_bifrostVirtual);
+    double corrected = grant;
+    if (++m_bifrostSlot % m_bifrostLeakSlots == 0)
+        corrected = std::max(0.0, grant - (queued + m_bifrostVirtual - m_bifrostBuffer));
+    // Preserve signed grant in virtual-state correction; physical pause is bounded.
+    corrected = std::max(0.0, std::min(slotBytes, corrected));
+    double pause = m_bifrostPfcPeriodUs - corrected / rs * 1e6;
+    m_bifrostVirtual = std::max(0.0, std::min(m_bifrostBound, m_bifrostVirtual - received + grant));
+    return std::min(m_bifrostPfcPeriodUs, uint32_t(std::ceil(std::max(0.0, pause))));
 }
 
-} /* namespace ns3 */
+} // namespace ns3

@@ -89,7 +89,7 @@ def analyze_query_flow_fct(query_fct_file):
     print(f"{'='*80}\n")
 
 
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NS3_DIR = os.path.join(REPO_ROOT, "simulator/ns-3.39")
 CONFIG_FILE = "examples/PowerTCP/config-workload.txt"
 DUMP_DIR = os.path.join(REPO_ROOT, "dump/workload")
@@ -524,6 +524,118 @@ def run_and_plot(args):
         pass
 
 
+# Quick mode extends this existing runner; all variants use the workload binary.
+QUICK_CC = {'dcqcn':1, 'hpcc':3, 'timely':7, 'bifrost':12, 'frp':13, 'proposed':1}
+
+def quick_comparison(args):
+    import csv
+    import hashlib
+    import json
+    import time
+    from pathlib import Path
+    ns3=Path(NS3_DIR)
+    here=ns3/'examples/PowerTCP'
+    root=Path(args.output or os.path.join(REPO_ROOT,'results/unified-cc/quick')).resolve()
+    root.mkdir(parents=True,exist_ok=True)
+    if not args.skip_build:
+        subprocess.run(['./ns3','build','crossDC-evaluation-workload','-j2'],cwd=ns3,check=True)
+    algorithms=list(QUICK_CC) if args.cc=='all' else [args.cc]
+    scenarios=['basic','incast','dynamic'] if args.scenario=='all' else [args.scenario]
+    for scenario in scenarios:
+        # The same 12-node topology and input bytes are used by every algorithm.
+        inputs=root/scenario/'inputs';inputs.mkdir(parents=True,exist_ok=True)
+        topology='12 2 2 11\n10 11\n'+''.join(f'{i} 10 100000000000 1.5us 0\n' for i in range(8))
+        topology+='10 11 100000000000 1ms 0\n11 8 50000000000 1.5us 0\n11 9 100000000000 1.5us 0\n'
+        if scenario=='basic':
+            flow=[(i,20000000,.003,0) for i in range(2)];stop=.05
+        elif scenario=='incast':
+            flow=[(i,20000000,.010,0) for i in range(8)];stop=.08
+        else:
+            flow=[(i,2000000000,.003 if i<2 else .020,0 if i<2 else .045) for i in range(8)];stop=.08
+        if args.smoke:stop=.012
+        (inputs/'topology.txt').write_text(topology)
+        (inputs/'flows.txt').write_text(str(len(flow))+'\n'+''.join(f'{i} 8 3 {20000+i} {size} {start} {end}\n' for i,size,start,end in flow))
+        for algorithm in algorithms:
+            out=root/scenario/algorithm;out.mkdir(parents=True,exist_ok=True)
+            if (out/'run.json').exists():raise RuntimeError(f'Refusing overwrite: {out}')
+            values={}
+            for path in [here/'config-workload.txt',here/'config-quick.txt']:
+                for line in path.read_text().splitlines():
+                    fields=line.split()
+                    if fields and not fields[0].startswith('#'):values[fields[0]]=' '.join(fields[1:])
+            values.update(TOPOLOGY_FILE=str(inputs/'topology.txt'),QUERY_FLOW_FILE=str(inputs/'flows.txt'),
+                CC_MODE=str(QUICK_CC[algorithm]),SIMULATOR_STOP_TIME=str(stop))
+            config=out/'config.txt';config.write_text(''.join(k+' '+v+'\n' for k,v in values.items()))
+            command=[str(ns3/'build/examples/PowerTCP/ns3.39-crossDC-evaluation-workload-optimized'),
+                f'--conf={config}',f'--algorithm={QUICK_CC[algorithm]}','--quickExperiment=1',f'--quickOutput={out}',
+                '--dciLeft=10','--dciRight=11','--receiver=8',f'--researchControl={args.proposed_control if algorithm=="proposed" else 0}',
+                '--gatewayType=0',f'--randomSeed={args.randomSeed}',f'--fctOutputFile={out/"legacy-fct.txt"}',
+                f'--pfcOutputFile={out/"pfc.txt"}',f'--queryFlowFctFile={out/"query-fct.txt"}']
+            start_wall=time.monotonic()
+            with (out/'stdout.log').open('w') as log:
+                result=subprocess.run(command,cwd=ns3,stdout=log,stderr=subprocess.STDOUT,timeout=args.timeout)
+            record=dict(algorithm=algorithm,scenario=scenario,command=command,exit_code=result.returncode,
+                wall_seconds=time.monotonic()-start_wall,seed=args.randomSeed,stop_s=stop,
+                topology_sha256=hashlib.sha256(topology.encode()).hexdigest(),
+                flow_sha256=hashlib.sha256((inputs/'flows.txt').read_bytes()).hexdigest())
+            (out/'run.json').write_text(json.dumps(record,indent=2))
+            if result.returncode:raise RuntimeError(f'Run failed: {out}')
+            quick_plot(out,scenario,algorithm,len(flow),stop)
+            print(f'{scenario} {algorithm}: ok, {record["wall_seconds"]:.2f}s',flush=True)
+    # Source/config evidence includes existing worktree changes, not just HEAD.
+    import shutil
+    evidence=root/'evidence';evidence.mkdir(exist_ok=True)
+    (evidence/'worktree.patch').write_bytes(subprocess.check_output(['git','diff'],cwd=REPO_ROOT))
+    for p in [Path(__file__),here/'crossDC-evaluation-workload.cc',here/'longhaul-research.h',here/'config-quick.txt']:
+        shutil.copy2(p,evidence/p.name)
+
+
+def quick_plot(out,scenario,algorithm,count,stop):
+    import csv,json
+    def read(name):
+        with (out/name).open() as stream:return list(csv.DictReader(stream))
+    rows=read('metrics.csv');fcts=read('fct.csv');rates=read('rates.csv')
+    if not rows:raise RuntimeError('No metrics emitted')
+    a={k:np.array([float(r[k]) for r in rows]) for k in rows[0]}
+    peak=a['queue_bytes'].max()/1e6
+    start=.020 if scenario=='dynamic' else .010 if scenario=='incast' else .003
+    end=min(.045,stop) if scenario=='dynamic' else stop
+    window=(a['time_s']>=start)&(a['time_s']<end)
+    rtt=a['rtt_samples']>0
+    summary=dict(algorithm=algorithm,scenario=scenario,queue_peak_MB=float(peak),
+        goodput_Gbps=float(a['goodput_bps'][window].mean()/1e9) if window.any() else None,
+        admission_drops=int(a['admission_drops'][-1]),ecn_packets=int(a['ecn_packets'][-1]),
+        fct_completed=len(fcts),fct_eligible=0 if scenario=='dynamic' else count,
+        fct_median_ms=float(np.median([int(r['fct_ns'])/1e6 for r in fcts])) if fcts else None,
+        rtt_mean_ms=float(np.average(a['rtt_mean_ms'][rtt],weights=a['rtt_samples'][rtt])) if rtt.any() else None)
+    # Dynamics: aggregate recovery plus per-flow fair-share settling, not q draining.
+    phases=[('join',.020,.045,8),('exit',.045,stop,2)] if scenario=='dynamic' else [('start',start,stop,count)]
+    for label,left,right,active in phases:
+        bins=int(round(stop/.001));matrix=np.zeros((count,bins))
+        for r in rates:
+            idx=int(np.ceil(float(r['time_s'])/.001-1e-7))-1
+            if 0<=idx<bins:matrix[int(r['flow_id']),idx]+=float(r['goodput_bps'])*.0001/.001/1e9
+        target=50/active*1000/(1090 if algorithm=='hpcc' else 1056 if algorithm=='timely' else 1048)
+        ok=np.all((matrix[:active]>=.9*target)&(matrix[:active]<=1.1*target),axis=0)
+        settled=None
+        hold=7 # >= 3*2.006ms, continuous 1ms bins
+        for idx in range(int(round(left/.001)),max(0,int(round(right/.001))-hold+1)):
+            if np.all(ok[idx:idx+hold]):settled=idx-left*1000;break
+        summary[label+'_settling_ms']=settled
+        tail=(a['time_s']>=max(left,right-.01))&(a['time_s']<right)
+        summary[label+'_tail_goodput_Gbps']=float(a['goodput_bps'][tail].mean()/1e9) if tail.any() else None
+        summary[label+'_goodput_cv']=float(np.std(a['goodput_bps'][tail])/np.mean(a['goodput_bps'][tail])) if tail.any() and np.mean(a['goodput_bps'][tail]) else None
+    (out/'summary.json').write_text(json.dumps(summary,indent=2))
+    fig,ax=plt.subplots(2,2,figsize=(10,6))
+    for axis,key,scale,title in zip(ax.flat,['tx_bps','queue_bytes','goodput_bps'],[1e9,1e6,1e9],['Actual TX (Gbps)','Receiver queue (MB)','Goodput (Gbps)']):
+        axis.plot(a['time_s']*1000,a[key]/scale);axis.set(xlabel='Time (ms)',ylabel=title);axis.grid(alpha=.2)
+    f=np.sort([int(r['fct_ns'])/1e6 for r in fcts])
+    if len(f):ax[1,1].step(f,np.arange(1,len(f)+1)/count,where='post')
+    else:ax[1,1].text(.1,.5,'No completed finite flows',transform=ax[1,1].transAxes)
+    ax[1,1].set(xlabel='FCT (ms)',ylabel='Completed / scheduled',ylim=(0,1.05))
+    fig.suptitle(f'{scenario}: {algorithm}');fig.tight_layout();fig.savefig(out/'overview.png',dpi=150);plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="""Workload simulation script.
@@ -544,14 +656,24 @@ Examples:
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("ccMode", type=int,
+    parser.add_argument("ccMode", type=int, nargs="?",
                         help="Congestion control algorithm mode (see mapping above)")
-    parser.add_argument("algo_name", type=str, help="Algorithm name (e.g., DCQCN, FRP, ROCC)")
+    parser.add_argument("algo_name", type=str, nargs="?", help="Algorithm name (e.g., DCQCN, FRP, ROCC)")
     parser.add_argument("--randomSeed", type=int, default=7,
                         help="Random seed (default: 7)")
     parser.add_argument("--timeout", type=int, default=180,
                         help="Timeout in seconds (default: 180 = 3 minutes)")
+    parser.add_argument("--cc", choices=list(QUICK_CC)+['all'])
+    parser.add_argument("--scenario",choices=['basic','incast','dynamic','all'],default='basic')
+    parser.add_argument("--output")
+    parser.add_argument("--smoke",action='store_true')
+    parser.add_argument("--skip-build",action='store_true')
+    parser.add_argument("--proposed-control",type=int,choices=[1,2],default=2)
     args = parser.parse_args()
+    if args.cc:
+        quick_comparison(args)
+        return
+    if args.ccMode is None or args.algo_name is None: parser.error('use --cc or legacy ccMode algo_name')
 
     run_and_plot(args)
 

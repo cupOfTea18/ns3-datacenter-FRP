@@ -13,22 +13,23 @@
 #include "ns3/log.h"
 
 namespace ns3 {
+FrpParameters g_frpParameters;
 
 NS_LOG_COMPONENT_DEFINE("FrpRateCalculator");
 
 FrpRateCalculator::FrpRateCalculator() {
     // FRP算法参数
-    m_alpha = 0.2;
-    m_beta = 0;
-    m_scaleFactor = 5.0;           // scaleFactor = 12 (端侧 rdma-hw.cc 策略2 同步使用 12.0)
-    m_tPeriodS = 40e-6;         // 40微秒 = 0.00004秒
+    m_alpha = g_frpParameters.alpha;
+    m_beta = g_frpParameters.beta;
+    m_scaleFactor = g_frpParameters.scale;           // scaleFactor = 12 (端侧 rdma-hw.cc 策略2 同步使用 12.0)
+    m_tPeriodS = g_frpParameters.periodUs * 1e-6;         // 40微秒 = 0.00004秒
     
 
     // 队列阈值和参考值 (单位: Byte)
-    m_qThBytes = 307200.0;       // 300KB = 307200 Byte
-    m_qRef40GBytes = 307200.0;   // 40Gbps 用 300KB
-    m_qRef100GBytes = 307200.0;
-    m_qRef200GBytes = 1048576.0; // 1MB = 1048576 Byte (200Gbps)
+    m_qThBytes = g_frpParameters.thresholdBytes;       // 300KB = 307200 Byte
+    m_qRef40GBytes = g_frpParameters.qrefBytes;   // 40Gbps 用 300KB
+    m_qRef100GBytes = g_frpParameters.qrefBytes;
+    m_qRef200GBytes = g_frpParameters.qref200Bytes; // 1MB = 1048576 Byte (200Gbps)
     
     NS_LOG_INFO("FRP Rate Calculator initialized: alpha=" << m_alpha 
                 << ", beta=" << m_beta 
@@ -43,8 +44,8 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     FrpPortState& state = m_portStates[portId];
 
     // 边界限制 (使用全局量纲 bps)
-    double maxRateBps = linkBps * 0.95;
-    double minRateBps = 10.0 * 1000000000.0;  // 10 Gbps
+    double maxRateBps = linkBps * g_frpParameters.targetUtil;
+    double minRateBps = g_frpParameters.minRateBps;  // 10 Gbps
 
     // 初始化
     if (!state.isInitialized) {
@@ -107,7 +108,7 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     // 3. 计算 lanbackoff (ROCC模式下不使用lanbackoff)
     double lanbackoff = 0.0;
     if (ccMode == 13) {
-        m_beta = 0.0;
+        m_beta = g_frpParameters.beta;
         // FRP模式: 当队列超过q_th时计算lanbackoff
         if ((qCurCell - qRefCell) > qThCell) {
             lanbackoff = m_scaleFactor * (qCurCell - qRefCell) * m_tPeriodS * k - qOldCell;

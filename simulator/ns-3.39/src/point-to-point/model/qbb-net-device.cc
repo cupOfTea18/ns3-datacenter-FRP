@@ -49,6 +49,7 @@
 #include "ns3/rdma-tag.h"
 #include "ns3/interface-tag.h"
 #include "ns3/unsched-tag.h"
+#include "ns3/sim-setting.h"
 
 #include <iostream>
 
@@ -272,6 +273,7 @@ QbbNetDevice::DoDispose()
 {
 	NS_LOG_FUNCTION(this);
 
+	for (uint32_t i = 0; i < qCnt; ++i) Simulator::Cancel(m_pauseExpiry[i]);
 	PointToPointNetDevice::DoDispose();
 }
 
@@ -432,7 +434,8 @@ void
 QbbNetDevice::Resume(unsigned qIndex)
 {
 	NS_LOG_FUNCTION(this << qIndex);
-	NS_ASSERT_MSG(m_paused[qIndex], "Must be PAUSEd");
+	if (!m_paused[qIndex]) return;
+	Simulator::Cancel(m_pauseExpiry[qIndex]);
 	m_paused[qIndex] = false;
 	NS_LOG_INFO("Node " << m_node->GetId() << " dev " << m_ifIndex << " queue " << qIndex <<
 	            " resumed at " << Simulator::Now().GetSeconds());
@@ -532,16 +535,19 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 	packet->PeekHeader(ch);
 	
 	static uint32_t dbgPktCount = 0;
-	if (dbgPktCount < 3 || ch.l3Prot == 0x01) {
+	if (!g_longhaul_quiet && (dbgPktCount < 3 || ch.l3Prot == 0x01)) {
 		std::cout << "[DoReceive] node=" << m_node->GetId() << " type=" << (int)m_node->GetNodeType() << " l3Prot=0x" << std::hex << (int)ch.l3Prot << std::dec << " pktSize=" << packet->GetSize() << std::endl;
 		dbgPktCount++;
 	}
 	if (ch.l3Prot == 0xFE) { // PFC
 		if (!m_qbbEnabled) return;
 		unsigned qIndex = ch.pfc.qIndex;
+		if (qIndex >= qCnt) return;
+		Simulator::Cancel(m_pauseExpiry[qIndex]);
 		if (ch.pfc.time > 0) {
 			m_tracePfc(1);
 			m_paused[qIndex] = true;
+			m_pauseExpiry[qIndex] = Simulator::Schedule(MicroSeconds(ch.pfc.time), &QbbNetDevice::Resume, this, qIndex);
 		} else {
 			m_tracePfc(0);
 			Resume(qIndex);

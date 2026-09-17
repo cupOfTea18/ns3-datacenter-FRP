@@ -39,9 +39,8 @@ def plot_rates(root: Path, out: Path, scenario: str, filename: str, title: str) 
 
     per_run: dict[tuple[str, str, str, int], float] = defaultdict(float)
     for row, _ in rows_below(root, filename):
-        if row.get("scenario", scenario) != scenario and filename == "sender-rate.csv":
-            # Raw rate CSV intentionally has no scenario field; directory filtering below handles it.
-            pass
+        # Raw rate CSVs intentionally have no scenario field; root is already
+        # restricted to the requested scenario directory by the caller.
         per_run[(row["algorithm"], row["seed"], row["run"], int(row["time_ns"]))] += float(row["value_bps"])
     grouped: dict[tuple[str, int], list[float]] = defaultdict(list)
     for (algorithm, _, _, time_ns), value in per_run.items():

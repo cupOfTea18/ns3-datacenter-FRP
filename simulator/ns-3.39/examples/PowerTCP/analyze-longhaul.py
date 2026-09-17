@@ -111,7 +111,7 @@ def flow_metrics(rows: list[dict[str, str]], scenario: str, rate_kind: str,
     return result
 
 
-def jain_index(rows: list[dict[str, str]], scenario: str, dci_rate: float) -> dict[str, float]:
+def jain_index(rows: list[dict[str, str]]) -> dict[str, float]:
     by_time: dict[int, dict[tuple[str, str, str, str, str], float]] = {}
     for row in rows:
         key = tuple(row[field] for field in ("src", "dst", "sport", "dport", "pg"))
@@ -191,7 +191,7 @@ def main() -> int:
         receiver_metrics = flow_metrics(receiver, scenario, "receiver", dci_rate, nic_rate, base_rtt_s)
         receiver_by_key = {(m["stage"], m["src"], m["dst"], m["sport"], m["dport"], m["pg"]): m for m in receiver_metrics}
         pfc_rows = read_csv(run_dir / "pfc.csv")
-        jain = jain_index(receiver, scenario, dci_rate)
+        jain = jain_index(receiver)
         aggregate = run_aggregate(dci_rows, fct_rows, pfc_rows, dci_rate,
                                   max(3 * base_rtt_s, 0.020),
                                   float(simulator_meta.get("simulator_stop_time_s", STAGES[scenario][-1][2])))
@@ -221,20 +221,38 @@ def main() -> int:
         writer.writerows(all_rows)
     run_output = output.parent / "run-summary.csv"
     run_rows = []
-    seen = set()
+    run_fields = (
+        "algorithm", "cc_mode", "scenario", "seed", "run", "sender_settling_10_ms",
+        "receiver_settling_10_ms", "observation_lag_ms", "dci_utilization_p50",
+        "dci_utilization_p95", "dci_queue_p50_bytes", "dci_queue_p95_bytes",
+        "dci_queue_p99_bytes", "dci_queue_max_bytes", "ecn_events", "pfc_pause_events",
+        "pfc_resume_events", "fct_count", "fct_p50_ns", "fct_p95_ns",
+        "normalized_fct_p50", "jain_min", "jain_median", "jain_steady",
+        "wall_clock_seconds", "run_dir")
+    settling_fields = {"sender_settling_10_ms", "receiver_settling_10_ms", "observation_lag_ms"}
+    grouped_runs: dict[tuple[object, ...], list[dict[str, object]]] = {}
     for row in all_rows:
         identity = (row["algorithm"], row["scenario"], row["seed"], row["run"])
-        if identity in seen:
-            continue
-        seen.add(identity)
-        run_rows.append({key: row[key] for key in (
-            "algorithm", "cc_mode", "scenario", "seed", "run", "sender_settling_10_ms",
-            "receiver_settling_10_ms", "observation_lag_ms", "dci_utilization_p50",
-            "dci_utilization_p95", "dci_queue_p50_bytes", "dci_queue_p95_bytes",
-            "dci_queue_p99_bytes", "dci_queue_max_bytes", "ecn_events", "pfc_pause_events",
-            "pfc_resume_events", "fct_count", "fct_p50_ns", "fct_p95_ns",
-            "normalized_fct_p50", "jain_min", "jain_median", "jain_steady",
-            "wall_clock_seconds", "run_dir") if key in row})
+        grouped_runs.setdefault(identity, []).append(row)
+    for group in grouped_runs.values():
+        first = group[0]
+        run_row = {}
+        for key in run_fields:
+            if key not in first:
+                continue
+            if key in settling_fields:
+                numeric = []
+                for item in group:
+                    try:
+                        value = float(item[key])
+                        if math.isfinite(value):
+                            numeric.append(value)
+                    except (TypeError, ValueError):
+                        pass
+                run_row[key] = median(numeric) if numeric else "not_converged"
+            else:
+                run_row[key] = first[key]
+        run_rows.append(run_row)
     with run_output.open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=list(run_rows[0]))
         writer.writeheader()

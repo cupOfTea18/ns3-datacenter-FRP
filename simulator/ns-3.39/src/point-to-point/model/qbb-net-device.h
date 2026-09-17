@@ -219,6 +219,7 @@ protected:
   bool m_qcnEnabled;
   bool m_dynamicth;
   uint32_t m_pausetime;	//< Time for each Pause
+  EventId m_pauseExpiry[qCnt]; // refreshed by each received pause frame
   bool m_paused[qCnt];	//< Whether a queue paused
   bool dummy_paused[qCnt];
 
