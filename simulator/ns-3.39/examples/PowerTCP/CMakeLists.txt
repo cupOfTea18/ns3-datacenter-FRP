@@ -25,19 +25,6 @@ build_example(
     ${libapplications}
 )
 build_example(
-  NAME longhaul-convergence
-  SOURCE_FILES
-    longhaul-convergence.cc
-    cdf.c
-  HEADER_FILES
-    cdf.h
-  LIBRARIES_TO_LINK
-    ${libpoint-to-point}
-    ${libtraffic-control}
-    ${libinternet}
-    ${libapplications}
-)
-build_example(
   NAME crossDC-evaluation-workload
   SOURCE_FILES
     crossDC-evaluation-workload.cc

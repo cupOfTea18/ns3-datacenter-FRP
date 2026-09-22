@@ -54,7 +54,7 @@ uint64_t rate_sample_interval_us = 100;
 uint64_t goodput_sample_interval_us = 100;
 uint32_t rng_seed = 1;
 uint64_t rng_run = 1;
-uint32_t dci_left = 52, dci_right = 105;
+uint32_t dci_left = 40, dci_right = 81;
 std::string scenario_name = "unknown";
 
 double alpha_resume_interval = 55, rp_timer, ewma_gain = 1 / 16;
@@ -146,7 +146,9 @@ std::vector<FlowInput> flows;
 
 uint32_t ip_to_node_id(Ipv4Address ip);
 
+std::string selected_cc;
 std::string AlgorithmName(uint32_t mode) {
+	if (selected_cc == "proposed") return "proposed";
 	if (mode == 1) return "dcqcn";
 	if (mode == 3) return "hpcc";
 	if (mode == 7) return "timely";
@@ -509,6 +511,11 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num, ui
 		<< "  \"algorithm\": \"" << AlgorithmName(cc_mode) << "\",\n"
 		<< "  \"cc_mode\": " << cc_mode << ",\n"
 		<< "  \"research_control\": " << research_control << ",\n"
+		<< "  \"proposed_parameters\": {\"guarded\": " << (research_guarded ? "true" : "false")
+		<< ", \"period_s\": " << research_period << ", \"near_period_s\": " << research_near_period
+		<< ", \"qref_bytes\": " << research_qref << ", \"forecast_weight\": " << research_forecast_weight
+		<< ", \"horizon_s\": " << research_horizon << ", \"target_util\": " << research_target_util
+		<< ", \"deadband\": " << research_deadband << ", \"increase_fraction\": " << research_increase_fraction << "},\n"
 		<< "  \"scenario\": \"" << scenario_name << "\",\n"
 		<< "  \"rng_seed\": " << rng_seed << ",\n"
 		<< "  \"rng_run\": " << rng_run << ",\n"
@@ -638,8 +645,13 @@ int main(int argc, char *argv[])
 	std::ifstream conf;
 	uint32_t algorithm = 0;
 	uint32_t windowCheck = std::numeric_limits<uint32_t>::max();
-	std::string confFile = "examples/PowerTCP/config-longhaul-common.txt";
+	std::string confFile = "examples/LonghaulCC/config-longhaul-common.txt";
 	CommandLine cmd;
+	cmd.AddValue("cc", "dcqcn, hpcc, timely, or proposed (report prototype)", selected_cc);
+	cmd.AddValue("proposedPeriod", "receiver control period in seconds", research_period);
+	cmd.AddValue("proposedNearPeriod", "near-source period in seconds", research_near_period);
+	cmd.AddValue("proposedQref", "queue reference in bytes", research_qref);
+	cmd.AddValue("proposedWeight", "forecast weight in [0,1]", research_forecast_weight);
 	cmd.AddValue("researchReceiver", "directly attached receiver host", research_receiver);
 	cmd.AddValue("researchControl", "0 baseline, 1 reactive, 2 predictive", research_control);
 	cmd.AddValue("researchOutput", "receiver bottleneck CSV path", research_output);
@@ -651,6 +663,13 @@ int main(int argc, char *argv[])
 	cmd.AddValue("scenario", "scenario name recorded in metadata", scenario_name);
 
 	cmd.Parse (argc, argv);
+	if (selected_cc == "proposed") {
+		research_period = 0.0002;
+		research_near_period = 0.00005;
+		research_qref = 250000;
+		research_guarded = true;
+		research_control = 2;
+	}
 	conf.open(confFile.c_str());
 	if (!conf.is_open())
 		NS_FATAL_ERROR("longhaul: cannot open config file: " << confFile);
@@ -662,6 +681,19 @@ int main(int argc, char *argv[])
 
 	// Command line values override the config only when explicitly supplied.
 	if (algorithm != 0) cc_mode = algorithm;
+	if (!selected_cc.empty()) {
+		uint32_t requested = selected_cc == "hpcc" ? 3 : selected_cc == "timely" ? 7 : 1;
+		if (selected_cc != "dcqcn" && selected_cc != "hpcc" && selected_cc != "timely" && selected_cc != "proposed")
+			NS_FATAL_ERROR("unknown --cc: " << selected_cc);
+		if (algorithm && algorithm != requested) NS_FATAL_ERROR("conflicting --cc and --algorithm");
+		cc_mode = requested;
+		if (selected_cc == "proposed") {
+			if (research_control != 1 && research_control != 2) NS_FATAL_ERROR("proposed requires researchControl 1 or 2");
+			if (research_output.empty()) research_output = summary_meta_file + ".control.csv";
+		} else if (research_control) NS_FATAL_ERROR("use --cc=proposed for research control");
+	}
+	if (!std::isfinite(research_period) || research_period <= 0 || !std::isfinite(research_near_period) || research_near_period <= 0 || !std::isfinite(research_qref) || research_qref <= 0 || !std::isfinite(research_forecast_weight) || research_forecast_weight < 0 || research_forecast_weight > 1)
+		NS_FATAL_ERROR("invalid proposed period, queue reference, or forecast weight");
 	if (windowCheck != std::numeric_limits<uint32_t>::max()) {
 		has_win = windowCheck;
 		var_win = windowCheck;

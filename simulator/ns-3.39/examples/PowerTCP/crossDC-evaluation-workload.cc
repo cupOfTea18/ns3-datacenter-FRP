@@ -58,9 +58,6 @@ using namespace std;
 
 NS_LOG_COMPONENT_DEFINE("GENERIC_SIMULATION");
 
-bool quick_experiment = false;
-void QuickComplete(Ptr<RdmaQueuePair> qp);
-void QuickStopFlow(uint32_t i);
 uint32_t cc_mode = 1;
 bool enable_qcn = true;
 uint32_t packet_payload_size = 1000, l2_chunk_size = 0, l2_ack_interval = 0;
@@ -72,7 +69,6 @@ bool enable_flow_file_background = true;
 std::string background_flow_file = "examples/PowerTCP/flow-background.txt";
 
 // Bifrost (ccMode=12) 配置
-uint32_t bifrost_ingress_port = 0, bifrost_priority = 3, bifrost_leak_slots = 10;
 uint32_t bifrost_deploy_switch = 13;     // 默认部署在13号交换机
 uint32_t bifrost_pfc_period_us = 10;    // PFC发送周期（微秒）
 
@@ -200,9 +196,6 @@ struct FlowInput {
 	double start_time;
 	uint32_t idx;
 	uint64_t last_recv_bytes;  // Last sampled m_recv_bytes, used for delta goodput calculation
-	bool quick_stopped = false;
-    bool quick_finished = false;
-    uint64_t quick_received = 0;
 	bool is_query_flow;        // Flag to indicate if this is a query flow
 };
 FlowInput flow_input = {0};
@@ -458,11 +451,6 @@ uint32_t ip_to_node_id(Ipv4Address ip) {
 }
 
 void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q) {
-    if (quick_experiment) {
-        QuickComplete(q);
-        n.Get(ip_to_node_id(q->dip))->GetObject<RdmaDriver>()->m_rdma->DeleteRxQp(q->sip.Get(),q->m_pg,q->sport);
-        return;
-    }
 	uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
 	uint64_t base_rtt = pairRtt[sid][did], b = pairBw[sid][did];
 	uint32_t total_bytes = q->m_size + ((q->m_size - 1) / packet_payload_size + 1) * (CustomHeader::GetStaticWholeHeaderSize() - IntHeader::GetStaticSize()); // translate to the minimum bytes required (with header but no INT)
@@ -1114,9 +1102,6 @@ void InstallQueryFlowFile(const std::string& queryFlowFile,
 		double startTime;
 		
 		qf >> src >> dst >> pg >> dport >> flowSize >> startTime;
-        double stopInjection = 0;
-        if (quick_experiment) { std::string rest; std::getline(qf,rest); std::istringstream line(rest); line >> stopInjection; }
-
 		
 		// Validation
 		NS_ASSERT_MSG(src < n.GetN() && dst < n.GetN(), 
@@ -1134,7 +1119,7 @@ void InstallQueryFlowFile(const std::string& queryFlowFile,
 		
 		// Adjust start time: cross-DC flows use original time, intra-DC flows add 1ms delay
 		double adjustedStartTime = startTime;
-		if (!quick_experiment && !is_cross_dc && g_longDistanceRtt > 0) {
+		if (!is_cross_dc && g_longDistanceRtt > 0) {
 			// Add cross-DC delay (1ms one-way) for intra-DC flows
 			adjustedStartTime += (g_longDistanceRtt / 2.0) / 1e9;  // Convert ns to seconds
 		}
@@ -1142,11 +1127,6 @@ void InstallQueryFlowFile(const std::string& queryFlowFile,
 		// Add flow with query flow flag and adjusted start time
 		AddWorkloadFlow(src, dst, pg, flowSize, adjustedStartTime,
 		               queryFlowCount, totalQueryFlowSize, dport, true);
-        if (quick_experiment && stopInjection > 0) {
-            NS_ABORT_MSG_IF(stopInjection <= adjustedStartTime, "Injection stop must follow start");
-            Simulator::Schedule(Seconds(stopInjection), &QuickStopFlow, uint32_t(flows.size()-1));
-        }
-
 		
 		// Output detailed info (queryable)
 		std::cout << "[QUERY FLOW #" << i << "] "
@@ -1173,124 +1153,6 @@ void InstallQueryFlowFile(const std::string& queryFlowFile,
 
 
 
-// Quick comparisons reuse the workload applications and existing research controller.
-uint32_t dci_left = 8, dci_right = 9;
-Ptr<QbbNetDevice> dci_left_device, dci_right_device;
-uint64_t LinkQueueBytes(Ptr<QbbNetDevice> dev) { return dev->GetQueue()->GetNBytesTotal(); }
-void RequireOutput(std::ofstream &file, const std::string &path, const std::string &header) {
-    file.open(path); NS_ABORT_MSG_IF(!file.is_open(), "Cannot open " << path); file << header << '\n';
-}
-#include "longhaul-research.h"
-std::string quick_output;
-std::ofstream quick_metrics, quick_rates, quick_fcts;
-std::vector<uint64_t> quick_tx, quick_prev_tx, quick_prev_rx;
-std::map<std::pair<uint32_t,uint32_t>, uint64_t> quick_rtt_pending;
-uint64_t quick_packet_count = 0;
-double quick_rtt_sum = 0;
-uint64_t quick_rtt_count = 0;
-uint64_t quick_sample_us = 100;
-
-std::string QuickName() {
-    if (research_control) return "proposed";
-    if (cc_mode == 1) return "dcqcn";
-    if (cc_mode == 3) return "hpcc";
-    if (cc_mode == 7) return "timely";
-    if (cc_mode == 12) return "bifrost";
-    return "frp";
-}
-void QuickWire(Ptr<const Packet> packet, Ptr<RdmaQueuePair> qp) {
-    for (uint32_t i=0; i<flows.size(); ++i) {
-        const auto &f=flows[i];
-        if (serverAddress[f.src] != qp->sip || serverAddress[f.dst] != qp->dip || f.port != qp->sport) continue;
-        quick_tx[i] += packet->GetSize();
-        if (++quick_packet_count % 1024 == 0) {
-            CustomHeader h(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
-            packet->PeekHeader(h);
-            quick_rtt_pending[{i,h.udp.seq + packet->GetSize() - h.GetSerializedSize()}] = Simulator::Now().GetNanoSeconds();
-        }
-    }
-}
-void QuickAck(Ptr<const Packet> packet) {
-    CustomHeader h(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
-    packet->PeekHeader(h);
-    if (h.l3Prot != 0xFC) return;
-    for (uint32_t i=0; i<flows.size(); ++i) {
-        const auto &f=flows[i];
-        if (serverAddress[f.src].Get()!=h.dip || f.port!=h.ack.dport) continue;
-        auto it=quick_rtt_pending.find({i,h.ack.seq});
-        if (it != quick_rtt_pending.end()) {
-            quick_rtt_sum += (Simulator::Now().GetNanoSeconds()-it->second)*1e-6;
-            ++quick_rtt_count; quick_rtt_pending.erase(it);
-        }
-    }
-}
-void QuickComplete(Ptr<RdmaQueuePair> qp) {
-    for (auto &f: flows) {
-        if (serverAddress[f.src]!=qp->sip || serverAddress[f.dst]!=qp->dip || f.port!=qp->sport) continue;
-        auto rx=n.Get(f.dst)->GetObject<RdmaDriver>()->m_rdma->GetRxQp(qp->dip.Get(),qp->sip.Get(),f.dport,f.port,f.pg,false);
-        if(rx) f.quick_received=rx->m_recv_bytes;
-        f.quick_finished=true;
-        if(!f.quick_stopped) quick_fcts << QuickName() << ',' << f.src << ',' << f.dst << ',' << f.dport
-            << ',' << f.maxPacketCount << ',' << qp->startTime.GetNanoSeconds() << ','
-            << (Simulator::Now()-qp->startTime).GetNanoSeconds() << '\n';
-    }
-    quick_fcts.flush();
-}
-void QuickStopFlow(uint32_t i) {
-    auto &f=flows.at(i); f.quick_stopped=true;
-    auto hw=n.Get(f.src)->GetObject<RdmaDriver>()->m_rdma;
-    auto qp=hw->GetQp(serverAddress[f.dst].Get(),f.port,f.pg);
-    if(qp) qp->m_size=qp->snd_nxt; // stop new injection; retain already-sent data for ACK/recovery
-}
-void QuickSample() {
-    double now=Simulator::Now().GetSeconds(), tx=0, goodput=0, bif=0;
-    double dt=quick_sample_us*1e-6;
-    for(uint32_t i=0;i<flows.size();++i) {
-        auto &f=flows[i];
-        auto hw=n.Get(f.src)->GetObject<RdmaDriver>()->m_rdma;
-        auto qp=hw->GetQp(serverAddress[f.dst].Get(),f.port,f.pg);
-        auto rx=n.Get(f.dst)->GetObject<RdmaDriver>()->m_rdma->GetRxQp(serverAddress[f.dst].Get(),serverAddress[f.src].Get(),f.dport,f.port,f.pg,false);
-        if(rx && !f.quick_finished) f.quick_received=rx->m_recv_bytes;
-        NS_ABORT_MSG_IF(f.quick_received < quick_prev_rx[i], "Receive byte counter regressed");
-        double t=(quick_tx[i]-quick_prev_tx[i])*8/dt;
-        double g=(f.quick_received-quick_prev_rx[i])*8/dt;
-        quick_prev_tx[i]=quick_tx[i];quick_prev_rx[i]=f.quick_received;
-        uint64_t flight=qp?qp->GetOnTheFly():0;
-        tx+=t; goodput+=g; bif+=flight;
-        quick_rates << now << ',' << i << ',' << t << ',' << g << ',' << (qp?qp->m_rate.GetBitRate():0)
-            << ',' << flight << ',' << f.quick_stopped << '\n';
-    }
-    uint64_t drops=0;
-    for(uint32_t i=0;i<n.GetN();++i) if(n.Get(i)->GetNodeType()) drops+=DynamicCast<SwitchNode>(n.Get(i))->m_admissionDropPackets;
-    quick_metrics << now << ',' << tx << ',' << goodput << ',' << LinkQueueBytes(research_port) << ',' << bif
-        << ',' << drops << ',' << research_marked << ',' << quick_rtt_count << ','
-        << (quick_rtt_count?quick_rtt_sum/quick_rtt_count:0) << '\n';
-    quick_rtt_sum=0;quick_rtt_count=0;
-    for(auto it=quick_rtt_pending.begin();it!=quick_rtt_pending.end();) {
-        if(Simulator::Now().GetNanoSeconds()-it->second>100000000) it=quick_rtt_pending.erase(it); else ++it;
-    }
-    if(now+dt < simulator_stop_time) Simulator::Schedule(MicroSeconds(quick_sample_us),&QuickSample);
-}
-void QuickSetup() {
-    NS_ABORT_MSG_IF(quick_output.empty(), "Quick experiments require output directory");
-    dci_left_device=DynamicCast<QbbNetDevice>(n.Get(dci_left)->GetDevice(nbr2if[n.Get(dci_left)].at(n.Get(dci_right)).idx));
-    dci_right_device=DynamicCast<QbbNetDevice>(n.Get(dci_right)->GetDevice(nbr2if[n.Get(dci_right)].at(n.Get(dci_left)).idx));
-    research_guarded=true;
-    NS_ABORT_MSG_IF(research_period<=0 || research_near_period<=0 || research_qref<=0 || research_forecast_weight<0 || research_forecast_weight>1 || research_target_util<=0 || research_target_util>1 || research_increase_fraction<=0 || research_deadband<0, "Invalid proposed parameters");
-    research_output=quick_output+"/control.csv";
-    ResearchSetup();
-    RequireOutput(quick_metrics,quick_output+"/metrics.csv","time_s,tx_bps,goodput_bps,queue_bytes,bif_bytes,admission_drops,ecn_packets,rtt_samples,rtt_mean_ms");
-    RequireOutput(quick_rates,quick_output+"/rates.csv","time_s,flow_id,tx_bps,goodput_bps,control_bps,bif_bytes,injection_stopped");
-    RequireOutput(quick_fcts,quick_output+"/fct.csv","algorithm,src,dst,dport,size_bytes,start_ns,fct_ns");
-    quick_tx.resize(flows.size());quick_prev_tx.resize(flows.size());quick_prev_rx.resize(flows.size());
-    for(uint32_t i=0;i<n.GetN();++i) if(n.Get(i)->GetNodeType()==0) {
-        auto dev=DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(1));
-        dev->TraceConnectWithoutContext("RdmaQpDequeue",MakeCallback(&QuickWire));
-        dev->TraceConnectWithoutContext("MacRx",MakeCallback(&QuickAck));
-    }
-    Simulator::Schedule(MicroSeconds(quick_sample_us),&QuickSample);
-}
-
 int main(int argc, char *argv[])
 {
 	clock_t begint, endt;
@@ -1311,20 +1173,14 @@ int main(int argc, char *argv[])
 	std::string queryFlowFile = "examples/PowerTCP/query-flow.txt";
 	std::string queryFlowFctFile = "";  // Will be set via command line
 
-	uint32_t algorithm = UINT32_MAX;
-	uint32_t windowCheck = UINT32_MAX;
+	uint32_t algorithm = 3;
+	uint32_t windowCheck = 1;
 	uint32_t gatewayTypeOverride = UINT32_MAX;
 	std::string confFile = "examples/PowerTCP/config-workload.txt";
 	std::string cdfFileName = "examples/PowerTCP/Alistorage.txt";
 	
 	CommandLine cmd;
-	cmd.AddValue("quickExperiment", "Use exact flow times, raw FCT and fixed stop", quick_experiment);
-    cmd.AddValue("quickOutput", "Quick output directory", quick_output);
-    cmd.AddValue("dciLeft", "Source DCI", dci_left);
-    cmd.AddValue("dciRight", "Receiver DCI", dci_right);
-    cmd.AddValue("receiver", "Bottleneck receiver host", research_receiver);
-    cmd.AddValue("researchControl", "0 off, 1 reactive, 2 proposed", research_control);
-    cmd.AddValue("conf", "config file path", confFile);
+	cmd.AddValue("conf", "config file path", confFile);
 	cmd.AddValue("wien", "enable wien --> wien enables PowerTCP.", wien);
 	cmd.AddValue("delayWien", "enable wien delay --> delayWien enables Theta-PowerTCP (delaypowertcp) ", delayWien);
 	cmd.AddValue("randomSeed", "Random seed, 0 for time-based seed", randomSeed);
@@ -1520,27 +1376,6 @@ int main(int argc, char *argv[])
 			conf >> cc_mode;
 			std::cout << "CC_MODE\t\t" << cc_mode << '\n';
 		}
-        else if (key == "BIFROST_INGRESS_PORT") conf >> bifrost_ingress_port;
-        else if (key == "BIFROST_PRIORITY") conf >> bifrost_priority;
-        else if (key == "BIFROST_LEAK_SLOTS") conf >> bifrost_leak_slots;
-        else if (key == "FRP_ALPHA") conf >> g_frpParameters.alpha;
-        else if (key == "FRP_BETA") conf >> g_frpParameters.beta;
-        else if (key == "FRP_SCALE") conf >> g_frpParameters.scale;
-        else if (key == "FRP_PERIOD_US") conf >> g_frpParameters.periodUs;
-        else if (key == "FRP_QREF_BYTES") conf >> g_frpParameters.qrefBytes;
-        else if (key == "FRP_QREF_200G_BYTES") conf >> g_frpParameters.qref200Bytes;
-        else if (key == "FRP_THRESHOLD_BYTES") conf >> g_frpParameters.thresholdBytes;
-        else if (key == "FRP_TARGET_UTIL") conf >> g_frpParameters.targetUtil;
-        else if (key == "FRP_MIN_RATE_BPS") conf >> g_frpParameters.minRateBps;
-        else if (key == "FRP_TIMEOUT_US") conf >> g_frpParameters.timeoutUs;
-        else if (key == "FRP_RECOVERY_BPS") conf >> g_frpParameters.recoveryBps;
-        else if (key == "PROPOSED_PERIOD_S") conf >> research_period;
-        else if (key == "PROPOSED_NEAR_PERIOD_S") conf >> research_near_period;
-        else if (key == "PROPOSED_QREF_BYTES") conf >> research_qref;
-        else if (key == "PROPOSED_DEADBAND") conf >> research_deadband;
-        else if (key == "PROPOSED_TARGET_UTIL") conf >> research_target_util;
-        else if (key == "PROPOSED_FORECAST_WEIGHT") conf >> research_forecast_weight;
-        else if (key == "PROPOSED_INCREASE_FRACTION") conf >> research_increase_fraction;
 		// Bifrost配置解析
 		else if (key.compare("BIFROST_DEPLOY_SWITCH") == 0) {
 			conf >> bifrost_deploy_switch;
@@ -1791,10 +1626,9 @@ int main(int argc, char *argv[])
 	}
 
 	// Python selects the CC algorithm for each run; workload parameters stay in config-workload.txt.
-	if (algorithm != UINT32_MAX) cc_mode = algorithm;
-    algorithm = cc_mode;
-	if (windowCheck != UINT32_MAX) { has_win=windowCheck; var_win=windowCheck; }
-    if (quick_experiment) { g_longhaul_quiet=true; RngSeedManager::SetSeed(randomSeed); }
+	cc_mode = algorithm; // overrides configuration file
+	has_win = windowCheck; // overrides configuration file
+	var_win = windowCheck; // overrides configuration file
 	
 
 	// workload parameters are owned by config-workload.txt.
@@ -2212,7 +2046,7 @@ int main(int argc, char *argv[])
 			rdmaHw->SetAttribute("L2BackToZero", BooleanValue(l2_back_to_zero));
 			rdmaHw->SetAttribute("L2ChunkSize", UintegerValue(l2_chunk_size));
 			rdmaHw->SetAttribute("L2AckInterval", UintegerValue(l2_ack_interval));
-			rdmaHw->SetAttribute("CcMode", UintegerValue(cc_mode == 12 ? 1 : cc_mode));
+			rdmaHw->SetAttribute("CcMode", UintegerValue(cc_mode));
 			rdmaHw->SetAttribute("RateDecreaseInterval", DoubleValue(rate_decrease_interval));
 			rdmaHw->SetAttribute("MinRate", DataRateValue(DataRate(min_rate)));
 			rdmaHw->SetAttribute("Mtu", UintegerValue(packet_payload_size));
@@ -2407,7 +2241,6 @@ int main(int argc, char *argv[])
 					sw->SetAttribute("BifrostEnabled", BooleanValue(true));
 					sw->SetAttribute("BifrostPfcPeriodUs", UintegerValue(bifrost_pfc_period_us));
 					sw->SetAttribute("BifrostDeploySwitchId", UintegerValue(bifrost_deploy_switch));
-					sw->ConfigureBifrost(bifrost_ingress_port, bifrost_priority, uint64_t(buffer_size)*1024*1024, bifrost_leak_slots);
 					sw->StartBifrostPfcMechanism();
 				}
 				else {
@@ -2425,7 +2258,7 @@ int main(int argc, char *argv[])
 			if (cc_mode == 13 || cc_mode == 14) {
 				std::cout << "[FRP SETUP] Enabling FRP/ROCC feedback on switch " << i << " (cc_mode=" << cc_mode << ")" << std::endl;
 				sw->SetAttribute("SwitchFeedbackEnabled", BooleanValue(true));  // 启用反馈机制
-				Time feedbackInterval = MicroSeconds(g_frpParameters.periodUs);  // FRP反馈周期: 40μs
+				Time feedbackInterval = MicroSeconds(40);  // FRP反馈周期: 40μs
 				sw->StartPeriodicFeedbackMechanism(feedbackInterval);
 				std::cout << "[FRP SETUP] FRP feedback enabled with interval=" << feedbackInterval.As(Time::US) << std::endl;
 			}
@@ -2475,8 +2308,7 @@ int main(int argc, char *argv[])
 	
 	double delay = 1.5 * minRtt * 1e-9; // 10 micro seconds
 	//Simulator::Schedule(Seconds(delay), PrintResults, switchDown, 1, delay);
-	if (quick_experiment) QuickSetup();
-    else Simulator::Schedule(Seconds(delay), PrintResultsFlow, delay);
+	Simulator::Schedule(Seconds(delay), PrintResultsFlow, delay);  // 初始触发 per-flow 接收侧吞吐采样
 
 	// AsciiTraceHelper ascii;
 	//     qbb.EnableAsciiAll (ascii.CreateFileStream ("eval.tr"));

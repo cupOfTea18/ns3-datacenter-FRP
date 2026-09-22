@@ -1,30 +1,5 @@
 # PowerTCP Simulations
 
-## Long-haul baseline
-
-The independent `longhaul-convergence` example compares DCQCN (`CC_MODE=1`),
-HPCC (`CC_MODE=3`) and TIMELY (`CC_MODE=7`) on the fixed 5 ms one-way DCI
-topology. Validate and run the smoke matrix from the `ns-3.39` tree with:
-
-```bash
-python3 examples/PowerTCP/validate_longhaul_topology.py
-python3 examples/PowerTCP/run-longhaul-baseline.py
-python3 examples/PowerTCP/analyze-longhaul.py
-python3 examples/PowerTCP/plot-longhaul.py
-```
-
-详尽的新版使用说明和架构图见
-[LONGHAUL_USER_GUIDE.md](LONGHAUL_USER_GUIDE.md) 和
-[longhaul-architecture.mmd](longhaul-architecture.mmd)。
-
-The runner defaults to S0 and S2 with one `RngRun` per algorithm. Use
-`--full` for S0--S5 and five runs, or pass `--scenarios`, `--algorithms`, and
-`--runs` explicitly. Each run directory contains the config snapshot,
-`sender-rate.csv`, `receiver-goodput.csv`, `dci-link.csv`, `fct.csv`,
-`pfc.csv`, metadata, and the stdout diagnostic log.
-
-To avoid any directory conflicts, first open `config.sh` and set the value of `NS3` to the FULL path to the current directory. Both Incast and Fairness simulations take only about a few minutes. So you can play around easily. Documentation on workload simulations coming soon.
-
 ## Incast
 
 - **Simulations:** Run `./script-burst.sh yes no` in your terminal to launch one-shot simulations for PowerTCP, Theta-PowerTCP, HPCC, TIMELY and DCQCN in a 10:1 incast scenario. The simulation data is written to `dump_burst/` folder in this directory. 

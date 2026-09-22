@@ -16,7 +16,7 @@ REPO = NS3.parents[1]
 spec = importlib.util.spec_from_file_location('baseline', HERE / 'run-longhaul-baseline.py')
 baseline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(baseline)
-VARIANTS = {'dcqcn': (1, 0), 'hpcc': (3, 0), 'timely': (7, 0), 'reactive-cnp': (1, 1), 'predictive-cnp': (1, 2)}
+VARIANTS = {'dcqcn': (1, 0), 'hpcc': (3, 0), 'timely': (7, 0), 'reactive-cnp': (1, 1), 'predictive-cnp': (1, 2), 'proposed': (1, 2)}
 
 
 def main():
@@ -44,7 +44,7 @@ def main():
         shutil.copy2(HERE / name, inputs / name)
     for name in ['rdma-hw.cc', 'switch-node.cc', 'switch-node.h']:
         shutil.copy2(NS3 / 'src/point-to-point/model' / name, inputs / name)
-    binary = NS3 / 'build/examples/PowerTCP/ns3.39-longhaul-convergence-optimized'
+    binary = NS3 / 'build/examples/LonghaulCC/ns3.39-longhaul-convergence-optimized'
     manifest = {str(p.relative_to(inputs)): hashlib.sha256(p.read_bytes()).hexdigest() for p in inputs.iterdir() if p.is_file()}
     manifest['binary_sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
     (inputs / 'sha256.json').write_text(json.dumps(manifest, indent=2))
@@ -66,6 +66,8 @@ def main():
         config = out / 'config.txt'
         config.write_text(baseline.replace_config((HERE / 'config-longhaul-common.txt').read_text(), values))
         command = [str(binary), f'--conf={config}', '--researchReceiver=4', f'--researchControl={control}', f'--researchOutput={out / "bottleneck.csv"}']
+        if variant == "proposed":
+            command.append("--cc=proposed")
         started = time.monotonic()
         with (out / 'stdout.log').open('w') as log:
             try:

@@ -2,7 +2,7 @@
 
 ## 1. 目标与第一阶段范围
 
-在 `examples/PowerTCP` 中新增一个独立的长距评测程序，参考
+在 `examples/LonghaulCC` 中维护一个独立的长距评测程序，参考
 `crossDC-evaluation.cc` 的拓扑读取、RDMA 流创建、路由和统计逻辑，对以下三种现有算法建立可重复基线：
 
 | 算法 | `CC_MODE` | 第一阶段状态 |
@@ -25,48 +25,50 @@
 - `crossDC-evaluation.cc` 已支持 `CC_MODE=1/3/7`，并已有 FCT、PFC、队列以及接收侧 per-flow goodput 的部分统计代码。
 - `src/point-to-point/model/rdma-hw.cc` 已按 QP 每 100 us 输出一次 `[TX RATE]`；这是按 `snd_nxt` 增量计算的实际发送速率，适合与接收端 goodput 对齐。不要把算法内部目标速率直接当成实际发送速率。
 - 当前 `PrintResultsFlow()` 把采样周期硬编码为 `1.5 * minRtt`，且输出到标准输出；长距实验应改为可配置采样周期和结构化文件。
-- `topology copy.txt` 已包含 DCI `52 <-> 105`，速率 200 Gbps，但链路延迟目前为 1.1 ms，且每个 DC 只有 32 hosts。
+- 当前 longhaul 拓扑采用两个互联 DC，每个 DC 有 32 hosts、4 个 leaf、4 个 spine 和 1 个 gateway。
 - `topology-256-cross.txt`/`topology.txt` 是每个 DC 256 hosts 的另一套编号（DCI 276/553），不适合作为本阶段目标拓扑。
 
 ## 3. 拓扑设计
 
-### 3.1 推荐拓扑文件
+### 3.1 拓扑文件
 
-新建：
+当前使用：
 
 ```text
-topology-longhaul-2dc-64h.txt
+topology-longhaul.txt
 ```
 
-以 `topology copy.txt` 为模板扩展，保留现有 42 个交换机以及 DCI 编号 52、105：
+文件名保留原名称以兼容已有配置和 runner，但文件内容已经改为较小的
+两层 Leaf-Spine 拓扑：
 
-- DC0 原 hosts：`0..31`，新增 hosts：`106..137`，合计 64。
-- DC1 原 hosts：`53..84`，新增 hosts：`138..169`，合计 64。
-- DC0 交换机：`32..52`；DC1 交换机：`85..105`。
-- 每个 DC 保留 8 个 ToR、8 个 aggregation、4 个 core、1 个 DCI。
-- 每个 ToR 从 4 个 hosts 扩展到 8 个 hosts；新增 host 均匀地接到原 8 个 ToR。
-- 总节点数 170，交换机数 42，host 数 128。
-- 原内部胖树链路保持 100 Gbps、1.5 us（除非后续实验另行改变）。
+- DC0 hosts：`0..31`，leaf：`32..35`，spine：`36..39`，gateway：`40`；
+- DC1 hosts：`41..72`，leaf：`73..76`，spine：`77..80`，gateway：`81`；
+- 两侧各 4 个 leaf、4 个 spine、1 个 gateway；每个 leaf 连接 8 个 host；
+- 总节点数 82，交换机数 18，host 数 64，链路数 105；
+- 每个 DC 内 leaf-spine 全连接，spine-gateway 全连接；
+- 内部链路保持 100 Gbps、1.5 us；
 - DCI 链路唯一且为：
 
 ```text
-52 105 200000000000.0 5ms 0
+40 81 200000000000.0 5ms 0
 ```
 
 在当前 Qbb 点到点信道模型中，一条链路的 `Delay=5ms` 对两个传输方向分别生效，因此跨 DC RTT 至少约为 10 ms；这符合“单向 5 ms”的含义。
 
-> 编号说明：为了同时满足“每 DC 64 hosts”和“DCI 必须是 52/105”，host ID 不会在每个 DC 内连续。程序和分析脚本必须从拓扑/清单判断 DC 归属，不能用 `nodeId < 某阈值` 判断。
+节点 ID 采用连续分段，便于人工检查；程序仍然以拓扑文件中的交换机列表和链路为准，
+不应在分析脚本中根据节点 ID 范围推断路径属性。
 
 ### 3.2 拓扑自动校验
 
 增加 `validate_longhaul_topology.py`，运行实验前检查：
 
 - header 中 node/switch/link 数与实际内容一致；
-- 128 个 host、42 个 switch，每个 DC 恰好 64 个 host；
-- DCI 52/105 均为 switch；
-- 52↔105 只有一条链路，速率 200 Gbps，delay 为 5 ms；
-- 每个 host 度数为 1，每个 ToR 下挂 8 个 host；
-- 所有节点连通，跨 DC 路径必须经过 52↔105；
+- 64 个 host、18 个 switch，每个 DC 恰好 32 个 host；
+- 每个 DC 有 4 个 leaf、4 个 spine 和 1 个 gateway；
+- DCI 40/81 均为 switch；
+- 40↔81 只有一条链路，速率 200 Gbps，delay 为 5 ms；
+- 每个 host 度数为 1，每个 leaf 下挂 8 个 host；
+- 所有节点连通，跨 DC 路径必须经过 40↔81；
 - 无重复链路、自环、越界 node ID；
 - 从代表性 host 对计算出的跨 DC base RTT 约为 10 ms 加内部链路延迟。
 
@@ -78,7 +80,7 @@ topology-longhaul-2dc-64h.txt
 longhaul-convergence.cc              # 仿真入口
 config-longhaul-common.txt           # 公共配置模板
 flow-longhaul-*.txt                  # 固定场景流文件
-topology-longhaul-2dc-64h.txt        # 新拓扑
+topology-longhaul.txt                # 新拓扑
 validate_longhaul_topology.py        # 静态校验
 run-longhaul-baseline.py             # 实验矩阵、seed/run、目录管理
 analyze-longhaul.py                  # 收敛判定和汇总
@@ -96,8 +98,8 @@ GOODPUT_SAMPLE_INTERVAL_US 100
 GOODPUT_OUTPUT_FILE .../receiver-goodput.csv
 LINK_STATS_OUTPUT_FILE .../dci-link.csv
 SUMMARY_META_FILE .../metadata.json
-DCI_LEFT 52
-DCI_RIGHT 105
+DCI_LEFT 40
+DCI_RIGHT 81
 ```
 
 所有输出目录由 runner 预先创建；C++ 程序遇到文件无法打开时应立即报错退出，不能像现有 FCT 路径那样静默跳过。
@@ -115,7 +117,7 @@ algorithm,seed,run,time_ns,src,dst,sport,dport,pg,value_bps
 - **发送端实际速率**：沿用 `RdmaHw::SampleTxRate()` 的 `snd_nxt` 字节增量，但写入 CSV；采样间隔由配置控制。
 - **接收端 goodput**：使用 `RdmaRxQueuePair::m_recv_bytes` 增量；修正首次采样和流结束时最后一个不足完整采样窗的问题。
 - **算法内部速率（辅助）**：可另外记录统一的 `qp->m_rate`。DCQCN 的 `mlx.m_targetRate`、HPCC 的 `hp.m_curRate`、TIMELY 的 `tmly.m_curRate` 仅用于诊断，不能替代实际发送速率。
-- **DCI 链路**：记录两个方向的 tx/rx throughput、队列字节、ECN/PFC 事件；不要用端口号硬编码定位，启动时由相邻节点 52/105 解析设备接口。
+- **DCI 链路**：记录两个方向的 tx/rx throughput、队列字节、ECN/PFC 事件；不要用端口号硬编码定位，启动时由相邻节点 40/81 解析设备接口。
 - **完成事件**：保留 FCT 文件，并加上 node ID、场景名和算法名。
 
 建议先以 100 us 采样。它相对约 10 ms RTT 足够细，同时比当前 `1.5 * minRtt` 更可控；最终绘图可用 0.5 或 1 ms 滑动窗降噪，但收敛计算必须注明使用的是原始序列还是平滑序列。
@@ -159,7 +161,7 @@ R_target = 200 Gbps / N
 | 场景 | 流量安排 | 目的 |
 |---|---|---|
 | S0 单流 | 1 条 DC0→DC1 长流，持续至少 30 RTT | 无竞争时爬升、链路利用率、基础 RTT |
-| S1 同步竞争 | 8 条同向长流在同一时刻启动，源/宿分散到 8 个 ToR | 初始收敛、公平性、incast 偏差控制 |
+| S1 同步竞争 | 8 条同向长流在同一时刻启动，源/宿分散到 4 个 leaf | 初始收敛、公平性、incast 偏差控制 |
 | S2 流加入 | 1 条先运行 20 RTT，再同时加入 7 条，之后运行至少 30 RTT | 降速响应和新公平点收敛 |
 | S3 流退出 | 8 条先稳定，其中 7 条以有限字节数近同时结束，余下 1 条继续至少 30 RTT | 带宽再获取速度 |
 | S4 双向 | 两方向各 8 条长流 | 对称性及 ACK/反馈交互 |
@@ -183,7 +185,7 @@ R_target = 200 Gbps / N
 
 ### Phase A：拓扑与最小可运行程序
 
-1. 从 `topology copy.txt` 生成 170-node 新拓扑，修改 DCI delay 为 5 ms。
+1. 使用 82-node 拓扑，确认 DCI delay 为 5 ms。
 2. 完成拓扑校验器，并让 runner 在仿真前强制调用。
 3. 从 `crossDC-evaluation.cc` 复制出独立入口，删除与本实验无关的 Bifrost/特殊硬编码路径。
 4. 注册 CMake target，使用 S0 + DCQCN 完成编译和最短运行。
@@ -218,7 +220,7 @@ R_target = 200 Gbps / N
 
 ## 9. 验收标准
 
-- 新拓扑自动校验全部通过，确认为每 DC 64 hosts、DCI 52↔105、200 Gbps、单向 5 ms。
+- 新拓扑自动校验全部通过，确认为每 DC 32 hosts、DCI 40↔81、200 Gbps、单向 5 ms。
 - 三种 `CC_MODE` 在 S0 和 S2 均能完成运行，不出现 assertion、空结果或负吞吐。
 - 单流累计发送/接收字节误差可解释，稳态吞吐不超过路径瓶颈。
 - 同一配置和 seed/run 重跑得到相同结构与相同数值（允许格式化舍入误差）。
@@ -229,10 +231,10 @@ R_target = 200 Gbps / N
 
 ### 拓扑
 
-- [ ] 将 `topology copy.txt` 重命名语义纳入新文件，不直接覆盖原文件。
-- [ ] 增加 64 个 host 节点和 64 条 host–ToR 链路。
-- [ ] 将 header 更新为 170 nodes、42 switches、233 links（生成后再次以校验器实数为准）。
-- [ ] 将 52↔105 设置为 200 Gbps、5 ms、error rate 0。
+- [x] 使用 82 个节点、18 个交换机和 105 条链路。
+- [x] 每个 DC 配置 32 个 host、4 个 leaf、4 个 spine 和 1 个 gateway。
+- [x] 将 header 设置为 82 nodes、18 switches、105 links。
+- [x] 将 40↔81 设置为 200 Gbps、5 ms、error rate 0。
 - [ ] 编写并运行拓扑校验器。
 
 ### C++ 程序
@@ -270,6 +272,5 @@ R_target = 200 Gbps / N
 
 1. “单向 5 ms”指 Qbb channel 的 `Delay=5ms`，所以往返传播时延约 10 ms。
 2. “发送端速率”指实际发出的 payload bit rate；算法内部 `qp->m_rate` 只作辅助诊断。
-3. “胖树”沿用 `topology copy.txt` 的 8 ToR/8 aggregation/4 core/1 DCI 每域结构，只把每 ToR host 数从 4 扩到 8，而不是改成标准 k=8 fat-tree（后者会产生每 DC 128 hosts）。
+3. 当前拓扑采用每个 DC 4 leaf/4 spine/1 gateway 的两层 Leaf-Spine 结构，每个 leaf 连接 8 个 host。
 4. 第一阶段主瓶颈是唯一的 200 Gbps DCI；内部链路保持 100 Gbps。
-

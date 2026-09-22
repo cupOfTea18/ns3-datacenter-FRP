@@ -1,7 +1,7 @@
 ENABLE_QCN 1
 PACKET_PAYLOAD_SIZE 1000
-TOPOLOGY_FILE examples/PowerTCP/topology-longhaul-2dc-64h.txt
-FLOW_FILE examples/PowerTCP/flow-longhaul-s0.txt
+TOPOLOGY_FILE examples/LonghaulCC/topology-longhaul.txt
+FLOW_FILE examples/LonghaulCC/flow-longhaul-s0.txt
 FCT_OUTPUT_FILE results/longhaul/fct.csv
 PFC_OUTPUT_FILE results/longhaul/pfc.csv
 SIMULATOR_STOP_TIME 0.38
@@ -49,6 +49,6 @@ RATE_OUTPUT_FILE results/longhaul/sender-rate.csv
 GOODPUT_OUTPUT_FILE results/longhaul/receiver-goodput.csv
 LINK_STATS_OUTPUT_FILE results/longhaul/dci-link.csv
 SUMMARY_META_FILE results/longhaul/metadata.json
-DCI_LEFT 52
-DCI_RIGHT 105
+DCI_LEFT 40
+DCI_RIGHT 81
 SCENARIO S0

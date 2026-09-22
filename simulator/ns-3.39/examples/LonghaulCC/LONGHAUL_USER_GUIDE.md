@@ -41,7 +41,7 @@ IP 地址只用于 RDMA 节点寻址和路由，DC 归属仍由拓扑校验器�
 
 ```mermaid
 flowchart LR
-    T[topology-longhaul-2dc-64h.txt] --> V[拓扑校验器]
+    T[topology-longhaul.txt<br/>32 hosts/DC] --> V[拓扑校验器]
     F[flow-longhaul-s0..s5.txt] --> R[run-longhaul-baseline.py]
     C[config-longhaul-common.txt] --> R
     T --> R
@@ -52,7 +52,7 @@ flowchart LR
 
     subgraph SIM[仿真内部]
         P[严格配置解析 + CLI 覆盖]
-        N[创建 170 节点和 233 条链路]
+        N[创建 82 节点和 105 条链路]
         I[节点地址 + 静态 RDMA 路由]
         Q[RdmaHw + CC_MODE<br/>DCQCN / HPCC / TIMELY]
         W[按开始时间创建 RDMA 流]
@@ -74,25 +74,25 @@ flowchart LR
 
 ```bash
 ./ns3 build longhaul-convergence -j2
-python3 examples/PowerTCP/validate_longhaul_topology.py
-python3 examples/PowerTCP/run-longhaul-baseline.py
-python3 examples/PowerTCP/analyze-longhaul.py
-python3 examples/PowerTCP/plot-longhaul.py
+python3 examples/LonghaulCC/validate_longhaul_topology.py
+python3 examples/LonghaulCC/run-longhaul-baseline.py
+python3 examples/LonghaulCC/analyze-longhaul.py
+python3 examples/LonghaulCC/plot-longhaul.py
 ```
 
 默认只运行 S0、S2，每种算法 1 个 `RngRun`，用于 smoke test。完整矩阵为
 S0--S5 × 3 种算法 × 5 个 run：
 
 ```bash
-python3 examples/PowerTCP/run-longhaul-baseline.py --full
-python3 examples/PowerTCP/analyze-longhaul.py
-python3 examples/PowerTCP/plot-longhaul.py --all-scenarios
+python3 examples/LonghaulCC/run-longhaul-baseline.py --full
+python3 examples/LonghaulCC/analyze-longhaul.py
+python3 examples/LonghaulCC/plot-longhaul.py --all-scenarios
 ```
 
 只跑指定组合：
 
 ```bash
-python3 examples/PowerTCP/run-longhaul-baseline.py \
+python3 examples/LonghaulCC/run-longhaul-baseline.py \
   --scenarios s0 s2 \
   --algorithms dcqcn hpcc timely \
   --runs 1 \
@@ -102,7 +102,7 @@ python3 examples/PowerTCP/run-longhaul-baseline.py \
 `--stop-time 0.03` 仅适合检查启动、文件输出和崩溃，不适合做收敛结论：
 
 ```bash
-python3 examples/PowerTCP/run-longhaul-baseline.py \
+python3 examples/LonghaulCC/run-longhaul-baseline.py \
   --scenarios s0 --algorithms dcqcn hpcc timely \
   --stop-time 0.03 --skip-build --output-root /tmp/longhaul-smoke
 ```
@@ -114,16 +114,17 @@ runner 会自动完成拓扑校验、编译（除非 `--skip-build`）、创建�
 
 ### 5.1 拓扑
 
-`topology-longhaul-2dc-64h.txt` 的固定口径为：
+当前使用 `topology-longhaul.txt`，拓扑口径为：
 
-- 170 个节点，其中 42 个交换机、128 个 host；
-- 16 个 ToR，每个 ToR 连接 8 个 host；
-- 233 条链路；
-- DCI 为 `52 <-> 105`，200 Gbps，单向 channel delay 为 5 ms；
-- 两侧各 64 个 host，跨 DC RTT 约 10 ms 加内部链路传播/传输延迟。
+- 82 个节点，其中 18 个交换机、64 个 host；
+- 每个 DC 有 4 个 leaf、4 个 spine 和 1 个 gateway；
+- 每个 leaf 连接 8 个 host，两个 DC 各有 32 个 host；
+- 105 条链路，leaf-spine 全连接，spine-gateway 全连接；
+- DCI 为 `40 <-> 81`，200 Gbps，单向 channel delay 为 5 ms；
+- 跨 DC RTT 约 10 ms 加内部链路传播/传输延迟。
 
-修改拓扑后必须先运行校验器。校验器检查节点数量、交换机列表、host 度数、
-ToR 挂载数量、连通性、唯一 DCI 和跨 DC 路径约束。
+修改拓扑后必须先运行校验器。校验器检查节点数量、交换机角色、host 度数、
+leaf 挂载数量、leaf-spine/gateway 连接、连通性、唯一 DCI 和跨 DC 路径约束。
 
 ### 5.2 流文件
 
@@ -238,13 +239,13 @@ R_target = min(DCI_rate / 活跃流数, host_NIC_rate)
 
 ```bash
 python3 -m py_compile \
-  examples/PowerTCP/validate_longhaul_topology.py \
-  examples/PowerTCP/run-longhaul-baseline.py \
-  examples/PowerTCP/analyze-longhaul.py \
-  examples/PowerTCP/plot-longhaul.py
+  examples/LonghaulCC/validate_longhaul_topology.py \
+  examples/LonghaulCC/run-longhaul-baseline.py \
+  examples/LonghaulCC/analyze-longhaul.py \
+  examples/LonghaulCC/plot-longhaul.py
 
 ./ns3 build longhaul-convergence -j2
-python3 examples/PowerTCP/validate_longhaul_topology.py
+python3 examples/LonghaulCC/validate_longhaul_topology.py
 ```
 
 完成代码修改后，至少用 S0 对三种算法各跑一次短 smoke，再进行完整矩阵。

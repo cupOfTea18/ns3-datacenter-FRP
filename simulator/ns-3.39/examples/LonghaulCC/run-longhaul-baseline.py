@@ -77,13 +77,13 @@ def main() -> int:
     if args.runs < 1:
         parser.error("--runs must be positive")
 
-    topology = here / "topology-longhaul-2dc-64h.txt"
+    topology = here / "topology-longhaul.txt"
     template_path = here / "config-longhaul-common.txt"
     validator = here / "validate_longhaul_topology.py"
     subprocess.run([sys.executable, str(validator), str(topology)], check=True)
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"], cwd=ns3, check=True)
-    binary = ns3 / "build" / "examples" / "PowerTCP" / "ns3.39-longhaul-convergence-optimized"
+    binary = ns3 / "build" / "examples" / "LonghaulCC" / "ns3.39-longhaul-convergence-optimized"
     if not binary.is_file():
         raise SystemExit(f"simulator binary not found: {binary}; build it first")
 
