@@ -29,6 +29,9 @@ RdmaQueuePair::RdmaQueuePair(uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, ui
 	dport = _dport;
 	m_size = 0;
 	snd_nxt = snd_una = 0;
+	tx_payload_bytes = tx_wire_bytes = 0;
+	last_tx_time_ns = 0;
+	last_tx_payload_size = 0;
 	m_pg = pg;
 	m_ipid = 0;
 	m_win = 0;
@@ -196,6 +199,7 @@ RdmaRxQueuePair::RdmaRxQueuePair() {
 	m_milestone_rx = 0;
 	m_lastNACK = 0;
 	m_recv_bytes = 0;
+	last_payload_rx_time_ns = 0;
 }
 
 uint32_t RdmaRxQueuePair::GetHash(void) {

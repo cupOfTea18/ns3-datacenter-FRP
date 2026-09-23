@@ -289,8 +289,6 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 		std::cout << "sip " << sip << " dip " << dip << " sport " << sport  << " dport " << dport << std::endl;
 	}
 	DataRate m_bps = m_nic[nic_idx].dev->GetDataRate();
-	if(win)
-		qp->SetWin(m_bps.GetBitRate() * 1 * baseRtt * 1e-9 / 8);
 	qp->m_rate = m_bps;
 	qp->m_max_rate = m_bps;
 	if (m_cc_mode == 1) {
@@ -384,6 +382,7 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	// x==2/x==4: 乱序(不累加,等重传补洞); x==3: 重复包(不累加)
 	if (x == 1 || x == 5) {
 		rxQp->m_recv_bytes += payload_size;
+		rxQp->last_payload_rx_time_ns = Simulator::Now().GetNanoSeconds();
 	}
 	if (x == 1 || x == 2) { //generate ACK or NACK
 		qbbHeader seqh;
@@ -493,12 +492,18 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 	if (m_ack_interval == 0)
 		std::cout << "ERROR: shouldn't receive ack\n";
 	else {
-		if (!m_backto0) {
-			qp->Acknowledge(seq);
-		} else {
-			uint32_t goback_seq = seq / m_chunk * m_chunk;
-			qp->Acknowledge(goback_seq);
+		uint32_t ack_seq = m_backto0 ? seq / m_chunk * m_chunk : seq;
+		if (ch.l3Prot == 0xFC && ack_seq > qp->snd_una) {
+			auto txTime = qp->tx_send_times.find(ack_seq);
+			if (txTime != qp->tx_send_times.end() && !txTime->second.second) {
+				uint64_t now_ns = Simulator::Now().GetNanoSeconds();
+				if (now_ns >= txTime->second.first)
+					qp->measured_rtt_samples.emplace_back(now_ns, now_ns - txTime->second.first);
+			}
+			auto end = qp->tx_send_times.upper_bound(ack_seq);
+			qp->tx_send_times.erase(qp->tx_send_times.begin(), end);
 		}
+		qp->Acknowledge(ack_seq);
 		if (qp->IsFinished()) {
 			QpComplete(qp);
 		}
@@ -688,6 +693,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
 	// update state
 	qp->snd_nxt += payload_size;
 	qp->m_ipid++;
+	qp->last_tx_payload_size = payload_size;
 
 	// return
 	return p;
@@ -695,11 +701,17 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
 
 void RdmaHw::PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap) {
 	qp->lastPktSize = pkt->GetSize();
+	uint64_t now_ns = Simulator::Now().GetNanoSeconds();
+	qp->tx_payload_bytes += qp->last_tx_payload_size;
+	qp->tx_wire_bytes += pkt->GetSize();
+	qp->last_tx_time_ns = now_ns;
+	auto txTime = qp->tx_send_times.emplace(qp->snd_nxt, std::make_pair(now_ns, false));
+	if (!txTime.second)
+		txTime.first->second.second = true;
 //	SeqTsHeader seqTs;
 //	pkt->PeekHeader(seqTs);
-	// The per-packet timestamp map is only needed by PowerTCP's RTT
-	// instrumentation.  Baseline DCQCN/HPCC/TIMELY runs never consume it;
-	// avoiding the map keeps long-haul runs bounded in memory.
+	// Keep PowerTCP's separate timestamp map only when that controller is enabled;
+	// tx_send_times above supplies the structured Longhaul RTT samples.
 	if (PowerTCPEnabled)
 		qp->rates[qp->snd_nxt] = Simulator::Now().GetNanoSeconds();
 	UpdateNextAvail(qp, interframeGap, pkt->GetSize());
@@ -937,7 +949,7 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 			double U = 0;
 			uint64_t dt = 0;
 			bool updated[IntHeader::maxHop] = {false}, updated_any = false;
-			NS_ASSERT(ih.nhop <= IntHeader::maxHop);
+			NS_ABORT_MSG_IF(ih.nhop > IntHeader::maxHop, "HPCC ACK exceeds INT hop capacity");
 			for (uint32_t i = 0; i < ih.nhop; i++) {
 				if (m_sampleFeedback) {
 					if (ih.hop[i].GetQlen() == 0 and fast_react)

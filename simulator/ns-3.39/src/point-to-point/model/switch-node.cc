@@ -140,7 +140,7 @@ int SwitchNode::GetOutDev(Ptr<const Packet> p, CustomHeader &ch) {
 	union {
 		uint8_t u8[4 + 4 + 2 + 2];
 		uint32_t u32[3];
-	} buf;
+	} buf{};
 	buf.u32[0] = ih.GetSource().Get();
 	buf.u32[1] = ih.GetDestination().Get();
 	if (ih.GetProtocol() == 0x6) {

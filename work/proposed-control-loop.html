@@ -1,0 +1,804 @@
+<div id="proposed-control-loop" aria-label="Proposed 接收侧预测与近源虚拟队列 CNP 控制闭环">
+  <style>
+    #proposed-control-loop {
+      color: var(--foreground);
+      font-size: var(--font-size-base);
+      line-height: 1.45;
+      width: 100%;
+    }
+
+    #proposed-control-loop h2 {
+      margin: 0 0 0.3rem;
+      font-size: 1.05rem;
+      font-weight: 500;
+    }
+
+    #proposed-control-loop .pc-kicker {
+      color: var(--muted-foreground);
+      margin: 0 0 0.8rem;
+    }
+
+    #proposed-control-loop .pc-controls {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      margin-bottom: 0.65rem;
+    }
+
+    #proposed-control-loop .pc-control-field {
+      flex: 1 1 290px;
+      min-width: 240px;
+    }
+
+    #proposed-control-loop .pc-control-label {
+      align-items: baseline;
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 0.2rem;
+    }
+
+    #proposed-control-loop .pc-control-label .form-label {
+      margin-bottom: 0;
+    }
+
+    #proposed-control-loop .pc-control-value {
+      color: var(--muted-foreground);
+      font-size: 0.86em;
+    }
+
+    #proposed-control-loop .pc-mode {
+      align-items: center;
+      display: flex;
+      flex: 0 1 auto;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
+    #proposed-control-loop .pc-mode-note {
+      color: var(--muted-foreground);
+      font-size: 0.86em;
+      white-space: nowrap;
+    }
+
+    #proposed-control-loop .pc-svg {
+      display: block;
+      height: auto;
+      overflow: visible;
+      width: 100%;
+    }
+
+    #proposed-control-loop .pc-svg-mobile {
+      display: none;
+    }
+
+    #proposed-control-loop .pc-svg text {
+      fill: var(--foreground);
+      font-size: 12px;
+    }
+
+    #proposed-control-loop .pc-region-label,
+    #proposed-control-loop .pc-lane-label {
+      font-weight: 500;
+    }
+
+    #proposed-control-loop .pc-node {
+      opacity: 0.58;
+      transition: opacity 180ms ease;
+    }
+
+    #proposed-control-loop .pc-node rect {
+      fill: var(--muted);
+      fill-opacity: 0.78;
+      stroke: var(--border);
+      stroke-width: 1.4;
+    }
+
+    #proposed-control-loop .pc-node.is-active {
+      opacity: 1;
+    }
+
+    #proposed-control-loop .pc-node.is-active rect {
+      fill: var(--viz-series-1);
+      fill-opacity: 0.12;
+      stroke: var(--viz-series-1);
+      stroke-width: 1.8;
+    }
+
+    #proposed-control-loop .pc-node-title {
+      font-weight: 500;
+    }
+
+    #proposed-control-loop .pc-node-subtext,
+    #proposed-control-loop .pc-flow-label,
+    #proposed-control-loop .pc-lane-note {
+      opacity: 0.78;
+    }
+
+    #proposed-control-loop .pc-flow-label {
+      fill: var(--foreground);
+      stroke: none;
+      stroke-width: 0;
+    }
+
+    #proposed-control-loop .pc-flow {
+      fill: none;
+      opacity: 0.27;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.6;
+      transition: opacity 180ms ease, stroke-width 180ms ease;
+    }
+
+    #proposed-control-loop .pc-flow.is-active {
+      opacity: 1;
+      stroke-width: 2.4;
+    }
+
+    #proposed-control-loop .pc-data-flow {
+      stroke: var(--viz-series-1);
+    }
+
+    #proposed-control-loop .pc-telemetry-flow {
+      stroke: var(--viz-series-2);
+      stroke-dasharray: 5 4;
+    }
+
+    #proposed-control-loop .pc-target-flow {
+      stroke: var(--viz-series-3);
+      stroke-dasharray: 7 4;
+    }
+
+    #proposed-control-loop .pc-cnp-flow {
+      stroke: var(--viz-series-4);
+      stroke-dasharray: 2 4;
+    }
+
+    #proposed-control-loop .pc-arrow-data {
+      fill: var(--viz-series-1);
+    }
+
+    #proposed-control-loop .pc-arrow-telemetry {
+      fill: var(--viz-series-2);
+    }
+
+    #proposed-control-loop .pc-arrow-target {
+      fill: var(--viz-series-3);
+    }
+
+    #proposed-control-loop .pc-arrow-cnp {
+      fill: var(--viz-series-4);
+    }
+
+    #proposed-control-loop .pc-meter-track {
+      fill: var(--muted);
+      fill-opacity: 0.9;
+    }
+
+    #proposed-control-loop .pc-meter-actual {
+      fill: var(--viz-series-2);
+      transition: width 180ms ease;
+    }
+
+    #proposed-control-loop .pc-meter-predicted {
+      fill: var(--viz-series-3);
+      transition: width 180ms ease, opacity 180ms ease;
+    }
+
+    #proposed-control-loop .pc-meter-virtual {
+      fill: var(--viz-series-4);
+      transition: width 180ms ease;
+    }
+
+    #proposed-control-loop .pc-meter-caption {
+      opacity: 0.78;
+    }
+
+    #proposed-control-loop .pc-lane {
+      opacity: 0.94;
+    }
+
+    #proposed-control-loop .pc-lane-line {
+      fill: none;
+      stroke: var(--border);
+      stroke-linecap: round;
+      stroke-width: 1.2;
+    }
+
+    #proposed-control-loop .pc-step-marker {
+      cursor: default;
+      opacity: 0.62;
+      transition: opacity 180ms ease;
+    }
+
+    #proposed-control-loop .pc-step-marker circle {
+      fill: var(--muted);
+      stroke: var(--border);
+      stroke-width: 1.2;
+      transition: fill 180ms ease, stroke 180ms ease, r 180ms ease;
+    }
+
+    #proposed-control-loop .pc-step-marker.is-active {
+      opacity: 1;
+    }
+
+    #proposed-control-loop .pc-step-marker.is-active circle {
+      fill: var(--viz-series-1);
+      stroke: var(--viz-series-1);
+      r: 7;
+    }
+
+    #proposed-control-loop .pc-step-marker text {
+      text-anchor: middle;
+    }
+
+    #proposed-control-loop .pc-detail {
+      margin: 0.15rem 0 0.65rem;
+      min-height: 1.6em;
+    }
+
+    #proposed-control-loop .pc-detail strong {
+      font-weight: 500;
+    }
+
+    #proposed-control-loop .pc-legend,
+    #proposed-control-loop .pc-parameters,
+    #proposed-control-loop .pc-boundaries,
+    #proposed-control-loop .pc-open-items {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.85rem;
+    }
+
+    #proposed-control-loop .pc-legend {
+      color: var(--muted-foreground);
+      font-size: 0.86em;
+      margin-bottom: 0.5rem;
+    }
+
+    #proposed-control-loop .pc-legend-item {
+      align-items: center;
+      display: inline-flex;
+      gap: 0.32rem;
+    }
+
+    #proposed-control-loop .pc-swatch {
+      border-radius: 50%;
+      display: inline-block;
+      height: 0.55rem;
+      width: 0.55rem;
+    }
+
+    #proposed-control-loop .pc-swatch.data {
+      background: var(--viz-series-1);
+    }
+
+    #proposed-control-loop .pc-swatch.telemetry {
+      background: var(--viz-series-2);
+    }
+
+    #proposed-control-loop .pc-swatch.target {
+      background: var(--viz-series-3);
+    }
+
+    #proposed-control-loop .pc-swatch.cnp {
+      background: var(--viz-series-4);
+    }
+
+    #proposed-control-loop .pc-parameters {
+      color: var(--muted-foreground);
+      font-size: 0.86em;
+      margin-bottom: 0.7rem;
+    }
+
+    #proposed-control-loop .pc-parameters code {
+      color: var(--foreground);
+    }
+
+    #proposed-control-loop .pc-boundaries,
+    #proposed-control-loop .pc-open-items {
+      color: var(--muted-foreground);
+      font-size: 0.86em;
+    }
+
+    #proposed-control-loop .pc-boundary-label,
+    #proposed-control-loop .pc-open-label {
+      color: var(--foreground);
+      font-weight: 500;
+    }
+
+    #proposed-control-loop .pc-example {
+      color: var(--muted-foreground);
+      font-size: 0.82em;
+      margin: 0 0 0.6rem;
+    }
+
+    #proposed-control-loop hr {
+      margin: 0.55rem 0;
+    }
+
+    @media (max-width: 560px) {
+      #proposed-control-loop .pc-mode-note {
+        white-space: normal;
+      }
+
+      #proposed-control-loop .pc-controls {
+        align-items: stretch;
+      }
+    }
+
+    @media (max-width: 600px) {
+      #proposed-control-loop .pc-svg-desktop {
+        display: none;
+      }
+
+      #proposed-control-loop .pc-svg-mobile {
+        display: block;
+      }
+
+      #proposed-control-loop .pc-svg-mobile .pc-step-marker text {
+        text-anchor: start;
+      }
+    }
+
+    @media (min-width: 601px) and (max-width: 1000px) {
+      #proposed-control-loop .pc-svg-desktop text {
+        font-size: 15px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #proposed-control-loop * {
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+
+  <h2>Proposed：把跨域滞后的控制拆成“预测 + 近源执行”</h2>
+  <p class="pc-kicker">沿着阶段滑块看一轮闭环：接收侧提前估计 <code>q̂</code>，源侧用 <code>z</code> 和 CNP 让 RNIC 开始降速。</p>
+
+  <div class="pc-controls" aria-label="控制闭环观察选项">
+    <div class="pc-control-field">
+      <div class="pc-control-label">
+        <label class="form-label" for="pc-step-range">控制阶段</label>
+        <span class="pc-control-value" id="pc-step-label">0 / 6 · 过载进入</span>
+      </div>
+      <input class="form-range" id="pc-step-range" type="range" min="0" max="6" step="1" value="0" aria-label="控制阶段">
+    </div>
+    <div class="pc-mode">
+      <button class="btn btn-ghost cursor-interaction" id="pc-prediction-toggle" type="button" aria-pressed="true">预测：开</button>
+      <span class="pc-mode-note" id="pc-mode-note">目标使用 q_ctrl = q̂</span>
+    </div>
+    <div class="pc-mode">
+      <button class="btn btn-ghost cursor-interaction" id="pc-prev" type="button">上一阶段</button>
+      <button class="btn btn-primary cursor-interaction" id="pc-next" type="button">下一阶段</button>
+    </div>
+  </div>
+
+  <svg class="pc-svg pc-svg-desktop" viewBox="0 0 960 470" role="img" aria-labelledby="pc-svg-title pc-svg-desc">
+    <title id="pc-svg-title">Proposed 接收侧预测与近源 CNP 闭环</title>
+    <desc id="pc-svg-desc">数据从发送端 RNIC 经过源侧 DCI、跨域链路和接收侧 DCI 到达接收端；源侧发送遥测，接收侧返回聚合目标，源侧根据虚拟队列选择流发送近源 CNP。</desc>
+    <defs>
+      <marker id="pc-arrow-data" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path class="pc-arrow-data" d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+      <marker id="pc-arrow-telemetry" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path class="pc-arrow-telemetry" d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+      <marker id="pc-arrow-target" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path class="pc-arrow-target" d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+      <marker id="pc-arrow-cnp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+        <path class="pc-arrow-cnp" d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+    </defs>
+
+    <text class="pc-region-label" x="106" y="24" text-anchor="middle">源侧</text>
+    <text class="pc-region-label" x="660" y="24" text-anchor="middle">接收侧</text>
+
+    <g class="pc-flow pc-target-flow" data-part="target" aria-label="聚合目标反馈">
+      <path d="M 660 48 C 660 22, 310 22, 310 48" marker-end="url(#pc-arrow-target)"></path>
+      <text class="pc-flow-label" x="485" y="17" text-anchor="middle">u · 目标反馈 · 延迟 d_f</text>
+    </g>
+
+    <g class="pc-flow pc-data-flow" data-part="data" aria-label="跨域数据">
+      <path d="M 190 112 H 214" marker-end="url(#pc-arrow-data)"></path>
+      <path d="M 404 112 H 566" marker-end="url(#pc-arrow-data)"></path>
+      <path d="M 756 112 H 770" marker-end="url(#pc-arrow-data)"></path>
+      <text class="pc-flow-label" x="485" y="97" text-anchor="middle">数据 · 实际出口 a_s</text>
+    </g>
+
+    <g class="pc-node" data-part="rnic" aria-label="发送端 RNIC">
+      <rect x="26" y="64" width="164" height="100" rx="10"></rect>
+      <text class="pc-node-title" x="108" y="87" text-anchor="middle">发送端 RNIC</text>
+      <text id="pc-rnic-state" data-bind="rnic-state" class="pc-node-subtext" x="108" y="111" text-anchor="middle">按旧速率发送</text>
+      <text class="pc-node-subtext" x="108" y="135" text-anchor="middle">DCQCN 执行器</text>
+      <text class="pc-node-subtext" x="108" y="153" text-anchor="middle">CNP → 降速</text>
+    </g>
+
+    <g class="pc-node" data-part="source" aria-label="发送侧 DCI">
+      <rect x="214" y="48" width="190" height="132" rx="10"></rect>
+      <text class="pc-node-title" x="309" y="70" text-anchor="middle">发送侧 DCI</text>
+      <text class="pc-node-subtext" x="309" y="91" text-anchor="middle">z：虚拟队列（B）</text>
+      <rect class="pc-meter-track" x="240" y="101" width="138" height="8" rx="4"></rect>
+      <rect id="pc-virtual-bar" class="pc-meter-virtual" x="240" y="101" width="110" height="8" rx="4"></rect>
+      <text id="pc-virtual-value" data-bind="virtual-value" class="pc-meter-caption" x="309" y="126" text-anchor="middle">z = 200 KB / z_ref = 250 KB</text>
+      <text class="pc-node-subtext" x="309" y="149" text-anchor="middle">z &gt; z_ref → 开启 CNP</text>
+      <text class="pc-node-subtext" x="309" y="167" text-anchor="middle">r_i &gt; 1.05·u/N_s</text>
+    </g>
+
+    <g class="pc-node" data-part="receiver" aria-label="接收侧 DCI">
+      <rect x="566" y="48" width="190" height="132" rx="10"></rect>
+      <text class="pc-node-title" x="661" y="70" text-anchor="middle">接收侧 DCI</text>
+      <text id="pc-q-value" data-bind="q-value" class="pc-meter-caption" x="590" y="91">q = 2 MB</text>
+      <rect class="pc-meter-track" x="590" y="99" width="138" height="8" rx="4"></rect>
+      <rect id="pc-q-bar" class="pc-meter-actual" x="590" y="99" width="69" height="8" rx="4"></rect>
+      <text id="pc-qhat-value" data-bind="qhat-value" class="pc-meter-caption" x="590" y="122">q̂ = 3.25 MB</text>
+      <rect class="pc-meter-track" x="590" y="130" width="138" height="8" rx="4"></rect>
+      <rect id="pc-qhat-bar" data-bind="qhat-bar" class="pc-meter-predicted" x="590" y="130" width="112" height="8" rx="4"></rect>
+      <text id="pc-qctrl-value" data-bind="qctrl-value" class="pc-node-subtext" x="661" y="161" text-anchor="middle">q_ctrl = q̂ → u</text>
+    </g>
+
+    <g class="pc-node" data-part="sink" aria-label="接收端">
+      <rect x="770" y="64" width="164" height="100" rx="10"></rect>
+      <text class="pc-node-title" x="852" y="87" text-anchor="middle">接收端</text>
+      <text class="pc-node-subtext" x="852" y="111" text-anchor="middle">ACK / goodput</text>
+      <text class="pc-node-subtext" x="852" y="135" text-anchor="middle">瓶颈出口 q</text>
+    </g>
+
+    <g class="pc-flow pc-telemetry-flow" data-part="telemetry" aria-label="发送侧遥测">
+      <path d="M 404 164 C 455 207, 515 207, 566 164" marker-end="url(#pc-arrow-telemetry)"></path>
+      <text class="pc-flow-label" x="485" y="218" text-anchor="middle">遥测 ã_s · 延迟 d_f</text>
+    </g>
+
+    <g class="pc-flow pc-cnp-flow" data-part="cnp" aria-label="近源 CNP">
+      <path d="M 214 165 C 178 210, 105 210, 108 165" marker-end="url(#pc-arrow-cnp)"></path>
+      <text class="pc-flow-label" x="160" y="222" text-anchor="middle">逐流近源 CNP</text>
+    </g>
+
+    <text class="pc-lane-label" x="30" y="278">控制顺序</text>
+    <text class="pc-lane-note" x="930" y="278" text-anchor="end">示意顺序，不按网络时延比例</text>
+    <path class="pc-lane-line" d="M 104 298 H 930"></path>
+
+    <g class="pc-step-marker" data-step-marker="0" transform="translate(126 298)">
+      <circle r="5"></circle>
+      <text y="25">过载</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="1" transform="translate(260 298)">
+      <circle r="5"></circle>
+      <text y="25">采样</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="2" transform="translate(394 298)">
+      <circle r="5"></circle>
+      <text y="25">预测 q̂</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="3" transform="translate(528 298)">
+      <circle r="5"></circle>
+      <text y="25">目标 u</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="4" transform="translate(662 298)">
+      <circle r="5"></circle>
+      <text y="25">更新 z / CNP</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="5" transform="translate(796 298)">
+      <circle r="5"></circle>
+      <text y="25">RNIC 降速</text>
+    </g>
+    <g class="pc-step-marker" data-step-marker="6" transform="translate(930 298)">
+      <circle r="5"></circle>
+      <text x="-4" y="25" text-anchor="end">恢复 / 未闭环</text>
+    </g>
+
+    <text class="pc-lane-label" x="30" y="370">接收侧周期 T</text>
+    <text class="pc-lane-note" x="30" y="389">每 200 μs：q、遥测、预测、目标</text>
+    <path class="pc-lane-line" d="M 190 366 H 500"></path>
+    <circle cx="242" cy="366" r="4" fill="var(--viz-series-2)"></circle>
+    <circle cx="342" cy="366" r="4" fill="var(--viz-series-3)"></circle>
+    <circle cx="442" cy="366" r="4" fill="var(--viz-series-3)"></circle>
+    <text class="pc-lane-note" x="242" y="387" text-anchor="middle">观测</text>
+    <text class="pc-lane-note" x="342" y="387" text-anchor="middle">预测</text>
+    <text class="pc-lane-note" x="442" y="387" text-anchor="middle">反馈</text>
+
+    <text class="pc-lane-label" x="560" y="370">源侧周期 δ</text>
+    <text class="pc-lane-note" x="560" y="389">每 50 μs：z、活跃流、CNP</text>
+    <path class="pc-lane-line" d="M 720 366 H 930"></path>
+    <circle cx="775" cy="366" r="4" fill="var(--viz-series-4)"></circle>
+    <circle cx="875" cy="366" r="4" fill="var(--viz-series-4)"></circle>
+    <text class="pc-lane-note" x="775" y="387" text-anchor="middle">z / 选流</text>
+    <text class="pc-lane-note" x="875" y="387" text-anchor="middle">CNP</text>
+  </svg>
+
+  <svg class="pc-svg pc-svg-mobile" viewBox="0 0 360 760" role="img" aria-label="窄屏版 Proposed 控制闭环">
+    <title>窄屏版 Proposed 控制闭环</title>
+    <text class="pc-lane-note" x="180" y="20" text-anchor="middle">数据向下，反馈沿侧边返回</text>
+
+    <g class="pc-node" data-part="rnic" aria-label="发送端 RNIC">
+      <rect x="35" y="32" width="290" height="72" rx="9"></rect>
+      <text class="pc-node-title" x="180" y="54" text-anchor="middle">发送端 RNIC</text>
+      <text data-bind="rnic-state" class="pc-node-subtext" x="180" y="76" text-anchor="middle">按旧速率发送</text>
+      <text class="pc-node-subtext" x="180" y="94" text-anchor="middle">CNP → DCQCN</text>
+    </g>
+
+    <g class="pc-flow pc-data-flow" data-part="data" aria-label="跨域数据">
+      <path d="M 180 104 V 128" marker-end="url(#pc-arrow-data)"></path>
+    </g>
+
+    <g class="pc-node" data-part="source" aria-label="发送侧 DCI">
+      <rect x="25" y="128" width="310" height="132" rx="9"></rect>
+      <text class="pc-node-title" x="180" y="150" text-anchor="middle">发送侧 DCI</text>
+      <text class="pc-node-subtext" x="180" y="171" text-anchor="middle">z：虚拟队列（B）</text>
+      <rect class="pc-meter-track" x="55" y="181" width="250" height="8" rx="4"></rect>
+      <rect class="pc-meter-virtual" x="55" y="181" width="198" height="8" rx="4"></rect>
+      <text data-bind="virtual-value" class="pc-meter-caption" x="180" y="207" text-anchor="middle">z = 200 KB / z_ref = 250 KB</text>
+      <text class="pc-node-subtext" x="180" y="229" text-anchor="middle">z &gt; z_ref → 开启 CNP</text>
+      <text class="pc-node-subtext" x="180" y="247" text-anchor="middle">按 r_i &gt; 1.05·u/N_s 选流</text>
+    </g>
+
+    <g class="pc-flow pc-data-flow" data-part="data" aria-label="跨域数据">
+      <path d="M 180 260 V 288" marker-end="url(#pc-arrow-data)"></path>
+    </g>
+
+    <g class="pc-node" data-part="receiver" aria-label="接收侧 DCI">
+      <rect x="25" y="288" width="310" height="150" rx="9"></rect>
+      <text class="pc-node-title" x="180" y="310" text-anchor="middle">接收侧 DCI</text>
+      <text data-bind="q-value" class="pc-meter-caption" x="55" y="333">q = 2 MB</text>
+      <rect class="pc-meter-track" x="55" y="340" width="250" height="8" rx="4"></rect>
+      <rect class="pc-meter-actual" x="55" y="340" width="125" height="8" rx="4"></rect>
+      <text data-bind="qhat-value" class="pc-meter-caption" x="55" y="365">q̂ = 3.25 MB</text>
+      <rect class="pc-meter-track" x="55" y="372" width="250" height="8" rx="4"></rect>
+      <rect data-bind="qhat-bar" class="pc-meter-predicted" x="55" y="372" width="203" height="8" rx="4"></rect>
+      <text data-bind="qctrl-value" class="pc-node-subtext" x="180" y="411" text-anchor="middle">q_ctrl = q̂ → 计算 u</text>
+    </g>
+
+    <g class="pc-flow pc-data-flow" data-part="data" aria-label="跨域数据">
+      <path d="M 180 438 V 466" marker-end="url(#pc-arrow-data)"></path>
+    </g>
+
+    <g class="pc-node" data-part="sink" aria-label="接收端">
+      <rect x="35" y="466" width="290" height="72" rx="9"></rect>
+      <text class="pc-node-title" x="180" y="488" text-anchor="middle">接收端</text>
+      <text class="pc-node-subtext" x="180" y="511" text-anchor="middle">ACK / goodput · 瓶颈出口 q</text>
+    </g>
+
+    <g class="pc-flow pc-telemetry-flow" data-part="telemetry" aria-label="发送侧遥测">
+      <path d="M 25 215 C 5 250, 5 334, 25 350" marker-end="url(#pc-arrow-telemetry)"></path>
+      <text class="pc-flow-label" x="10" y="285">ã_s</text>
+    </g>
+
+    <g class="pc-flow pc-target-flow" data-part="target" aria-label="聚合目标反馈">
+      <path d="M 335 366 C 352 332, 352 205, 335 181" marker-end="url(#pc-arrow-target)"></path>
+      <text class="pc-flow-label" x="350" y="280" text-anchor="end">u</text>
+    </g>
+
+    <g class="pc-flow pc-cnp-flow" data-part="cnp" aria-label="近源 CNP">
+      <path d="M 35 165 C 8 145, 8 83, 35 61" marker-end="url(#pc-arrow-cnp)"></path>
+      <text class="pc-flow-label" x="12" y="123">CNP</text>
+    </g>
+
+    <text class="pc-lane-label" x="25" y="565">控制顺序</text>
+    <path class="pc-lane-line" d="M 42 586 V 740"></path>
+    <g class="pc-step-marker" data-step-marker="0" transform="translate(42 586)"><circle r="5"></circle><text x="18" y="4">0 · 过载进入</text></g>
+    <g class="pc-step-marker" data-step-marker="1" transform="translate(42 610)"><circle r="5"></circle><text x="18" y="4">1 · 发送侧采样</text></g>
+    <g class="pc-step-marker" data-step-marker="2" transform="translate(42 634)"><circle r="5"></circle><text x="18" y="4">2 · 接收侧预测 q̂</text></g>
+    <g class="pc-step-marker" data-step-marker="3" transform="translate(42 658)"><circle r="5"></circle><text x="18" y="4">3 · 目标 u 返回</text></g>
+    <g class="pc-step-marker" data-step-marker="4" transform="translate(42 682)"><circle r="5"></circle><text x="18" y="4">4 · 更新 z / 选择 CNP</text></g>
+    <g class="pc-step-marker" data-step-marker="5" transform="translate(42 706)"><circle r="5"></circle><text x="18" y="4">5 · RNIC 降速</text></g>
+    <g class="pc-step-marker" data-step-marker="6" transform="translate(42 730)"><circle r="5"></circle><text x="18" y="4">6 · 恢复仍依赖 DCQCN</text></g>
+  </svg>
+
+  <div id="pc-detail" class="pc-detail" aria-live="polite"></div>
+
+  <div class="pc-legend" aria-label="图例">
+    <span class="pc-legend-item"><span class="pc-swatch data" aria-hidden="true"></span>数据路径</span>
+    <span class="pc-legend-item"><span class="pc-swatch telemetry" aria-hidden="true"></span>发送侧遥测</span>
+    <span class="pc-legend-item"><span class="pc-swatch target" aria-hidden="true"></span>目标反馈</span>
+    <span class="pc-legend-item"><span class="pc-swatch cnp" aria-hidden="true"></span>近源 CNP</span>
+  </div>
+
+  <div class="pc-example">公式示例：q = 2 MB、ã_s = 60 Gbps、C = 50 Gbps、H = 2 ms、w = 0.5 ⇒ q̂ = 3.25 MB；这是解释公式的示意量，不是一次实验日志。</div>
+
+  <div class="pc-parameters" aria-label="关键参数">
+    <span><code>T = 200 μs</code> 接收侧控制周期</span>
+    <span><code>δ = 50 μs</code> 近源检查周期</span>
+    <span><code>H ≈ 2.033 ms</code> 名义预测时长</span>
+    <span><code>ε = 5%</code> 超额通知裕量</span>
+    <span><code>ρ = 0.98</code> 利用率上限</span>
+  </div>
+
+  <hr>
+
+  <div class="pc-boundaries" aria-label="语义边界">
+    <span class="pc-boundary-label">必须分清：</span>
+    <span><code>q ≠ z</code> 真实队列 ≠ 虚拟积压</span>
+    <span><code>u ≠ RNIC 速率寄存器</code></span>
+    <span><code>H ≠ 已测 d₀</code></span>
+  </div>
+  <div class="pc-open-items" aria-label="当前未闭环问题">
+    <span class="pc-open-label">当前未闭环：</span>
+    <span>执行延迟辨识</span>
+    <span>预测误差校准</span>
+    <span>主动恢复</span>
+    <span>多跳 / 多流组</span>
+  </div>
+
+  <script>
+    (() => {
+      const root = document.getElementById('proposed-control-loop');
+      if (!root) return;
+
+      const steps = [
+        {
+          title: '0 · 过载进入',
+          parts: ['rnic', 'source', 'data', 'receiver', 'sink'],
+          detail: '源侧 RNIC 仍按旧速率发送；当实际跨域出口速率高于瓶颈容量 C，接收侧出口队列 q 开始增长。'
+        },
+        {
+          title: '1 · 发送侧采样',
+          parts: ['source', 'data', 'telemetry'],
+          detail: '源侧 DCI 用跨域出口出队字节差分计算 a_s，并把“采样区间结束时刻”随遥测交给接收侧。'
+        },
+        {
+          title: '2 · 接收侧预测',
+          parts: ['receiver', 'telemetry'],
+          detail: '接收侧以当前真实队列 q 为起点外推 q̂(t+H)；预测模式把 q_ctrl 设为 q̂，反应模式则直接使用 q。'
+        },
+        {
+          title: '3 · 计算并返回目标',
+          parts: ['receiver', 'target'],
+          detail: '接收侧根据 q_ctrl、q_ref、C 和活跃流数 N_r 计算聚合目标 u，再经跨域延迟返回源侧。'
+        },
+        {
+          title: '4 · 源侧更新 z / 选择 CNP 对象',
+          parts: ['source', 'target', 'cnp'],
+          detail: '源侧按 z←max(0,z+D_in−uδ) 更新虚拟积压；z 超过 z_ref 且某流高于 1.05·u/N_s 时，给该流最多发一个 CNP。'
+        },
+        {
+          title: '5 · RNIC 执行降速',
+          parts: ['rnic', 'cnp'],
+          detail: 'CNP 通过直连源主机的路径到达 RNIC，进入既有 DCQCN 降速逻辑；它不直接写入 u/N_s，也不保证精确跟随目标。'
+        },
+        {
+          title: '6 · 恢复仍依赖端侧算法',
+          parts: ['rnic', 'source', 'receiver', 'sink'],
+          detail: '停止 CNP 后，提速依赖 DCQCN 自身恢复；当前设计没有主动恢复机制，减流后的利用率不足仍是待验证问题。'
+        }
+      ];
+
+      const range = root.querySelector('#pc-step-range');
+      const stepLabel = root.querySelector('#pc-step-label');
+      const detail = root.querySelector('#pc-detail');
+      const predictionToggle = root.querySelector('#pc-prediction-toggle');
+      const modeNote = root.querySelector('#pc-mode-note');
+      const prev = root.querySelector('#pc-prev');
+      const next = root.querySelector('#pc-next');
+
+      function boundElements(name) {
+        return root.querySelectorAll(`[data-bind="${name}"]`);
+      }
+
+      function setBoundText(name, value) {
+        boundElements(name).forEach((element) => {
+          element.textContent = value;
+        });
+      }
+
+      function setBoundAttribute(name, attribute, value) {
+        boundElements(name).forEach((element) => {
+          element.setAttribute(attribute, value);
+        });
+      }
+
+      let step = 0;
+      let prediction = true;
+
+      function decodeState(raw) {
+        if (!raw) return {};
+        let value = raw;
+        if (typeof value === 'string') {
+          try {
+            value = JSON.parse(value);
+          } catch (_) {
+            return {};
+          }
+        }
+        if (value && value.privateContent) {
+          value = value.privateContent;
+        }
+        return value && typeof value === 'object' ? value : {};
+      }
+
+      function clampStep(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return Math.min(steps.length - 1, Math.max(0, Math.round(numeric)));
+      }
+
+      function saveState() {
+        try {
+          const result = window.openai && window.openai.setWidgetState
+            ? window.openai.setWidgetState({
+                modelContent: { step, prediction },
+                privateContent: { step, prediction }
+              })
+            : null;
+          if (result && typeof result.catch === 'function') result.catch(() => {});
+        } catch (_) {
+          // Standalone previews do not provide the host state bridge.
+        }
+      }
+
+      function renderMode() {
+        predictionToggle.textContent = prediction ? '预测：开' : '预测：关';
+        predictionToggle.setAttribute('aria-pressed', String(prediction));
+        modeNote.textContent = prediction ? '目标使用 q_ctrl = q̂' : '目标使用 q_ctrl = q（保留 CNP）';
+        setBoundText('qctrl-value', prediction ? 'q_ctrl = q̂ → u' : 'q_ctrl = q → u');
+        setBoundText('qhat-value', prediction ? 'q̂ = 3.25 MB' : 'q̂ = 3.25 MB（不用于目标）');
+        setBoundAttribute('qhat-bar', 'opacity', prediction ? '1' : '0.32');
+      }
+
+      function renderStep(shouldSave) {
+        const current = steps[step];
+        range.value = String(step);
+        stepLabel.textContent = `${step} / ${steps.length - 1} · ${current.title.replace(/^\d+ · /, '')}`;
+        detail.innerHTML = `<strong>${current.title}</strong>　${current.detail}`;
+
+        root.querySelectorAll('[data-part]').forEach((element) => {
+          element.classList.toggle('is-active', current.parts.includes(element.dataset.part));
+        });
+        root.querySelectorAll('[data-step-marker]').forEach((element) => {
+          element.classList.toggle('is-active', Number(element.dataset.stepMarker) === step);
+        });
+
+        if (step === 5) {
+          setBoundText('rnic-state', '收到 CNP，进入降速');
+        } else if (step === 6) {
+          setBoundText('rnic-state', '恢复依赖 DCQCN');
+        } else {
+          setBoundText('rnic-state', '按旧速率发送');
+        }
+
+        renderMode();
+        prev.disabled = step === 0;
+        next.disabled = step === steps.length - 1;
+        if (shouldSave) saveState();
+      }
+
+      function applyState(raw) {
+        const saved = decodeState(raw);
+        step = clampStep(saved.step);
+        prediction = saved.prediction !== false;
+        renderStep(false);
+      }
+
+      range.addEventListener('input', () => {
+        step = clampStep(range.value);
+        renderStep(true);
+      });
+
+      predictionToggle.addEventListener('click', () => {
+        prediction = !prediction;
+        renderStep(true);
+      });
+
+      prev.addEventListener('click', () => {
+        step = clampStep(step - 1);
+        renderStep(true);
+      });
+
+      next.addEventListener('click', () => {
+        step = clampStep(step + 1);
+        renderStep(true);
+      });
+
+      window.addEventListener('openai:set_globals', (event) => {
+        const state = event && event.detail && event.detail.globals
+          ? event.detail.globals.widgetState
+          : null;
+        if (state) applyState(state);
+      });
+
+      applyState(window.openai ? window.openai.widgetState : null);
+    })();
+  </script>
+</div>

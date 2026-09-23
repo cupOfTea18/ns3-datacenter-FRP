@@ -9,6 +9,7 @@
 #include <ns3/custom-header.h>
 #include <ns3/int-header.h>
 #include <vector>
+#include <utility>
 //vamsi
 #include <map>
 
@@ -21,6 +22,11 @@ public:
 	uint16_t sport, dport;
 	uint64_t m_size;
 	uint64_t snd_nxt, snd_una; // next seq to send, the highest unacked seq
+	uint64_t tx_payload_bytes, tx_wire_bytes;
+	uint64_t last_tx_time_ns;
+	uint32_t last_tx_payload_size;
+	std::map<uint64_t, std::pair<uint64_t, bool> > tx_send_times;
+	std::vector<std::pair<uint64_t, uint64_t> > measured_rtt_samples;
 	uint16_t m_pg;
 	uint16_t m_ipid;
 	uint32_t m_win; // bound of on-the-fly packets
@@ -163,6 +169,7 @@ public:
 	uint32_t m_lastNACK;
 	EventId QcnTimerEvent; // if destroy this rxQp, remember to cancel this timer
 	uint64_t m_recv_bytes; // 累计按序接收的 payload 字节数（用于接收侧 goodput 统计）
+	uint64_t last_payload_rx_time_ns;
 
 	static TypeId GetTypeId (void);
 	RdmaRxQueuePair();

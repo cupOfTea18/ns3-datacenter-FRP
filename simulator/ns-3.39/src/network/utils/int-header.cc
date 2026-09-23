@@ -1,4 +1,5 @@
 #include "int-header.h"
+#include "ns3/abort.h"
 
 namespace ns3 {
 
@@ -28,8 +29,8 @@ uint32_t IntHeader::GetStaticSize(){
 void IntHeader::PushHop(uint64_t time, uint64_t bytes, uint32_t qlen, uint64_t rate){
 	// only do this in INT mode
 	if (mode == NORMAL){
-		uint32_t idx = nhop % maxHop;
-		hop[idx].Set(time, bytes, qlen, rate);
+		NS_ABORT_MSG_IF(nhop >= maxHop, "INT path exceeds maxHop=" << maxHop);
+		hop[nhop].Set(time, bytes, qlen, rate);
 		nhop++;
 	}
 }

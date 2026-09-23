@@ -1,1 +1,0 @@
-NS3=/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39
