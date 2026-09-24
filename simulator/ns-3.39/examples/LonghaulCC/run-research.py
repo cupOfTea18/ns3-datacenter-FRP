@@ -19,6 +19,9 @@ VARIANTS = {
     'reactive-cnp': ('dcqcn', 1),
     'predictive-cnp': ('dcqcn', 2),
     'proposed': ('proposed', 2),
+    'proposed-legacy': ('proposed-legacy', 2),
+    'r1-reactive': ('proposed', 2),
+    'r1-static': ('proposed', 2),
 }
 
 
@@ -59,7 +62,7 @@ def main():
     (inputs / 'finite.txt').write_text('4\n' + ''.join(f'{i} 4 3 {20000+i} 100000000 0.01\n' for i in range(4)))
     # Snapshot source evidence, including pre-existing local edits.
     (inputs / 'worktree.patch').write_bytes(subprocess.check_output(['git', 'diff'], cwd=REPO))
-    for name in ['longhaul-convergence.cc', 'longhaul-research.h', 'run-research.py', 'config-longhaul-common.txt']:
+    for name in ['longhaul-convergence.cc', 'longhaul-research.h', 'longhaul-proposed-r1.h', 'run-research.py', 'config-longhaul-common.txt']:
         shutil.copy2(HERE / name, inputs / name)
     for name in ['rdma-hw.cc', 'switch-node.cc', 'switch-node.h']:
         shutil.copy2(NS3 / 'src/point-to-point/model' / name, inputs / name)
@@ -83,6 +86,7 @@ def main():
             'DCI_RIGHT': 9,
             'HAS_WIN': 0 if args.no_window else 1,
             'RESEARCH_RECEIVER': 4,
+            'R1_PREDICTOR': {'r1-reactive': 1, 'r1-static': 2}.get(variant, 0),
             'RESEARCH_CONTROL': control,
             'RESEARCH_OUTPUT': out / 'bottleneck.csv',
             'FCT_OUTPUT_FILE': out / 'fct.csv',
@@ -92,10 +96,10 @@ def main():
             'LINK_STATS_OUTPUT_FILE': out / 'dci-link.csv',
             'RTT_OUTPUT_FILE': out / 'measured-rtt.csv',
             'SUMMARY_META_FILE': out / 'metadata.json',
-            'RESEARCH_PERIOD': 0.0002 if variant == 'proposed' else 0.001,
-            'RESEARCH_NEAR_PERIOD': 0.00005 if variant == 'proposed' else 0.0001,
-            'RESEARCH_QREF': 250000 if variant == 'proposed' else 1000000,
-            'RESEARCH_GUARDED': 1 if variant == 'proposed' else 0,
+            'RESEARCH_PERIOD': 0.0002 if variant in ('proposed', 'proposed-legacy') else 0.001,
+            'RESEARCH_NEAR_PERIOD': 0.00005 if variant in ('proposed', 'proposed-legacy') else 0.0001,
+            'RESEARCH_QREF': 250000 if variant in ('proposed', 'proposed-legacy') else 1000000,
+            'RESEARCH_GUARDED': 1 if variant in ('proposed', 'proposed-legacy') else 0,
         }))
         command = [
             str(binary),

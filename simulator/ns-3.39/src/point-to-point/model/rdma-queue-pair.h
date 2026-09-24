@@ -115,10 +115,11 @@ public:
 	 * FRP (Fair Rate Protocol)
 	 **********************/
 	struct {
-		uint16_t m_bottleneckCpId;       // 瓶颈拥塞点ID (Switch节点ID 12位+PortID 4位)
+		uint16_t m_bottleneckCpId;       // Congestion-point identifier
 		DataRate m_bottleneckRate;       // 瓶颈速率
 		Time m_lastBottleneckUpdate;     // 上次瓶颈更新时间
 		bool m_timerExpired;             // 定时器是否超时
+		EventId m_recoveryEvent;         // RoCC no-feedback fast-recovery timer
 	} frp;
 
 	struct {

@@ -39,6 +39,7 @@ namespace ns3 {
 		virtual ~BEgressQueue();
 		bool Enqueue(Ptr<Packet> p, uint32_t qIndex);
 		Ptr<Packet> DequeueRR(bool paused[]);
+		Ptr<const Packet> PeekQueue(uint32_t qIndex) const;
 		uint32_t GetNBytes(uint32_t qIndex) const;
 		uint32_t GetNBytesTotal() const;
 		uint32_t GetNBytesRxTotal() const;

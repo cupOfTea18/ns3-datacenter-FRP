@@ -510,15 +510,14 @@ int SwitchNode::log2apprx(int x, int b, int m, int l) {
 void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
     if (!m_switchFeedbackEnabled) return;
 
-    Ptr<Packet> cp = p->Copy();
-    PppHeader ppp;
-    cp->RemoveHeader(ppp);
-    Ipv4Header ipv4;
-    cp->RemoveHeader(ipv4);
+    CustomHeader flowHeader(CustomHeader::L2_Header | CustomHeader::L3_Header |
+                            CustomHeader::L4_Header);
+    flowHeader.getInt = 0;
+    p->PeekHeader(flowHeader);
 
-    uint8_t proto = ipv4.GetProtocol();
-    Ipv4Address srcIp = ipv4.GetSource();
-    Ipv4Address dstIp = ipv4.GetDestination();
+    uint8_t proto = flowHeader.l3Prot;
+    Ipv4Address srcIp(flowHeader.sip);
+    Ipv4Address dstIp(flowHeader.dip);
 
     // 调试：打印所有包的协议号
     static uint32_t dbgCount = 0;
@@ -535,7 +534,11 @@ void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
         FlowEndpoints fe;
         fe.srcIp = srcIp;
         fe.dstIp = dstIp;
+        fe.sport = proto == 0x11 ? flowHeader.udp.sport : flowHeader.tcp.sport;
+        fe.pg = proto == 0x11 ? flowHeader.udp.pg : 0;
         m_activeFlows[outPort].insert(fe);
+		if (m_ccMode == 14)
+			m_roccPorts.insert(outPort);
 
         // 提取源IP的DC-ID（IP第2段：11.{dc_id}.*.*）
         uint32_t srcIpValue = srcIp.Get();
@@ -594,13 +597,25 @@ void SwitchNode::PeriodicFeedbackLoop(Time interval) {
                   << " activeFlows=" << totalActiveFlows << std::endl;
     }
     
+    // RoCC updates every known congestion point each period, even when that
+    // period has no feedback recipient. This lets an idle queue drive its fair
+    // rate back toward line rate, as required by the periodic CP algorithm.
+    std::map<uint32_t, Ptr<Packet>> roccPayloads;
+    if (m_ccMode == 14) {
+        for (uint32_t idx : m_roccPorts) {
+            roccPayloads[idx] = ConfigureFeedbackPayload(m_ccMode, idx);
+        }
+    }
+
     // 轮询当前周期内所有产生过流量的物理出口网卡
     for (auto const& [idx, flowSet] : m_activeFlows) {
         if (flowSet.empty()) continue;
         
             
         // 1. 调用配置函数获取组装好的"纯净控制包"
-        Ptr<Packet> controlPayload = ConfigureFeedbackPayload(m_ccMode, idx);
+        Ptr<Packet> controlPayload = m_ccMode == 14
+            ? roccPayloads.at(idx)
+            : ConfigureFeedbackPayload(m_ccMode, idx);
             
         // 2. 遍历该网卡上的所有活跃流，批量把控制包投递回去
         for (auto const& fe : flowSet) {
@@ -627,7 +642,7 @@ void SwitchNode::PeriodicFeedbackLoop(Time interval) {
                       << " route:" << routeInfo << std::endl;
 
             // 3. 调用发送函数完成发送，按 DIP 查路由表转发
-            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, 0xFF);
+            SendControlPacket(frpSrcAddr, frpDstAddr, controlPayload, fe.sport, fe.pg);
         }
     }
     
@@ -717,11 +732,10 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
         int16_t qDevField   = static_cast<int16_t>(std::max(-32768.0, std::min(32767.0, qDevCell)));  // 换算为 600B Cell 单元 (可为负值)
         uint16_t linkRateField = static_cast<uint16_t>(link_bps / 10000000.0);  // 换算为 10Mbps 单元
 
-        // cp_id: 使用Switch节点ID直接编码（避免哈希冲突）
-        // 格式: 高12位 = Switch节点ID (0-4095), 低4位 = Port_ID (0-15)
-        // 节点ID范围通常在0-63，确保12位足够且无冲突
-        uint16_t switchNodeId = static_cast<uint16_t>(m_id & 0x0FFF);
-        uint16_t cpId = (switchNodeId << 4) | (ifIndex & 0x0F);
+        // Current topologies use fewer than 256 nodes and 256 ports per switch.
+        // Keep both components collision-free within the 16-bit CP field.
+        uint16_t cpId = static_cast<uint16_t>(((m_id & 0xFF) << 8) |
+                                              (ifIndex & 0xFF));
 
         // 调试：输出linkRate计算
         std::cout << "  [FRP CALC] Switch " << m_id << " port=" << ifIndex
@@ -781,8 +795,18 @@ Ptr<Packet> SwitchNode::ConfigureFeedbackPayload(uint32_t ccMode,
 void SwitchNode::SendControlPacket(Ipv4Address srcAddr,
                                     Ipv4Address dstAddr,
                                     Ptr<Packet> payload,
-                                    uint8_t l3Prot) {
+                                    uint16_t flowSport,
+                                    uint16_t flowPg) {
     Ptr<Packet> p = payload->Copy();
+
+    Icmpv4Header icmpHeader;
+    Icmpv4FrpFeedback feedbackHeader;
+    p->RemoveHeader(icmpHeader);
+    p->RemoveHeader(feedbackHeader);
+    feedbackHeader.SetFlowSport(flowSport);
+    feedbackHeader.SetFlowPg(flowPg);
+    p->AddHeader(feedbackHeader);
+    p->AddHeader(icmpHeader);
 
     // 构造CustomHeader (仿真平台的标准封装)
     CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header);

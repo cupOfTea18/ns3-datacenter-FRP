@@ -301,11 +301,10 @@ class Icmpv4TimeExceeded : public Header
 /**
  * \ingroup icmp
  *
- * \brief ICMP FRP Feedback header (8 Bytes Custom Payload)
+ * \brief ICMP FRP Feedback header (12 Bytes Custom Payload)
  *
  * Used by switches to send fair rate feedback to end hosts.
- * Structure: fair_rate, q_depth, cp_id, has_wan+link_rate
- * 总大小固定为 8 字节 (64 bits)，完美契合硬件线速处理要求
+ * Structure: fair_rate, q_depth, cp_id, type+link_rate, flow_sport, flow_pg
  */
 class Icmpv4FrpFeedback : public Header
 {
@@ -326,6 +325,8 @@ class Icmpv4FrpFeedback : public Header
     void SetCpId(uint16_t cpId);
     void SetType(bool type);
     void SetLinkRate(uint16_t linkRate);  
+    void SetFlowSport(uint16_t sport);
+    void SetFlowPg(uint16_t pg);
 
     // Getters
     uint16_t GetFairRate() const;
@@ -333,6 +334,8 @@ class Icmpv4FrpFeedback : public Header
     uint16_t GetCpId() const;
     bool GetType() const;
     uint16_t GetLinkRate() const;  
+    uint16_t GetFlowSport() const;
+    uint16_t GetFlowPg() const;
 
   private:
     uint16_t m_fairRate;   //!< Fair rate (F) in units of 10Mbps
@@ -340,6 +343,8 @@ class Icmpv4FrpFeedback : public Header
     uint16_t m_cpId;       //!< Congestion point ID (CP)
     bool     m_type;       //!< Algorithm type (false=FRP, true=ROCC, 占用最后16位的最高1bit)
     uint16_t m_linkRate;   //!< Link rate in units of 10Mbps (占用最后16位的低15bit)
+    uint16_t m_flowSport;  //!< Source port of the controlled RDMA QP
+    uint16_t m_flowPg;     //!< Priority group of the controlled RDMA QP
 };
 
 } // namespace ns3

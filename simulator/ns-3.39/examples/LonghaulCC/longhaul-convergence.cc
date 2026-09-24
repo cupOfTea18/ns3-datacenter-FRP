@@ -84,6 +84,12 @@ bool rate_bound = true;
 
 uint32_t ack_high_prio = 0;
 uint32_t buffer_size = 50;
+uint32_t bifrost_slot_us = 10;
+uint32_t bifrost_priority = 3;
+uint32_t bifrost_leak_slots = 1;
+uint64_t bifrost_buffer_bytes = 0; // 0 derives the minimum H from the DCI link.
+uint64_t bifrost_min_buffer_bytes = 0;
+uint64_t bifrost_effective_buffer_bytes = 0;
 
 // 网卡处理延迟（纳秒）
 uint64_t nic_delay_ns = 15000;  // 默认15μs = 15000ns
@@ -158,11 +164,13 @@ uint32_t ip_to_node_id(Ipv4Address ip);
 
 std::string selected_cc = "dcqcn";
 std::string AlgorithmName(uint32_t mode) {
-	if (selected_cc == "proposed") return "proposed";
+	if (selected_cc == "proposed" || selected_cc == "proposed-legacy") return selected_cc;
 	if (mode == 1) return "dcqcn";
 	if (mode == 3) return "hpcc";
 	if (mode == 7) return "timely";
+	if (mode == 12) return "bifrost";
 	if (mode == 13) return "frp";
+	if (mode == 14) return "rocc";
 	return "cc-mode-" + std::to_string(mode);
 }
 
@@ -331,6 +339,72 @@ uint64_t RdmaDataWireHeaderBytes() {
 uint64_t RdmaAckWireBytes() {
 	// ReceiveUdp pads ACKs to 60 bytes; PppHeader contributes 14 modeled bytes.
 	return std::max<uint64_t>(60, 14 + 20 + CustomHeader::GetAckSerializedSize());
+}
+
+uint64_t DivideRoundUp(__uint128_t value, uint64_t divisor) {
+	return static_cast<uint64_t>((value + divisor - 1) / divisor);
+}
+
+uint64_t BifrostMinimumBufferBytes(Ptr<QbbNetDevice> dev) {
+	uint64_t rate_bps = dev->GetDataRate().GetBitRate();
+	uint64_t delay_ns = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetNanoSeconds();
+	uint64_t slot_ns = uint64_t(bifrost_slot_us) * 1000;
+	// H >= Delta + 2*Rs*T, where Delta is the long-link RTT BDP.
+	return DivideRoundUp(static_cast<__uint128_t>(rate_bps) * (2 * delay_ns + 2 * slot_ns),
+	                     8ULL * 1000000000ULL);
+}
+
+uint64_t ConfiguredHeadroomBytes(Ptr<QbbNetDevice> dev) {
+	uint64_t rate_bps = dev->GetDataRate().GetBitRate();
+	uint64_t delay_ns = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetNanoSeconds();
+	return static_cast<uint64_t>(static_cast<__uint128_t>(rate_bps) * delay_ns * 3 /
+	                             (8ULL * 1000000000ULL));
+}
+
+void ConfigureBifrostDciPort(uint32_t node_id, Ptr<QbbNetDevice> dev) {
+	Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(node_id));
+	NS_ABORT_MSG_IF(sw == NULL || dev == NULL || dev->GetNode() != sw,
+		"Bifrost DCI device does not belong to switch " << node_id);
+	uint64_t delay_ns = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetNanoSeconds();
+	uint64_t slot_ns = uint64_t(bifrost_slot_us) * 1000;
+	NS_ABORT_MSG_IF(slot_ns >= delay_ns,
+		"Bifrost requires its slot to be shorter than the DCI one-way delay");
+	uint64_t required = BifrostMinimumBufferBytes(dev);
+	NS_ABORT_MSG_IF(bifrost_effective_buffer_bytes < required,
+		"BIFROST_H_BYTES is below Delta + 2*Rs*T on DCI switch " << node_id);
+	uint64_t leak_headroom = uint64_t(bifrost_leak_slots) *
+		(packet_payload_size + RdmaDataWireHeaderBytes());
+	NS_ABORT_MSG_IF(ConfiguredHeadroomBytes(dev) < bifrost_effective_buffer_bytes + leak_headroom,
+		"configured DCI headroom cannot hold Bifrost H plus k*MTU on switch " << node_id);
+
+	sw->SetAttribute("BifrostPfcPeriodUs", UintegerValue(bifrost_slot_us));
+	sw->SetAttribute("BifrostEnabled", BooleanValue(true));
+	sw->ConfigureBifrost(dev->GetIfIndex(), bifrost_priority,
+	                    bifrost_effective_buffer_bytes, bifrost_leak_slots);
+	sw->StartBifrostPfcMechanism();
+	std::cout << "[BIFROST_SETUP] node=" << node_id
+	          << " port=" << dev->GetIfIndex()
+	          << " priority=" << bifrost_priority
+	          << " rate_bps=" << dev->GetDataRate().GetBitRate()
+	          << " delay_ns=" << delay_ns
+	          << " slot_us=" << bifrost_slot_us
+	          << " H_bytes=" << bifrost_effective_buffer_bytes
+	          << " k=" << bifrost_leak_slots << std::endl;
+}
+
+void SetupBifrost() {
+	if (cc_mode != 12) return;
+	for (const FlowInput &flow : flows) {
+		NS_ABORT_MSG_IF(flow.pg != bifrost_priority,
+			"Bifrost mode requires every experiment flow to use BIFROST_PRIORITY");
+	}
+	bifrost_min_buffer_bytes = std::max(BifrostMinimumBufferBytes(dci_left_device),
+	                                    BifrostMinimumBufferBytes(dci_right_device));
+	bifrost_effective_buffer_bytes = bifrost_buffer_bytes == 0
+		? bifrost_min_buffer_bytes
+		: bifrost_buffer_bytes;
+	ConfigureBifrostDciPort(dci_left, dci_left_device);
+	ConfigureBifrostDciPort(dci_right, dci_right_device);
 }
 
 void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
@@ -608,6 +682,7 @@ void SampleDciLink() {
 }
 
 #include "longhaul-research.h"
+#include "longhaul-proposed-r1.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 	uint64_t dci_rate = dci_left_device->GetDataRate().GetBitRate();
@@ -616,12 +691,37 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 		<< "  \"program\": \"longhaul-convergence\",\n"
 		<< "  \"algorithm\": \"" << AlgorithmName(cc_mode) << "\",\n"
 		<< "  \"cc_mode\": " << cc_mode << ",\n"
+		<< "  \"host_cc_mode\": " << (cc_mode == 12 ? 1 : cc_mode) << ",\n"
+		<< "  \"bifrost_parameters\": {\"enabled\": " << (cc_mode == 12 ? "true" : "false")
+		<< ", \"host_cc\": \"" << (cc_mode == 12 ? "dcqcn" : "n/a") << "\""
+		<< ", \"slot_us\": " << bifrost_slot_us
+		<< ", \"priority\": " << bifrost_priority
+		<< ", \"leak_slots\": " << bifrost_leak_slots
+		<< ", \"minimum_h_bytes\": " << bifrost_min_buffer_bytes
+		<< ", \"configured_h_bytes\": " << bifrost_effective_buffer_bytes
+		<< ", \"deployment\": \"both DCI long-haul ingress ports; intra-DC ports retain PFC\"},\n"
 		<< "  \"research_control\": " << research_control << ",\n"
 		<< "  \"proposed_parameters\": {\"guarded\": " << (research_guarded ? "true" : "false")
 		<< ", \"period_s\": " << research_period << ", \"near_period_s\": " << research_near_period
 		<< ", \"qref_bytes\": " << research_qref << ", \"forecast_weight\": " << research_forecast_weight
 		<< ", \"horizon_s\": " << research_horizon << ", \"target_util\": " << research_target_util
 		<< ", \"deadband\": " << research_deadband << ", \"increase_fraction\": " << research_increase_fraction << "},\n"
+		<< "  \"r1_parameters\": {\"enabled\": " << (selected_cc == "proposed" ? "true" : "false")
+		<< ", \"predictor\": " << ProposedR1::predictor
+		<< ", \"report_period_s\": " << ProposedR1::period
+		<< ", \"control_period_s\": " << ProposedR1::delta
+		<< ", \"qref_bytes\": " << ProposedR1::qref
+		<< ", \"source_high_bytes\": " << ProposedR1::sourceHigh
+		<< ", \"source_emergency_bytes\": " << ProposedR1::sourceEmergency
+		<< ", \"emergency_bytes\": " << ProposedR1::emergency
+		<< ", \"tau_q_s\": " << ProposedR1::tauQ
+		<< ", \"tau_up_s\": " << ProposedR1::tauUp
+		<< ", \"cnp_interval_s\": " << ProposedR1::cnpInterval
+		<< ", \"burst_bytes\": " << ProposedR1::burst
+		<< ", \"forward_delay_s\": " << ProposedR1::forwardDelay
+		<< ", \"backward_delay_s\": " << ProposedR1::backwardDelay
+		<< ", \"max_report_age_s\": " << ProposedR1::maxAge
+		<< ", \"feedback_mode\": \"passthrough\", \"control_transport\": \"serialized-link-packets\"},\n"
 		<< "  \"scenario\": \"" << scenario_name << "\",\n"
 		<< "  \"rng_seed\": " << rng_seed << ",\n"
 		<< "  \"rng_run\": " << rng_run << ",\n"
@@ -654,7 +754,10 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 		<< ", \"timely_beta\": " << timely_beta
 		<< ", \"timely_tlow_ns\": " << timely_tlow_ns
 		<< ", \"timely_thigh_ns\": " << timely_thigh_ns
-		<< ", \"timely_min_rtt_ns\": " << timely_min_rtt_ns << "},\n"
+		<< ", \"timely_min_rtt_ns\": " << timely_min_rtt_ns
+		<< ", \"rocc_period_us\": " << g_frpParameters.periodUs
+		<< ", \"rocc_min_rate_bps\": " << g_frpParameters.minRateBps
+		<< ", \"rocc_200g_queue_policy\": \"scale 100Gbps Qref/Qmid/Qmax with bandwidth; retain 100Gbps gains\"},\n"
 		<< "  \"simulator_stop_time_s\": " << simulator_stop_time << ",\n"
 		<< "  \"topology_file\": \"" << topology_file << "\",\n"
 		<< "  \"flow_file\": \"" << flow_file << "\",\n"
@@ -766,9 +869,23 @@ void ParseConfig(std::istream &config) {
 		else if (key == "KMIN_MAP") ReadKMap(config, key, rate2kmin);
 		else if (key == "PMAX_MAP") ReadPmaxMap(config, key);
 		else if (key == "BUFFER_SIZE") ReadConfigValue(config, key, buffer_size);
+		else if (key == "BIFROST_SLOT_US") ReadConfigValue(config, key, bifrost_slot_us);
+		else if (key == "BIFROST_PRIORITY") ReadConfigValue(config, key, bifrost_priority);
+		else if (key == "BIFROST_LEAK_SLOTS") ReadConfigValue(config, key, bifrost_leak_slots);
+		else if (key == "BIFROST_H_BYTES") ReadConfigValue(config, key, bifrost_buffer_bytes);
 		else if (key == "MULTI_RATE") ReadConfigValue(config, key, multi_rate);
 		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
+		else if (key == "R1_PREDICTOR") ReadConfigValue(config, key, ProposedR1::predictor);
+		else if (key == "R1_REPORT_PERIOD") ReadConfigValue(config, key, ProposedR1::period);
+		else if (key == "R1_CONTROL_PERIOD") ReadConfigValue(config, key, ProposedR1::delta);
+		else if (key == "R1_QREF") ReadConfigValue(config, key, ProposedR1::qref);
+		else if (key == "R1_SOURCE_HIGH") ReadConfigValue(config, key, ProposedR1::sourceHigh);
+		else if (key == "R1_SOURCE_EMERGENCY") ReadConfigValue(config, key, ProposedR1::sourceEmergency);
+		else if (key == "R1_EMERGENCY") ReadConfigValue(config, key, ProposedR1::emergency);
+		else if (key == "R1_TAU_Q") ReadConfigValue(config, key, ProposedR1::tauQ);
+		else if (key == "R1_TAU_UP") ReadConfigValue(config, key, ProposedR1::tauUp);
+		else if (key == "R1_CNP_INTERVAL") ReadConfigValue(config, key, ProposedR1::cnpInterval);
 		else if (key == "RESEARCH_RECEIVER") ReadConfigValue(config, key, research_receiver);
 		else if (key == "RESEARCH_CONTROL") ReadConfigValue(config, key, research_control);
 		else if (key == "RESEARCH_OUTPUT") ReadConfigValue(config, key, research_output);
@@ -803,8 +920,10 @@ uint32_t ResolveCcMode(const std::string &name) {
 	if (name == "dcqcn") return 1;
 	if (name == "hpcc") return 3;
 	if (name == "timely") return 7;
+	if (name == "bifrost") return 12;
 	if (name == "frp") return 13;
-	if (name == "proposed") return 1;
+	if (name == "rocc") return 14;
+	if (name == "proposed" || name == "proposed-legacy") return 1;
 	NS_FATAL_ERROR("longhaul: unknown congestion-control algorithm: " << name);
 	return 0;
 }
@@ -816,7 +935,7 @@ int main(int argc, char *argv[])
 	std::ifstream conf;
 	std::string confFile = "examples/LonghaulCC/config-longhaul-common.txt";
 	CommandLine cmd;
-	cmd.AddValue("cc", "dcqcn, hpcc, timely, frp, or proposed", selected_cc);
+	cmd.AddValue("cc", "dcqcn, hpcc, timely, bifrost, frp, rocc, proposed, or proposed-legacy", selected_cc);
 	cmd.AddValue("conf", "config file path", confFile);
 	// Experiment selection: ordinary model parameters stay in the config file.
 	cmd.AddValue("flow-file", "flow input path", flow_file);
@@ -836,9 +955,14 @@ int main(int argc, char *argv[])
 
 	scenario_name = ScenarioFromFlowFile(flow_file);
 	cc_mode = ResolveCcMode(selected_cc);
-	if (selected_cc == "proposed" && research_output.empty())
+	if ((selected_cc == "proposed" || selected_cc == "proposed-legacy") && research_output.empty())
 		research_output = summary_meta_file + ".control.csv";
 	NS_ABORT_MSG_IF(packet_payload_size == 0, "PACKET_PAYLOAD_SIZE must be positive");
+	NS_ABORT_MSG_IF(cc_mode == 12 && !enable_qcn,
+		"Bifrost experiments require DCQCN, but ENABLE_QCN is disabled");
+	NS_ABORT_MSG_IF(cc_mode == 12 && (bifrost_slot_us == 0 || bifrost_leak_slots == 0 ||
+		bifrost_priority == 0 || bifrost_priority >= QbbNetDevice::qCnt),
+		"invalid Bifrost slot, priority, or leak interval");
 	NS_ABORT_MSG_IF(rate_sample_interval_us == 0 || goodput_sample_interval_us == 0 ||
 		rtt_sample_interval_us == 0, "rate, goodput, and RTT sample intervals must be positive");
 	// Longhaul writes measurements to CSV; keep historical model diagnostics out
@@ -1025,8 +1149,7 @@ int main(int argc, char *argv[])
 					NS_ASSERT_MSG(rate2pmax.find(rate) != rate2pmax.end(), "must set pmax for each link speed");
 					sw->m_mmu->ConfigEcn(j, rate2kmin[rate], rate2kmax[rate], rate2pmax[rate]);
 					// set pfc
-					uint64_t delay = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetTimeStep();
-					uint32_t headroom = rate * delay / 8 / 1000000000 * 3;
+					uint64_t headroom = ConfiguredHeadroomBytes(dev);
 
 					sw->m_mmu->SetHeadroom(headroom, j, qu);
 					totalHeadroom += headroom;
@@ -1058,7 +1181,8 @@ int main(int argc, char *argv[])
 			rdmaHw->SetAttribute("L2BackToZero", BooleanValue(l2_back_to_zero));
 			rdmaHw->SetAttribute("L2ChunkSize", UintegerValue(l2_chunk_size));
 			rdmaHw->SetAttribute("L2AckInterval", UintegerValue(l2_ack_interval));
-			rdmaHw->SetAttribute("CcMode", UintegerValue(cc_mode));
+			// Bifrost replaces PFC only on the DCI link; the RNIC still runs DCQCN.
+			rdmaHw->SetAttribute("CcMode", UintegerValue(cc_mode == 12 ? 1 : cc_mode));
 			rdmaHw->SetAttribute("RateDecreaseInterval", DoubleValue(rate_decrease_interval));
 			rdmaHw->SetAttribute("MinRate", DataRateValue(DataRate(min_rate)));
 			rdmaHw->SetAttribute("Mtu", UintegerValue(packet_payload_size));
@@ -1137,13 +1261,15 @@ int main(int argc, char *argv[])
 		if (n.Get(i)->GetNodeType()) { // switch
 			Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n.Get(i));
 
-			sw->SetAttribute("CcMode", UintegerValue(cc_mode));
+			// Bifrost is a link-layer flow-control scheme, not an RNIC/switch CC mode.
+			sw->SetAttribute("CcMode", UintegerValue(cc_mode == 12 ? 1 : cc_mode));
 			
 			sw->SetAttribute("MaxRtt", UintegerValue(maxRtt));
 			sw->SetAttribute("PowerEnabled", BooleanValue(false));
-			if (cc_mode == 13) {
+			if (cc_mode == 13 || cc_mode == 14) {
 				sw->SetAttribute("SwitchFeedbackEnabled", BooleanValue(true));
-				sw->StartPeriodicFeedbackMechanism(MicroSeconds(40));
+				sw->StartPeriodicFeedbackMechanism(
+					MicroSeconds(g_frpParameters.periodUs));
 			}
 
 		}
@@ -1154,13 +1280,15 @@ int main(int argc, char *argv[])
 	LoadFlows(flowf);
 	if (dci_left_device == NULL || dci_right_device == NULL)
 		NS_FATAL_ERROR("longhaul: could not identify the DCI link " << dci_left << " <-> " << dci_right);
+	SetupBifrost();
 	dci_left_tx_bytes = LinkTxCounter(dci_left_device);
 	dci_right_tx_bytes = LinkTxCounter(dci_right_device);
 	dci_last_time_ns = Simulator::Now().GetNanoSeconds();
 	dci_sample_initialized = true;
 	for (uint32_t i = 0; i < flows.size(); ++i)
 		Simulator::Schedule(Seconds(flows[i].start_time), &StartFlow, i);
-	ResearchSetup();
+	if (selected_cc == "proposed") ProposedR1::Setup();
+	else ResearchSetup();
 	WriteMetadata(node_num, switch_num, link_num);
 
 	topof.close();
@@ -1186,4 +1314,5 @@ int main(int argc, char *argv[])
 	NS_LOG_INFO("Done.");
 	endt = clock();
 	std::cout << (double)(endt - begint) / CLOCKS_PER_SEC << "\n";
+	return 0;
 }

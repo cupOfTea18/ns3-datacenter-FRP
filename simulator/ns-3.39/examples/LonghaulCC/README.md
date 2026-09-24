@@ -8,6 +8,10 @@
 - DCQCN：`dcqcn`
 - HPCC：`hpcc`
 - TIMELY：`timely`
+- RoCC：`rocc`
+
+RoCC 在 40/100 Gbps 链路上使用论文参数。论文未给出 200 Gbps 参数；当前实现按
+带宽比例放大 `Qref/Qmid/Qmax`，并保留 100 Gbps 的 PI 基础增益，该策略会写入运行元数据。
 
 程序读取拓扑、公共配置和流量场景文件，创建 Qbb/RDMA 网络，配置路由和流，
 最后将吞吐率、FCT、DCI 链路等结果写入结果目录。
@@ -139,7 +143,7 @@ python3 examples/LonghaulCC/run-longhaul-baseline.py \
   --run=1"
 ```
 
-基准算法使用 `--cc=dcqcn|hpcc|timely`；可通过 `--cc=frp` 单独运行 FRP。批量基准实验建议使用
+基准算法使用 `--cc=dcqcn|hpcc|timely`；可通过 `--cc=frp|rocc` 单独运行 FRP 或 RoCC。批量基准实验建议使用
 `run-longhaul-baseline.py`，因为它会自动保存配置快照、标准输出和运行元数据。
 
 参数优先级固定为：C++ 默认值 < 配置文件 < 显式命令行参数。runner 不改写原始配置文件，
@@ -182,42 +186,41 @@ S0–S5 中原有的 1 TB 大流已调整为 3,000,000,000 B，低于当前 RDMA
 路径的 RTT 和实际 PPP packet header 序列化字节。运行大流场景时应使用上方对应的停止时间，
 并检查每条流均有完成记录以及接收 payload 与 flow size 闭合。
 
-## Proposed：接收侧预测与近源 CNP
+## Proposed-R1（2026-09-24）
 
-核心实现位于 `longhaul-research.h`，由 `longhaul-convergence.cc` 包含并调用
-`ResearchSetup()`。使用 `--cc=proposed` 启用报告版本：接收侧周期 200 µs、
-近源周期 50 µs、队列参考值 250000 B、预测权重 0.5，并开启旧遥测回退、
-目标上升限幅、减流时虚拟积压限制。RNIC 使用 DCQCN 执行真实 CNP；跨域
-遥测与目标反馈仍由延迟事件模拟。
+`--cc=proposed` 现在选择 0924 方案的首版实现，核心在
+`longhaul-proposed-r1.h`：源 DCI 的真实 FIFO 逐包整形、真实链路状态报文、
+源侧实际发送历史重建、排空控制及近源 CNP。RNIC 仍使用标准 DCQCN。
+旧实现保留在 `longhaul-research.h`，以 `--cc=proposed-legacy` 运行。
 
-在仓库根目录执行：
+首版只支持一个源 DCI、直连发送主机、一个直连接收出口、一个数据 PG。
+默认多层 `topology-longhaul.txt` 不在此范围；下面的 runner 生成兼容的小拓扑。
+不支持的流组会明确报错。主程序仍只有原来的六个 CLI 入口，R1 参数放入配置。
+
+在仓库根目录执行，输出必须使用新目录：
 
 ```bash
-./simulator/ns-3.39/ns3 build longhaul-convergence -j2
+./simulator/ns-3.39/ns3 build longhaul-convergence longhaul-proposed-test -j 6
 python3 simulator/ns-3.39/examples/LonghaulCC/run-research.py \
-  --variants proposed dcqcn --scenarios finite --stop 0.08 \
-  --wan-delay-us 1000 --no-window --jobs 1 \
-  --output results/longhaul-proposed-new
+  --variants proposed proposed-legacy dcqcn r1-reactive r1-static \
+  --scenarios finite --stop 0.12 --wan-delay-us 1000 --no-window --jobs 2 \
+  --output /tmp/longhaul-r1-new
+python3 simulator/ns-3.39/examples/LonghaulCC/verify-proposed-r1.py \
+  /tmp/longhaul-r1-new/finite/proposed
+python3 simulator/ns-3.39/examples/LonghaulCC/analyze-research.py /tmp/longhaul-r1-new
 ```
 
-该脚本为同一个 `longhaul-convergence` 程序生成小规模拓扑和 flow 文件，并通过命令行
-传入这些输入：4 个发送端、每流 100 MB、10 ms 开始；主机链路 100 Gbps，跨域链路
-200 Gbps，接收出口 100 Gbps。输出目录使用新路径，避免覆盖已完成实验。
+`r1-reactive` 使用同一执行器、最新已收到的队列快照；`r1-static` 使用静态容量上限；
+两者与 R1 使用相同的近源 CNP 参数。旧 `reactive-cnp` / `predictive-cnp` 保留。
 
-各算法目录中，`bottleneck.csv` 保存实际队列、预测队列、虚拟队列、遥测速率、
-目标速率及累计 CNP；`sender-rate.csv`、`receiver-goodput.csv`、`fct.csv`
-保存流量指标，`metadata.json` 记录算法及控制参数。Proposed 的算法字段为
-`proposed`，底层 `cc_mode` 为 1。
+R1 的 `bottleneck.csv` 记录源控制状态、目标、实际输入/输出、真实源队列、
+快照与预测、活跃流数、CNP、控制报文开销和全网缓存采样；附加文件：
 
-主程序只接受六个命令行入口；research receiver、控制周期、DCI 节点和输出路径等
-参数放在 `--conf` 指定的配置文件中。`run-research.py` 会为每个运行目录生成
-完整的 `config.txt`，并通过 `--cc`、`--flow-file`、`--stop-time` 选择运行，避免
-把 research 参数重复注册为 C++ 命令行选项。
+- `.receiver.csv`：真实接收队列、事件峰值、累计字节、暂停和服务估计。
+- `.events.csv`：状态发送/接收、目标切换、CNP、预测发布与事后误差。
+- `.packets.csv`：每个 WAN 数据包的发送时间、字节及目标，用于独立检查整形。
 
-当前原型要求发送主机直接连接源侧 DCI、目标接收主机直接连接接收侧 DCI，
-且所有流发往同一接收主机。上面的 runner 生成满足条件的拓扑；目录内默认的
-多层 `topology-longhaul.txt` 不满足这一限制，不能只追加 `--cc=proposed`
-就用于该拓扑。多跳近源 CNP 路由和瓶颈选择尚未扩展。
+`metadata.json` 的 `r1_parameters` 保存实际生效参数，`cc_mode=1` 表示底层 DCQCN。
+`sender-rate.csv`、`receiver-goodput.csv`、`measured-rtt.csv`、`fct.csv` 保留。
 
-`reactive-cnp` / `predictive-cnp` 仍由研究 runner 写入独立的 `config.txt`，其中
-明确设置 `RESEARCH_CONTROL`，不会隐式改变基线配置。
+实现范围、配置和验证结果见 [R1 实现说明](PROPOSED_R1_IMPLEMENTATION.md)。

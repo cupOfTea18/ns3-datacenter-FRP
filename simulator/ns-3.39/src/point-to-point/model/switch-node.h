@@ -58,12 +58,17 @@ protected:
 	struct FlowEndpoints {
 		Ipv4Address srcIp;   // 数据流源IP -> 作为FRP包的DIP
 		Ipv4Address dstIp;   // 数据流目的IP -> 作为FRP包的SIP
+		uint16_t sport;
+		uint16_t pg;
 		bool operator<(const FlowEndpoints& o) const {
 			if (srcIp.Get() != o.srcIp.Get()) return srcIp.Get() < o.srcIp.Get();
-			return dstIp.Get() < o.dstIp.Get();
+			if (dstIp.Get() != o.dstIp.Get()) return dstIp.Get() < o.dstIp.Get();
+			if (sport != o.sport) return sport < o.sport;
+			return pg < o.pg;
 		}
 	};
 	std::map<uint32_t, std::set<FlowEndpoints>> m_activeFlows;     // 出口网卡 -> 活跃流端点集合
+	std::set<uint32_t> m_roccPorts;                               // RoCC CPs seen so far
 	std::map<uint32_t, std::set<uint8_t>> m_activeSrcDcIds;      // 出口网卡 -> 活跃源IP的DC-ID集合
 	Ipv4Address m_switchRealIp;        // 交换机的真实IP地址
 	
@@ -87,7 +92,8 @@ private:
 	
 	// ========== 通用反馈包核心函数 ==========
 	Ptr<Packet> ConfigureFeedbackPayload(uint32_t ccMode, uint32_t ifIndex);
-	void SendControlPacket(Ipv4Address srcAddr, Ipv4Address dstAddr, Ptr<Packet> payload, uint8_t l3Prot);
+	void SendControlPacket(Ipv4Address srcAddr, Ipv4Address dstAddr, Ptr<Packet> payload,
+	                       uint16_t flowSport, uint16_t flowPg);
 public:
 	// 调试接口：打印路由表
 	std::unordered_map<uint32_t, std::vector<int> >* GetRtTablePtr() { return &m_rtTable; }

@@ -9,7 +9,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-COLORS = {'dcqcn':'#d55e00', 'hpcc':'#0072b2', 'timely':'#009e73', 'reactive-cnp':'#cc79a7', 'predictive-cnp':'#111111'}
+COLORS = {'dcqcn':'#d55e00', 'hpcc':'#0072b2', 'timely':'#009e73', 'reactive-cnp':'#cc79a7', 'predictive-cnp':'#111111', 'proposed':'#332288', 'proposed-legacy':'#aa4499', 'r1-reactive':'#44aa99', 'r1-static':'#999933'}
 
 def read(path):
     with path.open() as f:
@@ -36,7 +36,23 @@ def main():
                 continue
             assert json.loads((folder / 'run.json').read_text())['exit_code'] == 0, folder
             b = read(folder / 'bottleneck.csv')
-            a = {key: np.array([float(r[key]) for r in b]) for key in b[0]}
+            a = {key: np.array([float(r[key]) for r in b]) for key in b[0] if key != 'mode'}
+            is_r1 = 'source_queue_bytes' in a
+            if is_r1:
+                remote = read(folder / 'bottleneck.csv.receiver.csv')
+                rt = np.array([float(x['time_s']) for x in remote])
+                # Offline evaluation: align actual receiver samples, never delayed snapshots.
+                indices = np.clip(np.searchsorted(rt, a['time_s'], side='right')-1, 0, len(rt)-1)
+                dt = np.diff(np.r_[0, rt])
+                for key, remote_key in [('queue_bytes','queue_bytes')]:
+                    a[key] = np.array([float(x[remote_key]) for x in remote])[indices]
+                for key, remote_key in [('arrival_bps','enqueued_bytes'),('departure_bps','departed_bytes')]:
+                    counts = np.array([float(x[remote_key]) for x in remote])
+                    a[key] = (np.diff(np.r_[0, counts])*8/dt)[indices]
+                a['source_dci_bps'] = a['output_bps']
+                a['backlog_bytes'] = a['source_queue_bytes']
+            else:
+                a['backlog_bytes'] = a['virtual_queue_bytes']
             r = read(folder / 'receiver-goodput.csv')
             rtt_rows = read(folder / 'measured-rtt.csv')
             # Re-bin each recorded interval into the shared 1 ms time grid.
@@ -87,7 +103,8 @@ def main():
             m = dict(scenario=scenario, variant=variant, window_start_s=start, window_end_s=end,
                      queue_peak_MB=float(a['queue_bytes'][win].max()/1e6),
                      queue_p95_MB=float(np.percentile(a['queue_bytes'][win],95)/1e6),
-                     queue_area_MB_ms=float(a['queue_bytes'][win].sum()/1e6),
+                     queue_area_MB_ms=float((a['queue_bytes'][win]*np.diff(np.r_[0,a['time_s']])[win]).sum()/1e3),
+                     source_real_queue_peak_MB=float(a['source_queue_bytes'][win].max()/1e6) if is_r1 else None,
                      goodput_Gbps=float(agg[rxwin].mean()),
                      steady_goodput_Gbps=float(agg[steady].mean()), jain_steady=float(jain),
                      settling_ms=settle, fair_payload_target_Gbps=target, completed=len(fcts), total_flows=count,
@@ -96,17 +113,17 @@ def main():
                      measured_rtt_p50_ns=float(np.median([int(x['rtt_p50_ns']) for x in rtt_rows])) if rtt_rows else None,
                      measured_rtt_p95_ns=float(np.median([int(x['rtt_p95_ns']) for x in rtt_rows])) if rtt_rows else None,
                      admission_drops=int(a['admission_drop_packets'][-1]),
-                     ecn_packets=int(a['ecn_packets'][-1]), cnp_sent=int(a['cnp_sent'][-1]),
+                     ecn_packets=int(a['ecn_packets'][-1]) if not is_r1 else None, cnp_sent=int(a['cnp_sent'][-1]),
                      pfc_pause_sent=sum(x['event_type']=='2' for x in read(folder/'pfc.csv')),
                      steady_per_flow_Gbps=per_flow.tolist())
             if scenario == 'finite':
                 m['jain_steady'] = None  # finished flows are not a fairness sample
                 m['steady_goodput_Gbps'] = None
             metrics.append(m)
-            series=[a['queue_bytes']/1e6, a['arrival_bps']/1e9, a['sender_wire_bps']/1e9,
-                    a['departure_bps']/1e9, a['virtual_queue_bytes']/1e6, a['admission_drop_packets']]
-            labels=['Receiver queue (MB)', 'Receiver arrival (Gbps)', 'Sender wire TX sum (Gbps)',
-                    'Receiver egress (Gbps)', 'Source virtual queue (MB)', 'Admission drops (cumulative)']
+            series=[a['queue_bytes']/1e6, a['arrival_bps']/1e9, a['source_dci_bps']/1e9,
+                    a['departure_bps']/1e9, a['backlog_bytes']/1e6, a['admission_drop_packets']]
+            labels=['Receiver queue (MB)', 'Receiver arrival (Gbps)', 'Source DCI TX (Gbps)',
+                    'Receiver egress (Gbps)', 'Source backlog: R1 real / legacy virtual (MB)', 'Admission drops (cumulative)']
             for ax, values, label in zip(axes.flat,series,labels):
                 ax.plot(a['time_s']*1000, values, color=color, label=variant, lw=1.4)
                 ax.set_ylabel(label)

@@ -192,6 +192,11 @@ namespace ns3 {
 		return packet;
 	}
 
+	Ptr<const Packet> BEgressQueue::PeekQueue(uint32_t qIndex) const {
+        NS_ABORT_MSG_IF(qIndex >= qCnt, "invalid switch queue");
+        return m_queues[qIndex]->Peek();
+    }
+
 	bool
 		BEgressQueue::DoEnqueue(Ptr<Packet> p)	//for compatiability
 	{

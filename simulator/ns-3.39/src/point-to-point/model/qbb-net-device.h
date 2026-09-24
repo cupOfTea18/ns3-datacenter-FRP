@@ -114,6 +114,17 @@ public:
 
 
   DataRate GetDataRate();
+  // Optional per-priority switch shaper. The existing FIFO/MMU owns all packets.
+  void ConfigureQueueShaper(uint32_t queue, double bytesPerSecond, uint32_t burst);
+  void SetQueueShaperRate(double bytesPerSecond);
+  Time GetReceiveDelay() const { return m_nicDelay; }
+  bool IsQueuePaused(uint32_t queue) const { return m_paused[queue]; }
+  Time GetQueuePauseTime(uint32_t queue) const {
+      return m_pauseTotal[queue] + (m_paused[queue] ? Simulator::Now()-m_pauseStarted[queue] : Time(0));
+  }
+  // A link-local protocol may consume a received frame after link error checking.
+  Callback<bool, Ptr<const Packet>> m_linkControlReceive;
+
 
   /**
    * Get the size of Tx buffer available in the device
@@ -208,6 +219,14 @@ protected:
    * @see class InfiniteQueue
    */
   Ptr<BEgressQueue> m_queue;
+  int m_shapeQueue = -1;
+  double m_shapeRate = 0, m_shapeTokens = 0;
+  uint32_t m_shapeBurst = 0;
+  Time m_shapeUpdated;
+  Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
+  EventId m_shapeWake;
+  void UpdateShapeTokens();
+
 
   Ptr<DropTailQueue<Packet>> m_queueFifo;
 

@@ -20,6 +20,8 @@
 */
 
 #define __STDC_LIMIT_MACROS 1
+#include <cmath>
+#include <algorithm>
 #include <stdint.h>
 #include <stdio.h>
 #include "ns3/qbb-net-device.h"
@@ -271,6 +273,8 @@ QbbNetDevice::~QbbNetDevice()
 void
 QbbNetDevice::DoDispose()
 {
+    Simulator::Cancel(m_shapeWake);
+    m_linkControlReceive = Callback<bool, Ptr<const Packet>>();
 	NS_LOG_FUNCTION(this);
 
 	for (uint32_t i = 0; i < qCnt; ++i) Simulator::Cancel(m_pauseExpiry[i]);
@@ -320,6 +324,33 @@ QbbNetDevice::TransmitComplete(void)
 	m_phyTxEndTrace(m_currentPkt);
 	m_currentPkt = 0;
 	DequeueAndTransmit();
+}
+
+void QbbNetDevice::UpdateShapeTokens() {
+    const Time now = Simulator::Now();
+    // Credit is bounded to one configured frame, including across PFC pauses.
+    m_shapeTokens = std::min(double(m_shapeBurst), m_shapeTokens +
+        m_shapeRate * (now - m_shapeUpdated).GetSeconds());
+    m_shapeUpdated = now;
+}
+
+void QbbNetDevice::ConfigureQueueShaper(uint32_t queue, double rate, uint32_t burst) {
+    NS_ABORT_MSG_IF(queue == 0 || queue >= qCnt || burst == 0 || m_shapeQueue >= 0,
+                    "invalid/repeated switch shaper configuration");
+    m_shapeQueue = queue;
+    m_shapeBurst = burst;
+    m_shapeTokens = burst;
+    m_shapeUpdated = Simulator::Now();
+    SetQueueShaperRate(rate);
+}
+
+void QbbNetDevice::SetQueueShaperRate(double rate) {
+    NS_ABORT_MSG_IF(m_shapeQueue < 0 || !std::isfinite(rate) || rate < 0,
+                    "invalid switch shaper rate");
+    UpdateShapeTokens(); // settle at OLD rate; updates do not refill credit
+    m_shapeRate = rate;
+    Simulator::Cancel(m_shapeWake);
+    DequeueAndTransmit();
 }
 
 void
@@ -388,7 +419,26 @@ QbbNetDevice::DequeueAndTransmit(void)
 		return;
 	}
 	else {  //switch, doesn't care about qcn, just send
-		p = m_queue->DequeueRR(m_paused);		//this is round-robin
+		bool blocked[qCnt];
+        std::copy(m_paused, m_paused + qCnt, blocked);
+        if (m_shapeQueue >= 0) {
+            UpdateShapeTokens();
+            auto head = m_queue->PeekQueue(m_shapeQueue);
+            if (head) {
+                NS_ABORT_MSG_IF(head->GetSize() > m_shapeBurst, "frame exceeds shaper burst cap");
+                if (m_shapeTokens + 1e-6 < head->GetSize() || m_shapeRate == 0) {
+                    blocked[m_shapeQueue] = true;
+                    if (!m_paused[m_shapeQueue] && m_shapeRate > 0 && m_shapeWake.IsExpired()) {
+                        Time wait = Seconds((head->GetSize() - m_shapeTokens) / m_shapeRate);
+                        m_shapeWake = Simulator::Schedule(std::max(NanoSeconds(1), wait),
+                            &QbbNetDevice::DequeueAndTransmit, this);
+                    }
+                }
+            }
+        }
+        p = m_queue->DequeueRR(blocked);
+        if (p && int(m_queue->GetLastQueue()) == m_shapeQueue)
+            m_shapeTokens = std::max(0.0, m_shapeTokens - p->GetSize());
 		if (p != 0) {
 			m_snifferTrace(p);
 			m_promiscSnifferTrace(p);
@@ -436,6 +486,7 @@ QbbNetDevice::Resume(unsigned qIndex)
 	NS_LOG_FUNCTION(this << qIndex);
 	if (!m_paused[qIndex]) return;
 	Simulator::Cancel(m_pauseExpiry[qIndex]);
+	m_pauseTotal[qIndex] += Simulator::Now() - m_pauseStarted[qIndex];
 	m_paused[qIndex] = false;
 	NS_LOG_INFO("Node " << m_node->GetId() << " dev " << m_ifIndex << " queue " << qIndex <<
 	            " resumed at " << Simulator::Now().GetSeconds());
@@ -529,6 +580,7 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 	}
 
 	m_macRxTrace(packet);
+	if (!m_linkControlReceive.IsNull() && m_linkControlReceive(packet)) return;
 
 	CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
 	ch.getInt = 1; // parse INT header
@@ -546,6 +598,7 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 		Simulator::Cancel(m_pauseExpiry[qIndex]);
 		if (ch.pfc.time > 0) {
 			m_tracePfc(1);
+			if (!m_paused[qIndex]) m_pauseStarted[qIndex] = Simulator::Now();
 			m_paused[qIndex] = true;
 			m_pauseExpiry[qIndex] = Simulator::Schedule(MicroSeconds(ch.pfc.time), &QbbNetDevice::Resume, this, qIndex);
 		} else {

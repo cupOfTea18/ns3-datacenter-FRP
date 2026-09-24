@@ -16,6 +16,7 @@
 #include "ns3/unsched-tag.h"
 #include "ns3/icmpv4.h"  // 添加ICMP FRP支持
 #include "ns3/sim-setting.h"
+#include <algorithm>
 #include <cmath>         // std::abs
 #include <cstdio>
 
@@ -316,6 +317,8 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 }
 
 void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp) {
+	if (qp->frp.m_recoveryEvent.IsRunning())
+		qp->frp.m_recoveryEvent.Cancel();
 	// remove qp from the m_qpMap
 	uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
 	m_qpMap.erase(key);
@@ -1431,18 +1434,15 @@ int RdmaHw::ReceiveIcmp(Ptr<Packet> p, CustomHeader &ch) {
 		uint16_t cpId = frpFb.GetCpId();
 		bool type = frpFb.GetType();
 		uint16_t linkRate = frpFb.GetLinkRate();
+		uint16_t flowSport = frpFb.GetFlowSport();
+		uint16_t flowPg = frpFb.GetFlowPg();
 
 		// 解析IP头: SIP=数据流目的IP, DIP=数据流源IP(=自己)
 		Ipv4Address flowDstIp = Ipv4Address(ch.sip);   // FRP包的SIP = 数据流的目的IP
-		Ipv4Address flowSrcIp = Ipv4Address(ch.dip);   // FRP包的DIP = 数据流的源IP(=自己)
 
-		// 用 dip=flowDstIp 精确匹配QP
-		for (auto& kv : m_qpMap) {
-			Ptr<RdmaQueuePair> qp = kv.second;
-			if (qp->dip.Get() == flowDstIp.Get()) {
-				HandleFrpFeedback(qp, fairRate, qDev, cpId, type, linkRate, flowDstIp);
-			}
-		}
+		Ptr<RdmaQueuePair> qp = GetQp(flowDstIp.Get(), flowSport, flowPg);
+		if (qp != NULL)
+			HandleFrpFeedback(qp, fairRate, qDev, cpId, type, linkRate, flowDstIp);
 
 		return 0;
 	}
@@ -1457,7 +1457,9 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 	double fairRateBps = static_cast<double>(fairRate) * 10000000.0;       // 10Mbps -> bps
 	double qDevBytes  = static_cast<double>(qDev) * 600.0;  // 600B Cell -> Byte (qDev is int16_t, can be negative)
 	double linkRateBps = static_cast<double>(linkRate) * 10000000.0;      // 10Mbps -> bps
-    double maxRateBps = std::min(linkRateBps, double(qp->m_max_rate.GetBitRate())) * g_frpParameters.targetUtil;
+	double maxRateBps = std::min(linkRateBps, double(qp->m_max_rate.GetBitRate()));
+	if (!type)
+		maxRateBps *= g_frpParameters.targetUtil;
     double minRateBps = g_frpParameters.minRateBps;
     double T = g_frpParameters.periodUs * 1e-6;
 
@@ -1485,7 +1487,22 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 	double rBps;
 	double currentRateBps = qp->m_rate.GetBitRate();
 
-	if (type==1 || !isBackoffInternalFlow) {
+	if (type) {
+		const double roccRateBps = std::max(minRateBps,
+		                                     std::min(maxRateBps, fairRateBps));
+		const bool accept = roccRateBps <= currentRateBps ||
+		                    cpId == qp->frp.m_bottleneckCpId;
+		if (accept) {
+			qp->frp.m_bottleneckCpId = cpId;
+			qp->frp.m_bottleneckRate = DataRate(roccRateBps);
+			qp->frp.m_lastBottleneckUpdate = Simulator::Now();
+			ChangeRate(qp, DataRate(roccRateBps));
+			ScheduleRoccRecovery(qp);
+		}
+		return;
+	}
+
+	if (!isBackoffInternalFlow) {
 		// 非退避流：r = F（公平速率）
 		rBps = fairRateBps;
 	} else {
@@ -1602,6 +1619,27 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 		currentRateBps/1e9,
 		rBps/1e9,
 		shouldUpdateBottleneck ? "UPDATED" : "SKIP");
+}
+
+void RdmaHw::ScheduleRoccRecovery(Ptr<RdmaQueuePair> qp) {
+	if (qp->frp.m_recoveryEvent.IsRunning())
+		qp->frp.m_recoveryEvent.Cancel();
+	if (qp->IsFinished() ||
+	    qp->m_rate.GetBitRate() >= qp->m_max_rate.GetBitRate())
+		return;
+	qp->frp.m_recoveryEvent = Simulator::Schedule(
+		MicroSeconds(g_frpParameters.timeoutUs), &RdmaHw::RoccRecoveryTimer, this, qp);
+}
+
+void RdmaHw::RoccRecoveryTimer(Ptr<RdmaQueuePair> qp) {
+	if (qp->IsFinished())
+		return;
+	const uint64_t currentRate = qp->m_rate.GetBitRate();
+	const uint64_t maxRate = qp->m_max_rate.GetBitRate();
+	const uint64_t nextRate = std::min(maxRate, currentRate * 2);
+	ChangeRate(qp, DataRate(nextRate));
+	if (nextRate < maxRate)
+		ScheduleRoccRecovery(qp);
 }
 
 }

@@ -561,7 +561,9 @@ Icmpv4FrpFeedback::Icmpv4FrpFeedback()
       m_qDepth(0),
       m_cpId(0),
       m_type(false),
-      m_linkRate(0)
+      m_linkRate(0),
+      m_flowSport(0),
+      m_flowPg(0)
 {
     NS_LOG_FUNCTION(this);
 }
@@ -582,9 +584,7 @@ uint32_t
 Icmpv4FrpFeedback::GetSerializedSize() const
 {
     NS_LOG_FUNCTION(this);
-    // 16位(fair_rate) + 16位(q_depth) + 16位(cp_id) + 16位(has_wan + link_rate) = 64 bits = 8 字节
-    // 完美契合 P4 的 FRP_shim_t 结构，不扩容，极度节约资源！
-    return 8;
+    return 12;
 }
 
 void
@@ -611,6 +611,8 @@ Icmpv4FrpFeedback::Serialize(Buffer::Iterator start) const
     last16Bits |= (m_linkRate & 0x7FFF);
     
     i.WriteHtonU16(last16Bits);
+    i.WriteHtonU16(m_flowSport);
+    i.WriteHtonU16(m_flowPg);
 }
 
 uint32_t
@@ -632,8 +634,10 @@ Icmpv4FrpFeedback::Deserialize(Buffer::Iterator start)
     uint16_t last16Bits = i.ReadNtohU16();
     m_type     = (last16Bits >> 15) & 0x01;  // 提取最高位
     m_linkRate = last16Bits & 0x7FFF;        // 提取低 15 位 (得到以 10Mbps 为单位的带宽)
+    m_flowSport = i.ReadNtohU16();
+    m_flowPg = i.ReadNtohU16();
 
-    return 8; // 保持 8 字节不变
+    return 12;
 }
 
 void
@@ -644,7 +648,8 @@ Icmpv4FrpFeedback::Print(std::ostream& os) const
        << "x10Mbps, q_depth=" << m_qDepth 
        << " blocks(600B), cp_id=" << m_cpId
        << ", type=" << (m_type ? "ROCC" : "FRP")
-       << ", link_rate=" << m_linkRate << "x10Mbps";
+       << ", link_rate=" << m_linkRate << "x10Mbps"
+       << ", sport=" << m_flowSport << ", pg=" << m_flowPg;
 }
 
 // ====================================================================
@@ -676,6 +681,9 @@ void Icmpv4FrpFeedback::SetLinkRate(uint16_t linkRate) {
     m_linkRate = linkRate;
 }
 
+void Icmpv4FrpFeedback::SetFlowSport(uint16_t sport) { m_flowSport = sport; }
+void Icmpv4FrpFeedback::SetFlowPg(uint16_t pg) { m_flowPg = pg; }
+
 uint16_t Icmpv4FrpFeedback::GetFairRate() const  {
     NS_LOG_FUNCTION(this); 
     return m_fairRate; 
@@ -700,5 +708,8 @@ uint16_t Icmpv4FrpFeedback::GetLinkRate() const {
     NS_LOG_FUNCTION(this);
     return m_linkRate;
 }
+
+uint16_t Icmpv4FrpFeedback::GetFlowSport() const { return m_flowSport; }
+uint16_t Icmpv4FrpFeedback::GetFlowPg() const { return m_flowPg; }
 
 } // namespace ns3

@@ -11,6 +11,7 @@
 
 #include "frp-rate-calculator.h"
 #include "ns3/log.h"
+#include <algorithm>
 
 namespace ns3 {
 FrpParameters g_frpParameters;
@@ -44,7 +45,8 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     FrpPortState& state = m_portStates[portId];
 
     // 边界限制 (使用全局量纲 bps)
-    double maxRateBps = linkBps * g_frpParameters.targetUtil;
+    double maxRateBps = ccMode == 14 ? static_cast<double>(linkBps)
+                                     : linkBps * g_frpParameters.targetUtil;
     double minRateBps = g_frpParameters.minRateBps;  // 10 Gbps
 
     // 初始化
@@ -69,25 +71,60 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
     // ========== ROCC 模式 (ccMode=14) ==========
     if (ccMode == 14) {
         minRateBps = 100.0 * 1000000.0;
-        double fNewBps = state.currentFairRateBps;  // 默认保持当前速率
-        
-        // ROCC规则1: 队列过载且速率>12.5Gbps → 降至最小速率
-        if ((currentQBytes > m_qThBytes + qRefBytes) && (state.currentFairRateBps > linkBps / 8.0)) {
-            fNewBps = minRateBps;
-            // 更新状态
-            state.qOldBytes = static_cast<double>(currentQBytes);
-            state.currentFairRateBps = fNewBps;
-            return fNewBps;
+        // RoCC specifies 40/100 Gb/s parameters. For faster links, scale the
+        // queue targets with bandwidth and retain the conservative 100 Gb/s
+        // controller gains.
+        double qRefRoccBytes;
+        double qMidBytes;
+        double qMaxBytes;
+        double alphaBase;
+        double betaBase;
+        if (linkBps <= 40ULL * 1000000000ULL) {
+            qRefRoccBytes = 150.0 * 1024.0;
+            qMidBytes = 300.0 * 1024.0;
+            qMaxBytes = 360.0 * 1024.0;
+            alphaBase = 0.3;
+            betaBase = 1.5;
+        } else {
+            const double bandwidthScale = static_cast<double>(linkBps) / 100e9;
+            qRefRoccBytes = 300.0 * 1024.0 * bandwidthScale;
+            qMidBytes = 600.0 * 1024.0 * bandwidthScale;
+            qMaxBytes = 660.0 * 1024.0 * bandwidthScale;
+            alphaBase = 0.45;
+            betaBase = 2.25;
         }
-        // ROCC规则2: 队列超过2*qRef且速率>12.5Gbps → 减半
-        else if ((currentQBytes - qRefBytes > qRefBytes) && (state.currentFairRateBps > linkBps / 8.0)) {
-            fNewBps = state.currentFairRateBps / 2.0;
-            // 更新状态
-            state.qOldBytes = static_cast<double>(currentQBytes);
-            state.currentFairRateBps = fNewBps;
-            return fNewBps;
+
+        const double qCurCells = static_cast<double>(currentQBytes) / 600.0;
+        const double qOldCells = state.qOldBytes / 600.0;
+        const double qRefCells = qRefRoccBytes / 600.0;
+        const double qMidCells = qMidBytes / 600.0;
+        const double qMaxCells = qMaxBytes / 600.0;
+        const double fMaxUnits = maxRateBps / 10000000.0;
+        const double fOldUnits = state.currentFairRateBps / 10000000.0;
+        double fNewUnits;
+
+        if (qCurCells >= qMaxCells && fOldUnits > fMaxUnits / 8.0) {
+            fNewUnits = minRateBps / 10000000.0;
+        } else if ((qCurCells - qOldCells) >= qMidCells &&
+                   fOldUnits > fMaxUnits / 8.0) {
+            fNewUnits = fOldUnits / 2.0;
+        } else {
+            uint32_t level = 2;
+            while (fOldUnits < fMaxUnits / level && level < 64) {
+                level *= 2;
+            }
+            const double ratio = level / 2.0;
+            const double alpha = alphaBase / ratio;
+            const double beta = betaBase / ratio;
+            fNewUnits = fOldUnits - alpha * (qCurCells - qRefCells)
+                                  - beta * (qCurCells - qOldCells);
         }
-        
+
+        double fNewBps = fNewUnits * 10000000.0;
+        fNewBps = std::max(minRateBps, std::min(maxRateBps, fNewBps));
+        state.qOldBytes = static_cast<double>(currentQBytes);
+        state.currentFairRateBps = fNewBps;
+        return fNewBps;
     }
 
     // ========== FRP 模式 (ccMode=13) ==========
@@ -119,12 +156,6 @@ double FrpRateCalculator::CalculateFairRate(uint32_t portId, uint64_t linkBps, u
         }
     }
 
-    // ROCC模式 (ccMode=14): lanbackoff保持为0
-    if (ccMode == 14) {
-        lanbackoff = 0.0;
-        m_beta = 1.0;
-        
-    } 
     // 4. 计算新的公平速率 (在10Mbps局部量纲下)
     // 公式: F_new = F_old - α*(q_cur - q_ref + lanbackoff) - β*(q_cur - q_old)
     double alpha_term = m_alpha * (qCurCell - qRefCell + lanbackoff);
