@@ -59,20 +59,6 @@ topology-longhaul.txt
 节点 ID 采用连续分段，便于人工检查；程序仍然以拓扑文件中的交换机列表和链路为准，
 不应在分析脚本中根据节点 ID 范围推断路径属性。
 
-### 3.2 拓扑自动校验
-
-增加 `validate_longhaul_topology.py`，运行实验前检查：
-
-- header 中 node/switch/link 数与实际内容一致；
-- 64 个 host、18 个 switch，每个 DC 恰好 32 个 host；
-- 每个 DC 有 4 个 leaf、4 个 spine 和 1 个 gateway；
-- DCI 40/81 均为 switch；
-- 40↔81 只有一条链路，速率 200 Gbps，delay 为 5 ms；
-- 每个 host 度数为 1，每个 leaf 下挂 8 个 host；
-- 所有节点连通，跨 DC 路径必须经过 40↔81；
-- 无重复链路、自环、越界 node ID；
-- 从代表性 host 对计算出的跨 DC base RTT 约为 10 ms 加内部链路延迟。
-
 ## 4. 程序与文件布局
 
 建议新增而不是继续堆叠修改 `crossDC-evaluation.cc`：
@@ -82,10 +68,9 @@ longhaul-convergence.cc              # 仿真入口和公共默认值
 config-longhaul-common.txt           # 完整、可审阅的程序配置
 flow-longhaul-*.txt                  # 固定场景流文件
 topology-longhaul.txt                # 新拓扑
-validate_longhaul_topology.py        # 静态校验
-run-longhaul-baseline.py             # 实验矩阵、seed/run、目录管理
-analyze-longhaul.py                  # 收敛判定和汇总
-plot-longhaul.py                     # 速率曲线和比较图
+run-longhaul.py                      # 指定算法、seed/run、目录管理
+run-longhaul-all.py                  # 默认运行全部算法
+analyze-longhaul.py                  # 收敛判定、汇总和绘图
 ```
 
 同时在 `CMakeLists.txt` 中注册 `longhaul-convergence`。公共参数由 C++ 默认值提供，完整配置文件覆盖默认值，显式命令行参数再覆盖前两者。切换场景时由命令行传入 `FLOW_FILE` 和 `SIMULATOR_STOP_TIME` 对应的参数；场景名从 flow 文件名生成。输出路径由 runner 写入每次运行的 `config.txt`，算法、seed/run 等批量运行时参数由 runner 通过六个命令行入口传入；原始配置文本保持不变。
@@ -94,7 +79,7 @@ plot-longhaul.py                     # 速率曲线和比较图
 
 ## 5. 测量设计
 
-### 5.1 原始时间序列
+config-longhaul.txt
 
 流级 CSV 用 `interval_start_ns,time_ns` 表示采样区间，并用五元组字段区分 flow；DCI
 链路 CSV 用方向和端点标识链路：
@@ -189,10 +174,9 @@ R_target_payload = min(path_bottleneck, DCI_rate) / N
 ### Phase A：拓扑与最小可运行程序
 
 1. 使用 82-node 拓扑，确认 DCI delay 为 5 ms。
-2. 完成拓扑校验器，并让 runner 在仿真前强制调用。
-3. 从 `crossDC-evaluation.cc` 复制出独立入口，删除与本实验无关的 Bifrost/特殊硬编码路径。
-4. 注册 CMake target，使用 S0 + DCQCN 完成编译和最短运行。
-5. 在 metadata 中按 flow 检查跨 DC base RTT：包含正反向 5 ms DCI 传播及内部传播/NIC 接收延迟，而不是把单向 5 ms 当作 RTT。
+2. 从 `crossDC-evaluation.cc` 复制出独立入口，删除与本实验无关的 Bifrost/特殊硬编码路径。
+3. 注册 CMake target，使用 S0 + DCQCN 完成编译和最短运行。
+4. 在 metadata 中按 flow 检查跨 DC base RTT：包含正反向 5 ms DCI 传播及内部传播/NIC 接收延迟，而不是把单向 5 ms 当作 RTT。
 
 ### Phase B：可靠观测
 
@@ -238,7 +222,6 @@ R_target_payload = min(path_bottleneck, DCI_rate) / N
 - [x] 每个 DC 配置 32 个 host、4 个 leaf、4 个 spine 和 1 个 gateway。
 - [x] 将 header 设置为 82 nodes、18 switches、105 links。
 - [x] 将 40↔81 设置为 200 Gbps、5 ms、error rate 0。
-- [ ] 编写并运行拓扑校验器。
 
 ### C++ 程序
 

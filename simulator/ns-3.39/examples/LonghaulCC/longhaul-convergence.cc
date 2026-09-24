@@ -164,7 +164,7 @@ uint32_t ip_to_node_id(Ipv4Address ip);
 
 std::string selected_cc = "dcqcn";
 std::string AlgorithmName(uint32_t mode) {
-	if (selected_cc == "proposed" || selected_cc == "proposed-legacy") return selected_cc;
+	if (selected_cc == "proposed") return selected_cc;
 	if (mode == 1) return "dcqcn";
 	if (mode == 3) return "hpcc";
 	if (mode == 7) return "timely";
@@ -681,14 +681,15 @@ void SampleDciLink() {
 		Simulator::Schedule(MicroSeconds(rate_sample_interval_us), &SampleDciLink);
 }
 
-#include "longhaul-research.h"
-#include "longhaul-proposed-r1.h"
+#include "longhaul-proposed.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 	uint64_t dci_rate = dci_left_device->GetDataRate().GetBitRate();
 	uint64_t dci_delay = DynamicCast<QbbChannel>(dci_left_device->GetChannel())->GetDelay().GetTimeStep();
 	metadata_file << "{\n"
-		<< "  \"program\": \"longhaul-convergence\",\n"
+		<< "  \"program\": \"longhaul-convergence\",\n";
+    Proposed::WriteMetadata(metadata_file);
+    metadata_file
 		<< "  \"algorithm\": \"" << AlgorithmName(cc_mode) << "\",\n"
 		<< "  \"cc_mode\": " << cc_mode << ",\n"
 		<< "  \"host_cc_mode\": " << (cc_mode == 12 ? 1 : cc_mode) << ",\n"
@@ -700,28 +701,6 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 		<< ", \"minimum_h_bytes\": " << bifrost_min_buffer_bytes
 		<< ", \"configured_h_bytes\": " << bifrost_effective_buffer_bytes
 		<< ", \"deployment\": \"both DCI long-haul ingress ports; intra-DC ports retain PFC\"},\n"
-		<< "  \"research_control\": " << research_control << ",\n"
-		<< "  \"proposed_parameters\": {\"guarded\": " << (research_guarded ? "true" : "false")
-		<< ", \"period_s\": " << research_period << ", \"near_period_s\": " << research_near_period
-		<< ", \"qref_bytes\": " << research_qref << ", \"forecast_weight\": " << research_forecast_weight
-		<< ", \"horizon_s\": " << research_horizon << ", \"target_util\": " << research_target_util
-		<< ", \"deadband\": " << research_deadband << ", \"increase_fraction\": " << research_increase_fraction << "},\n"
-		<< "  \"r1_parameters\": {\"enabled\": " << (selected_cc == "proposed" ? "true" : "false")
-		<< ", \"predictor\": " << ProposedR1::predictor
-		<< ", \"report_period_s\": " << ProposedR1::period
-		<< ", \"control_period_s\": " << ProposedR1::delta
-		<< ", \"qref_bytes\": " << ProposedR1::qref
-		<< ", \"source_high_bytes\": " << ProposedR1::sourceHigh
-		<< ", \"source_emergency_bytes\": " << ProposedR1::sourceEmergency
-		<< ", \"emergency_bytes\": " << ProposedR1::emergency
-		<< ", \"tau_q_s\": " << ProposedR1::tauQ
-		<< ", \"tau_up_s\": " << ProposedR1::tauUp
-		<< ", \"cnp_interval_s\": " << ProposedR1::cnpInterval
-		<< ", \"burst_bytes\": " << ProposedR1::burst
-		<< ", \"forward_delay_s\": " << ProposedR1::forwardDelay
-		<< ", \"backward_delay_s\": " << ProposedR1::backwardDelay
-		<< ", \"max_report_age_s\": " << ProposedR1::maxAge
-		<< ", \"feedback_mode\": \"passthrough\", \"control_transport\": \"serialized-link-packets\"},\n"
 		<< "  \"scenario\": \"" << scenario_name << "\",\n"
 		<< "  \"rng_seed\": " << rng_seed << ",\n"
 		<< "  \"rng_run\": " << rng_run << ",\n"
@@ -876,27 +855,19 @@ void ParseConfig(std::istream &config) {
 		else if (key == "MULTI_RATE") ReadConfigValue(config, key, multi_rate);
 		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
-		else if (key == "R1_PREDICTOR") ReadConfigValue(config, key, ProposedR1::predictor);
-		else if (key == "R1_REPORT_PERIOD") ReadConfigValue(config, key, ProposedR1::period);
-		else if (key == "R1_CONTROL_PERIOD") ReadConfigValue(config, key, ProposedR1::delta);
-		else if (key == "R1_QREF") ReadConfigValue(config, key, ProposedR1::qref);
-		else if (key == "R1_SOURCE_HIGH") ReadConfigValue(config, key, ProposedR1::sourceHigh);
-		else if (key == "R1_SOURCE_EMERGENCY") ReadConfigValue(config, key, ProposedR1::sourceEmergency);
-		else if (key == "R1_EMERGENCY") ReadConfigValue(config, key, ProposedR1::emergency);
-		else if (key == "R1_TAU_Q") ReadConfigValue(config, key, ProposedR1::tauQ);
-		else if (key == "R1_TAU_UP") ReadConfigValue(config, key, ProposedR1::tauUp);
-		else if (key == "R1_CNP_INTERVAL") ReadConfigValue(config, key, ProposedR1::cnpInterval);
-		else if (key == "RESEARCH_RECEIVER") ReadConfigValue(config, key, research_receiver);
-		else if (key == "RESEARCH_CONTROL") ReadConfigValue(config, key, research_control);
-		else if (key == "RESEARCH_OUTPUT") ReadConfigValue(config, key, research_output);
-		else if (key == "RESEARCH_PERIOD") ReadConfigValue(config, key, research_period);
-		else if (key == "RESEARCH_NEAR_PERIOD") ReadConfigValue(config, key, research_near_period);
-		else if (key == "RESEARCH_QREF") ReadConfigValue(config, key, research_qref);
-		else if (key == "RESEARCH_FORECAST_WEIGHT") ReadConfigValue(config, key, research_forecast_weight);
-		else if (key == "RESEARCH_DEADBAND") ReadConfigValue(config, key, research_deadband);
-		else if (key == "RESEARCH_TARGET_UTIL") ReadConfigValue(config, key, research_target_util);
-		else if (key == "RESEARCH_INCREASE_FRACTION") ReadConfigValue(config, key, research_increase_fraction);
-		else if (key == "RESEARCH_GUARDED") ReadConfigValue(config, key, research_guarded);
+		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
+		else if (key == "PROPOSED_PREDICTOR") ReadConfigValue(config, key, Proposed::predictor);
+		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::period);
+		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::delta);
+		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::binWidth);
+		else if (key == "PROPOSED_QREF") ReadConfigValue(config, key, Proposed::qref);
+		else if (key == "PROPOSED_TAU") ReadConfigValue(config, key, Proposed::tau);
+		else if (key == "PROPOSED_SOURCE_HIGH") ReadConfigValue(config, key, Proposed::sourceHigh);
+		else if (key == "PROPOSED_SOURCE_LOW") ReadConfigValue(config, key, Proposed::sourceLow);
+		else if (key == "PROPOSED_UTILIZATION") ReadConfigValue(config, key, Proposed::utilization);
+		else if (key == "PROPOSED_WAN_FRACTION") ReadConfigValue(config, key, Proposed::wanFraction);
+		else if (key == "PROPOSED_EPSILON") ReadConfigValue(config, key, Proposed::epsilon);
+		else if (key == "PROPOSED_CNP_INTERVAL") ReadConfigValue(config, key, Proposed::cnpInterval);
 		else NS_FATAL_ERROR("longhaul: unknown config key: " << key);
 	}
 }
@@ -923,7 +894,7 @@ uint32_t ResolveCcMode(const std::string &name) {
 	if (name == "bifrost") return 12;
 	if (name == "frp") return 13;
 	if (name == "rocc") return 14;
-	if (name == "proposed" || name == "proposed-legacy") return 1;
+	if (name == "proposed") return 1;
 	NS_FATAL_ERROR("longhaul: unknown congestion-control algorithm: " << name);
 	return 0;
 }
@@ -933,9 +904,9 @@ int main(int argc, char *argv[])
 	clock_t begint, endt;
 	begint = clock();
 	std::ifstream conf;
-	std::string confFile = "examples/LonghaulCC/config-longhaul-common.txt";
+	std::string confFile = "examples/LonghaulCC/config-longhaul.txt";
 	CommandLine cmd;
-	cmd.AddValue("cc", "dcqcn, hpcc, timely, bifrost, frp, rocc, proposed, or proposed-legacy", selected_cc);
+	cmd.AddValue("cc", "dcqcn, hpcc, timely, bifrost, frp, rocc, or proposed", selected_cc);
 	cmd.AddValue("conf", "config file path", confFile);
 	// Experiment selection: ordinary model parameters stay in the config file.
 	cmd.AddValue("flow-file", "flow input path", flow_file);
@@ -955,8 +926,8 @@ int main(int argc, char *argv[])
 
 	scenario_name = ScenarioFromFlowFile(flow_file);
 	cc_mode = ResolveCcMode(selected_cc);
-	if ((selected_cc == "proposed" || selected_cc == "proposed-legacy") && research_output.empty())
-		research_output = summary_meta_file + ".control.csv";
+	if (selected_cc == "proposed" && Proposed::output.empty())
+		Proposed::output = summary_meta_file + ".control.csv";
 	NS_ABORT_MSG_IF(packet_payload_size == 0, "PACKET_PAYLOAD_SIZE must be positive");
 	NS_ABORT_MSG_IF(cc_mode == 12 && !enable_qcn,
 		"Bifrost experiments require DCQCN, but ENABLE_QCN is disabled");
@@ -1287,8 +1258,7 @@ int main(int argc, char *argv[])
 	dci_sample_initialized = true;
 	for (uint32_t i = 0; i < flows.size(); ++i)
 		Simulator::Schedule(Seconds(flows[i].start_time), &StartFlow, i);
-	if (selected_cc == "proposed") ProposedR1::Setup();
-	else ResearchSetup();
+	Proposed::Setup();
 	WriteMetadata(node_num, switch_num, link_num);
 
 	topof.close();

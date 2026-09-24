@@ -204,7 +204,7 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 			unsched = tag.GetValue();
 		}
 
-		if (ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || (m_ackHighPrio && (ch.l3Prot == 0xFD || ch.l3Prot == 0xFC))) { //QCN or PFC or NACK, go highest priority
+		if (ch.l3Prot == 0xF9 || ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || (m_ackHighPrio && (ch.l3Prot == 0xFD || ch.l3Prot == 0xFC))) { //QCN or PFC or NACK, go highest priority
 			qIndex = 0;
 		}
 		else if (found) {
@@ -284,6 +284,19 @@ uint32_t SwitchNode::EcmpHash(const uint8_t* key, size_t len, uint32_t seed) {
 
 void SwitchNode::SetEcmpSeed(uint32_t seed) {
 	m_ecmpSeed = seed;
+}
+
+int SwitchNode::LookupOutputPort(Ptr<const Packet> packet, CustomHeader &header) {
+    return GetOutDev(packet, header);
+}
+
+void SwitchNode::SendNetworkControl(Ptr<Packet> packet) {
+    CustomHeader header(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+    packet->PeekHeader(header);
+    NS_ABORT_MSG_IF(header.l3Prot != 0xff && header.l3Prot != 0xf9,
+                    "only CNP/Proposed STATE may originate through this interface");
+    NS_ABORT_MSG_IF(GetOutDev(packet, header) < 0, "no route for generated control packet");
+    SendToDev(packet, header);
 }
 
 void SwitchNode::AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx) {

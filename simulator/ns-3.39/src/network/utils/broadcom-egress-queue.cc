@@ -57,6 +57,7 @@ namespace ns3 {
 		for (uint32_t i = 0; i < fCnt; i++)
 		{
 			m_bytesInQueue[i] = 0;
+            m_priority[i] = i < qCnt ? i : 0;
 			m_queues.push_back(CreateObjectWithAttributes<DropTailQueue<Packet> >
                           ("MaxSize", QueueSizeValue (QueueSize(BYTES,uint32_t(1000.0 * 1024 * 1024)))));
 			// m_queues[i]->SetMaxSize(QueueSize(BYTES,m_maxBytes));
@@ -97,7 +98,7 @@ namespace ns3 {
 		}
 
 	Ptr<Packet>
-		BEgressQueue::DoDequeueRR(bool paused[]) //this is for switch only
+		BEgressQueue::DoDequeueRR(bool paused[], const std::set<uint32_t>& blocked) //this is for switch only
 	{
 		NS_LOG_FUNCTION(this);
 
@@ -118,21 +119,23 @@ namespace ns3 {
 		{
 			if (!found)
 			{
-				for (qIndex = 1; qIndex <= qCnt; qIndex++)
+				for (qIndex = 1; qIndex <= m_queueCount; qIndex++)
 				{
-					if (!paused[(qIndex + m_rrlast) % qCnt] && m_queues[(qIndex + m_rrlast) % qCnt]->GetNPackets() > 0)  //round robin
+					if (!paused[m_priority[(qIndex + m_rrlast) % m_queueCount]] &&
+                        !blocked.count((qIndex + m_rrlast) % m_queueCount) &&
+                        m_queues[(qIndex + m_rrlast) % m_queueCount]->GetNPackets() > 0)  //round robin
 					{
 						found = true;
 						break;
 					}
 				}
-				qIndex = (qIndex + m_rrlast) % qCnt;
+				qIndex = (qIndex + m_rrlast) % m_queueCount;
 			}
 		}
 		if (found)
 		{
 			Ptr<Packet> p = m_queues[qIndex]->Dequeue();
-			m_traceBeqDequeue(p, qIndex);
+			m_traceBeqDequeue(p, m_priority[qIndex]);
 			m_bytesInQueueTotal -= p->GetSize();
 			m_bytesInQueue[qIndex] -= p->GetSize();
 			if (qIndex != 0)
@@ -176,10 +179,10 @@ namespace ns3 {
 	}
 
 	Ptr<Packet>
-		BEgressQueue::DequeueRR(bool paused[])
+		BEgressQueue::DequeueRR(bool paused[], const std::set<uint32_t>& blocked)
 	{
 		NS_LOG_FUNCTION(this);
-		Ptr<Packet> packet = DoDequeueRR(paused);
+		Ptr<Packet> packet = DoDequeueRR(paused, blocked);
 //		if (packet != 0)
 		// {
 		// 	NS_ASSERT(m_nBytes >= packet->GetSize());
@@ -192,8 +195,16 @@ namespace ns3 {
 		return packet;
 	}
 
+    void BEgressQueue::ConfigureLogicalQueue(uint32_t index, uint32_t priority) {
+        NS_ABORT_MSG_IF(index>=fCnt || priority==0 || priority>=qCnt ||
+                        (index<qCnt && index!=priority), "invalid logical queue mapping");
+        NS_ABORT_MSG_IF(m_bytesInQueue[index]!=0, "cannot reassign a nonempty queue");
+        m_priority[index]=priority;
+        m_queueCount=std::max(m_queueCount,index+1);
+    }
+
 	Ptr<const Packet> BEgressQueue::PeekQueue(uint32_t qIndex) const {
-        NS_ABORT_MSG_IF(qIndex >= qCnt, "invalid switch queue");
+        NS_ABORT_MSG_IF(qIndex >= m_queueCount, "invalid logical switch queue");
         return m_queues[qIndex]->Peek();
     }
 
@@ -244,7 +255,10 @@ namespace ns3 {
 	uint32_t
 		BEgressQueue::GetNBytes(uint32_t qIndex) const
 	{
-		return m_bytesInQueue[qIndex];
+		uint32_t bytes = m_bytesInQueue[qIndex];
+        if (qIndex < qCnt) for (uint32_t i=qCnt;i<m_queueCount;++i)
+            if (m_priority[i]==qIndex) bytes += m_bytesInQueue[i];
+        return bytes;
 	}
 
 
@@ -263,7 +277,7 @@ namespace ns3 {
 	uint32_t
 		BEgressQueue::GetLastQueue()
 	{
-		return m_qlast;
+		return m_priority[m_qlast];
 	}
 
 }

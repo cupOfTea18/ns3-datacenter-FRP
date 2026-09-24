@@ -7,6 +7,8 @@ import argparse
 import csv
 import json
 import math
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean, median, pstdev
@@ -426,6 +428,9 @@ def main() -> int:
         writer.writerows(run_rows)
     print(f"wrote {len(all_rows)} per-flow stage rows to {output}")
     print(f"wrote {len(run_rows)} run rows to {run_output}")
+    subprocess.run([sys.executable, str(Path(__file__).with_name("plot-longhaul.py")),
+                    "--root", str(args.root), "--summary", str(output),
+                    "--all-scenarios"], check=True)
     return 0
 
 

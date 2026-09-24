@@ -20,6 +20,7 @@
 #define BROADCOM_EGRESS_H
 
 #include <queue>
+#include <set>
 #include "ns3/packet.h"
 #include "queue.h"
 #include "drop-tail-queue.h"
@@ -38,13 +39,16 @@ namespace ns3 {
 		BEgressQueue();
 		virtual ~BEgressQueue();
 		bool Enqueue(Ptr<Packet> p, uint32_t qIndex);
-		Ptr<Packet> DequeueRR(bool paused[]);
+		Ptr<Packet> DequeueRR(bool paused[], const std::set<uint32_t>& blocked = {});
 		Ptr<const Packet> PeekQueue(uint32_t qIndex) const;
 		uint32_t GetNBytes(uint32_t qIndex) const;
 		uint32_t GetNBytesTotal() const;
 		uint32_t GetNBytesRxTotal() const;
 
 		uint32_t GetLastQueue();
+        uint32_t GetLastLogicalQueue() const { return m_qlast; }
+        void ConfigureLogicalQueue(uint32_t index, uint32_t priority);
+        uint32_t GetLogicalBytes(uint32_t index) const { return m_bytesInQueue[index]; }
 
 		TracedCallback<Ptr<const Packet>, uint32_t> m_traceBeqEnqueue;
 		TracedCallback<Ptr<const Packet>, uint32_t> m_traceBeqDequeue;
@@ -61,7 +65,7 @@ namespace ns3 {
 		virtual Ptr<const Packet> Peek (void) const{return nullptr;};
 	private:
 		bool DoEnqueue(Ptr<Packet> p, uint32_t qIndex);
-		Ptr<Packet> DoDequeueRR(bool paused[]);
+		Ptr<Packet> DoDequeueRR(bool paused[], const std::set<uint32_t>& blocked = {});
 		//for compatibility
 		virtual bool DoEnqueue(Ptr<Packet> p);
 		virtual Ptr<Packet> DoDequeue(void);
@@ -71,6 +75,8 @@ namespace ns3 {
 		uint32_t m_bytesInQueueTotal;
 		uint64_t m_rxBytes;
 		uint32_t m_rrlast;
+        uint32_t m_queueCount = qCnt;
+        uint32_t m_priority[fCnt] = {};
 		uint32_t m_qlast;
 		std::vector<Ptr<Queue<Packet>> > m_queues; // uc queues
 		// vamsi

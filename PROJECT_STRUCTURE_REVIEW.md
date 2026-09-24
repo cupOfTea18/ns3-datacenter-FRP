@@ -155,7 +155,7 @@ SwitchNode ── SwitchMmu
 
 主要输入：
 
-- `examples/LonghaulCC/config-longhaul-common.txt`：公共参数、拓扑/流量路径、输出路径、CC 参数、采样间隔、seed/run 和 DCI 节点；
+- `examples/LonghaulCC/config-longhaul.txt`：公共参数、拓扑/流量路径、输出路径、CC 参数、采样间隔、seed/run 和 DCI 节点；
 - `topology-longhaul.txt`：节点与链路拓扑；
 - `flow-longhaul-s0.txt` 到 `flow-longhaul-s5.txt`：场景流量；
 - 命令行：`--cc`、`--algorithm`、`--conf`、seed/run、研究控制参数等；
@@ -241,8 +241,6 @@ SwitchNode ── SwitchMmu
 - 固定 DCI 两端和单个 DCI 设备；
 - 固定端口号、query receiver 或 flow role。
 
-`validate_longhaul_topology.py` 也不是通用拓扑校验器，而是验证当前 Longhaul 的精确规模、ID、带宽和时延。它作为当前场景检查器没有问题，但不应该被误认为拓扑抽象层。
-
 **影响：** 改节点数量、重排拓扑、增加 DCI 或复用入口时，容易得到“程序运行了但实验语义变了”的结果。
 
 #### P0-3：输出不是统一的测量契约
@@ -295,7 +293,7 @@ Longhaul 在全局层保存配置、节点、流、路由、输出流和 DCI 状
 - 多处脚本和旧 C++ 文件含机器相关绝对路径；
 - 根 `.gitignore` 忽略 `docs/`，导致已经存在的结构文档不容易随代码版本化；
 - 部分文档仍引用迁移前的 `examples/PowerTCP/longhaul-*` 路径；
-- 没有对配置解析、拓扑校验、输出 schema 和最小 smoke run 的自动检查。
+- 没有对配置解析、输出 schema 和最小 smoke run 的自动检查。
 
 这些问题会增加维护成本，但应排在 P0 的实验契约和 P1 的公共代码抽取之后处理。
 

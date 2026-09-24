@@ -1,21 +1,24 @@
-# Long-haul baseline 使用手册
+# LonghaulCC 使用手册
 
 本文档对应精简后的 `longhaul-convergence` 版本。它是一套独立的 ns-3
-长距 RDMA 基线实验，不修改 `crossDC-evaluation.cc` 的实验流程。
+长距 RDMA 实验，不修改 `crossDC-evaluation.cc` 的实验流程。
 
 ## 1. 实验范围
 
-程序只比较三种拥塞控制：
+程序接受以下七种算法；其中 DCQCN、HPCC、TIMELY 是原来的三种基线：
 
 | 算法 | `CC` |
 | --- | ---: |
 | DCQCN | `dcqcn` |
 | HPCC | `hpcc` |
 | TIMELY | `timely` |
+| Bifrost | `bifrost` |
+| FRP | `frp` |
+| RoCC | `rocc` |
+| Proposed R2 | `proposed` |
 
 所有算法共用同一拓扑、流文件、包大小、PFC/ECN、buffer、采样周期和
-`RngSeed/RngRun`。longhaul 基线不启用 FRP、Bifrost、PowerTCP 或 PINT
-分支；HPCC 使用 INT，TIMELY 使用 RTT 时间戳，这是算法本身的反馈机制。
+`RngSeed/RngRun`。HPCC 使用 INT，TIMELY 使用 RTT 时间戳，这是算法本身的反馈机制。
 
 ## 2. 精简内容
 
@@ -25,7 +28,7 @@
 | --- | --- |
 | 旧队列分布监控、ToR Power 打印 | 删除；队列统一由 `dci-link.csv` 采样 |
 | 链路故障注入和动态重路由 | 删除；本阶段拓扑是固定基线 |
-| 默认基准算法 | DCQCN/HPCC/TIMELY；FRP 可通过 `--cc=frp` 单独运行 |
+| 默认运行算法 | DCQCN/HPCC/TIMELY/Bifrost/FRP/RoCC/Proposed |
 | 先临时分配 IP、再 BFS 划分 DC、最后回填 | 节点创建后一次性按 node ID 分配唯一地址 |
 | 逐条读取并递归调度流文件 | 一次性读入流清单，再按 `start_time` 调度 |
 | 配置项静默忽略 | 只接受 longhaul 支持的配置键，未知键直接失败 |
@@ -34,19 +37,16 @@
 仿真启动时会打开 longhaul 的静默开关，屏蔽底层模型历史性的逐 ACK/逐速率
 `printf`；这不会关闭 CSV 采样，也不会影响其他实验，因为默认开关仍为关闭。
 
-IP 地址只用于 RDMA 节点寻址和路由，DC 归属仍由拓扑校验器验证，程序不再
-通过 IP 地址推断数据中心。
+IP 地址只用于 RDMA 节点寻址和路由；网络节点与链路关系由拓扑文件提供。
 
 ## 3. 架构图
 
 ```mermaid
 flowchart LR
-    T[topology-longhaul.txt<br/>32 hosts/DC] --> V[拓扑校验器]
-    F[flow-longhaul-s0..s5.txt] --> R[run-longhaul-baseline.py]
+    F[flow-longhaul-s0..s5.txt] --> R[run-longhaul.py / run-longhaul-all.py]
     C[config-longhaul-common.txt] --> R
-    T --> R
-    V --> R
-
+    T[topology-longhaul.txt<br/>32 hosts/DC] --> R
+config-longhaul.txt
     R --> D[每次运行独立目录<br/>scenario/algorithm/seed-run]
     D --> S[longhaul-convergence<br/>ns-3 仿真入口]
 
@@ -54,7 +54,7 @@ flowchart LR
         P[严格配置解析 + CLI 覆盖]
         N[创建 82 节点和 105 条链路]
         I[节点地址 + 静态 RDMA 路由]
-        Q[RdmaHw + CC<br/>DCQCN / HPCC / TIMELY]
+        Q[RdmaHw + CC<br/>七种算法]
         W[按开始时间创建 RDMA 流]
         M[采样器<br/>实际发送速率 / 接收 goodput / DCI / PFC / ECN]
         P --> N --> I --> Q --> W --> M
@@ -62,8 +62,7 @@ flowchart LR
     S --> P
     M --> O[sender-rate.csv<br/>receiver-goodput.csv<br/>dci-link.csv<br/>fct.csv<br/>pfc.csv<br/>metadata.json]
     O --> A[analyze-longhaul.py<br/>收敛 / 公平 / 队列 / FCT 汇总]
-    A --> U[summary.csv<br/>run-summary.csv]
-    U --> G[plot-longhaul.py<br/>六类 PNG 图]
+    A --> U[summary.csv<br/>run-summary.csv<br/>七类 PNG 图]
 ```
 
 可单独查看图源：[longhaul-architecture.mmd](longhaul-architecture.mmd)。
@@ -74,17 +73,16 @@ flowchart LR
 
 ```bash
 ./ns3 build longhaul-convergence -j2
-python3 examples/LonghaulCC/validate_longhaul_topology.py
-python3 examples/LonghaulCC/run-longhaul-baseline.py
-python3 examples/LonghaulCC/analyze-longhaul.py
-python3 examples/LonghaulCC/plot-longhaul.py
+python3 examples/LonghaulCC/run-longhaul-all.py
+python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul
 ```
 
-默认运行配置文件中的 S0，每种算法 1 个 `RngRun`，用于 smoke test。完整矩阵需要
+默认运行配置文件中的 S0，每种算法 1 个 `RngRun`。短时启动通过不代表算法完成
+和收敛。完整矩阵需要
 通过命令行显式传入 S0--S5 的 flow 文件和停止时间：
 
 ```bash
-python3 examples/LonghaulCC/run-longhaul-baseline.py \
+python3 examples/LonghaulCC/run-longhaul-all.py \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
               examples/LonghaulCC/flow-longhaul-s1.txt \
               examples/LonghaulCC/flow-longhaul-s2.txt \
@@ -93,35 +91,33 @@ python3 examples/LonghaulCC/run-longhaul-baseline.py \
               examples/LonghaulCC/flow-longhaul-s5.txt \
   --stop-times 0.38 1.50 1.50 0.60 1.50 1.50 \
   --runs 5
-python3 examples/LonghaulCC/analyze-longhaul.py
-python3 examples/LonghaulCC/plot-longhaul.py --all-scenarios
+python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul
 ```
 
 只跑指定组合：
 
 ```bash
-python3 examples/LonghaulCC/run-longhaul-baseline.py \
+python3 examples/LonghaulCC/run-longhaul.py \
+  --algorithm dcqcn \
   --config examples/LonghaulCC/config-longhaul-common.txt \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt examples/LonghaulCC/flow-longhaul-s2.txt \
   --stop-times 0.38 1.50 \
-  --algorithms dcqcn hpcc timely \
   --runs 1 \
-  --output-root /tmp/longhaul
+  --output-root /tmp/longhaulconfig-longhaul.txt
 ```
 
 `--stop-times 0.03` 仅适合检查启动、文件输出和崩溃，不适合做收敛结论：
 
 ```bash
-python3 examples/LonghaulCC/run-longhaul-baseline.py \
+python3 examples/LonghaulCC/run-longhaul.py \
+  --algorithm dcqcn \
   --config examples/LonghaulCC/config-longhaul-common.txt \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
-  --algorithms dcqcn hpcc timely \
   --stop-times 0.03 --skip-build --output-root /tmp/longhaul-smoke
 ```
-
+config-longhaul.txt
 runner 会编译（除非 `--skip-build`）、创建输出目录、保存配置快照和记录 git
-commit。拓扑校验单独运行，避免 runner 维护另一份拓扑路径。仿真失败或超时会使
-runner 最终返回非零状态。
+commit。仿真失败或超时会使 runner 最终返回非零状态。
 
 ## 5. 输入文件
 
@@ -165,7 +161,7 @@ src dst pg dport size_bytes start_time_seconds
 `--stop-time` 设置对应的停止时间，不再创建每个场景的三行配置文件。程序根据
 flow 文件名自动生成场景名，例如 `flow-longhaul-s0.txt` 对应 `S0`。runner 不修改原始
 配置文件，而是为每次运行生成 `config.txt` 写入输出路径；flow、停止时间、算法、seed
-和 run 仍通过命令行传入。
+和config-longhaul.txt
 
 参数优先级为：C++ 默认值 < 配置文件 < 显式命令行参数。
 
@@ -291,13 +287,12 @@ min(DCI_rate, flow_path_bottleneck) / 活跃流数
 
 ```bash
 python3 -m py_compile \
-  examples/LonghaulCC/validate_longhaul_topology.py \
-  examples/LonghaulCC/run-longhaul-baseline.py \
+  examples/LonghaulCC/run-longhaul.py \
+  examples/LonghaulCC/run-longhaul-all.py \
   examples/LonghaulCC/analyze-longhaul.py \
   examples/LonghaulCC/plot-longhaul.py
 
 ./ns3 build longhaul-convergence -j2
-python3 examples/LonghaulCC/validate_longhaul_topology.py
 ```
 
-完成代码修改后，至少用 S0 对三种算法各跑一次短 smoke，再进行完整矩阵。
+完成代码修改后，先用 S0 做短时启动检查，再按正式停止时间运行所需场景。

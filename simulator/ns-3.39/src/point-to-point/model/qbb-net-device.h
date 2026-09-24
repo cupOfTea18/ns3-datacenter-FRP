@@ -117,6 +117,9 @@ public:
   // Optional per-priority switch shaper. The existing FIFO/MMU owns all packets.
   void ConfigureQueueShaper(uint32_t queue, double bytesPerSecond, uint32_t burst);
   void SetQueueShaperRate(double bytesPerSecond);
+  void ConfigureGroupShaper(uint32_t groupQueue, uint32_t priority, double rate, uint32_t burst);
+  void SetGroupShaperRate(uint32_t groupQueue, double rate);
+  Callback<uint32_t, Ptr<const Packet>, uint32_t> m_groupClassifier;
   Time GetReceiveDelay() const { return m_nicDelay; }
   bool IsQueuePaused(uint32_t queue) const { return m_paused[queue]; }
   Time GetQueuePauseTime(uint32_t queue) const {
@@ -219,13 +222,16 @@ protected:
    * @see class InfiniteQueue
    */
   Ptr<BEgressQueue> m_queue;
-  int m_shapeQueue = -1;
-  double m_shapeRate = 0, m_shapeTokens = 0;
-  uint32_t m_shapeBurst = 0;
-  Time m_shapeUpdated;
+  struct QueueShaper {
+      uint32_t priority=0, burst=0;
+      double rate=0, tokens=0;
+      Time updated;
+  };
+  std::map<uint32_t, QueueShaper> m_shapers;
+  uint32_t m_defaultShapeQueue=0;
   Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
   EventId m_shapeWake;
-  void UpdateShapeTokens();
+  void UpdateShapeTokens(QueueShaper& shaper);
 
 
   Ptr<DropTailQueue<Packet>> m_queueFifo;

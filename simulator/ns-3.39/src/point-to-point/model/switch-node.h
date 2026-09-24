@@ -112,6 +112,10 @@ public:
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
 	void ClearTable();
+    // Read the same ECMP decision used by forwarding; does not change routes.
+    int LookupOutputPort(Ptr<const Packet> packet, CustomHeader &header);
+    // Locally originated network control is routed normally in priority zero.
+    void SendNetworkControl(Ptr<Packet> packet);
 	uint32_t GetRouteTableSize() const { return m_rtTable.size(); }
 	const std::unordered_map<uint32_t, std::vector<int>>& GetRouteTable() const { return m_rtTable; }
 	void SetSwitchRealIp(Ipv4Address ip);  // 设置交换机真实IP

@@ -275,6 +275,7 @@ QbbNetDevice::DoDispose()
 {
     Simulator::Cancel(m_shapeWake);
     m_linkControlReceive = Callback<bool, Ptr<const Packet>>();
+    m_groupClassifier = Callback<uint32_t, Ptr<const Packet>, uint32_t>();
 	NS_LOG_FUNCTION(this);
 
 	for (uint32_t i = 0; i < qCnt; ++i) Simulator::Cancel(m_pauseExpiry[i]);
@@ -326,31 +327,27 @@ QbbNetDevice::TransmitComplete(void)
 	DequeueAndTransmit();
 }
 
-void QbbNetDevice::UpdateShapeTokens() {
-    const Time now = Simulator::Now();
-    // Credit is bounded to one configured frame, including across PFC pauses.
-    m_shapeTokens = std::min(double(m_shapeBurst), m_shapeTokens +
-        m_shapeRate * (now - m_shapeUpdated).GetSeconds());
-    m_shapeUpdated = now;
+void QbbNetDevice::UpdateShapeTokens(QueueShaper& shaper) {
+    const Time now=Simulator::Now();
+    shaper.tokens=std::min(double(shaper.burst),shaper.tokens+shaper.rate*(now-shaper.updated).GetSeconds());
+    shaper.updated=now;
 }
-
-void QbbNetDevice::ConfigureQueueShaper(uint32_t queue, double rate, uint32_t burst) {
-    NS_ABORT_MSG_IF(queue == 0 || queue >= qCnt || burst == 0 || m_shapeQueue >= 0,
-                    "invalid/repeated switch shaper configuration");
-    m_shapeQueue = queue;
-    m_shapeBurst = burst;
-    m_shapeTokens = burst;
-    m_shapeUpdated = Simulator::Now();
-    SetQueueShaperRate(rate);
+void QbbNetDevice::ConfigureQueueShaper(uint32_t queue,double rate,uint32_t burst) {
+    m_defaultShapeQueue=queue;
+    ConfigureGroupShaper(queue,queue,rate,burst);
 }
-
-void QbbNetDevice::SetQueueShaperRate(double rate) {
-    NS_ABORT_MSG_IF(m_shapeQueue < 0 || !std::isfinite(rate) || rate < 0,
-                    "invalid switch shaper rate");
-    UpdateShapeTokens(); // settle at OLD rate; updates do not refill credit
-    m_shapeRate = rate;
-    Simulator::Cancel(m_shapeWake);
-    DequeueAndTransmit();
+void QbbNetDevice::SetQueueShaperRate(double rate) { SetGroupShaperRate(m_defaultShapeQueue,rate); }
+void QbbNetDevice::ConfigureGroupShaper(uint32_t queue,uint32_t priority,double rate,uint32_t burst) {
+    NS_ABORT_MSG_IF(priority==0 || priority>=qCnt || burst==0 || m_shapers.count(queue),"invalid/repeated shaper");
+    m_queue->ConfigureLogicalQueue(queue,priority);
+    auto &s=m_shapers[queue]; s.priority=priority; s.burst=burst; s.tokens=burst; s.updated=Simulator::Now();
+    SetGroupShaperRate(queue,rate);
+}
+void QbbNetDevice::SetGroupShaperRate(uint32_t queue,double rate) {
+    NS_ABORT_MSG_IF(!m_shapers.count(queue) || !std::isfinite(rate) || rate<0,"invalid shaper rate");
+    auto &s=m_shapers.at(queue); UpdateShapeTokens(s); s.rate=rate;
+    if (rate==0) s.tokens=0;
+    Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
 }
 
 void
@@ -419,26 +416,26 @@ QbbNetDevice::DequeueAndTransmit(void)
 		return;
 	}
 	else {  //switch, doesn't care about qcn, just send
-		bool blocked[qCnt];
-        std::copy(m_paused, m_paused + qCnt, blocked);
-        if (m_shapeQueue >= 0) {
-            UpdateShapeTokens();
-            auto head = m_queue->PeekQueue(m_shapeQueue);
-            if (head) {
-                NS_ABORT_MSG_IF(head->GetSize() > m_shapeBurst, "frame exceeds shaper burst cap");
-                if (m_shapeTokens + 1e-6 < head->GetSize() || m_shapeRate == 0) {
-                    blocked[m_shapeQueue] = true;
-                    if (!m_paused[m_shapeQueue] && m_shapeRate > 0 && m_shapeWake.IsExpired()) {
-                        Time wait = Seconds((head->GetSize() - m_shapeTokens) / m_shapeRate);
-                        m_shapeWake = Simulator::Schedule(std::max(NanoSeconds(1), wait),
-                            &QbbNetDevice::DequeueAndTransmit, this);
-                    }
-                }
+        std::set<uint32_t> blocked;
+        Time wait=Simulator::GetMaximumSimulationTime();
+        for (auto &entry:m_shapers) {
+            auto &s=entry.second; UpdateShapeTokens(s);
+            auto head=m_queue->PeekQueue(entry.first);
+            if (!head) continue;
+            NS_ABORT_MSG_IF(head->GetSize()>s.burst,"frame exceeds shaper burst");
+            if (s.rate==0 || s.tokens+1e-6<head->GetSize()) {
+                blocked.insert(entry.first);
+                if (!m_paused[s.priority] && s.rate>0)
+                    wait=std::min(wait,std::max(NanoSeconds(1),Seconds((head->GetSize()-s.tokens)/s.rate)));
             }
         }
-        p = m_queue->DequeueRR(blocked);
-        if (p && int(m_queue->GetLastQueue()) == m_shapeQueue)
-            m_shapeTokens = std::max(0.0, m_shapeTokens - p->GetSize());
+        if (wait<Simulator::GetMaximumSimulationTime() && m_shapeWake.IsExpired())
+            m_shapeWake=Simulator::Schedule(wait,&QbbNetDevice::DequeueAndTransmit,this);
+        p=m_queue->DequeueRR(m_paused,blocked);
+        if (p && m_shapers.count(m_queue->GetLastLogicalQueue())) {
+            auto &s=m_shapers.at(m_queue->GetLastLogicalQueue());
+            s.tokens=std::max(0.0,s.tokens-p->GetSize());
+        }
 		if (p != 0) {
 			m_snifferTrace(p);
 			m_promiscSnifferTrace(p);
@@ -680,7 +677,7 @@ bool QbbNetDevice::Send(Ptr<Packet> packet, const Address &dest, uint16_t protoc
 bool QbbNetDevice::SwitchSend (uint32_t qIndex, Ptr<Packet> packet, CustomHeader &ch) {
 	m_macTxTrace(packet);
 	m_traceEnqueue(packet, qIndex);
-	m_queue->Enqueue(packet, qIndex);
+	m_queue->Enqueue(packet, m_groupClassifier.IsNull() ? qIndex : m_groupClassifier(packet,qIndex));
 	DequeueAndTransmit();
 	return true;
 }

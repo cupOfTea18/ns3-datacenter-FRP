@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a matrix using one full config and explicit flow/stop-time overrides."""
+"""Run every supported algorithm and save each run's data and metadata."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-DEFAULT_ALGORITHMS = ("dcqcn", "hpcc", "timely")
+DEFAULT_ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "frp", "rocc", "proposed")
 
 
 def git_commit(repo: Path) -> str:
@@ -63,7 +63,7 @@ def main() -> int:
     here = Path(__file__).resolve().parent
     ns3 = here.parents[1]
     repo = ns3.parents[1]
-    default_config = here / "config-longhaul-common.txt"
+    default_config = here / "config-longhaul.txt"
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", type=Path, default=repo / "results" / "longhaul")
@@ -73,7 +73,8 @@ def main() -> int:
                         help="flow files to pass as --flow-file; omit to use FLOW_FILE in config")
     parser.add_argument("--stop-times", nargs="+", type=float, default=None,
                         help="one stop time for all flows, or one value per flow file")
-    parser.add_argument("--algorithms", nargs="+", default=list(DEFAULT_ALGORITHMS),
+    parser.add_argument("--algorithms", nargs="+", choices=DEFAULT_ALGORITHMS,
+                        default=list(DEFAULT_ALGORITHMS),
                         help="values passed to the simulator's --cc option")
     parser.add_argument("--runs", type=int, default=1,
                         help="number of RngRun values, starting at 1")
@@ -108,6 +109,18 @@ def main() -> int:
         stop_times = args.stop_times
     else:
         parser.error("--stop-times must contain one value or one value per --flow-files")
+
+    planned_dirs = set()
+    for flow_path in flow_paths:
+        for algorithm in args.algorithms:
+            for run in range(1, args.runs + 1):
+                seed_label = str(args.seed) if args.seed is not None else "config"
+                run_dir = args.output_root / flow_label(flow_path) / algorithm / f"seed{seed_label}-run{run}"
+                if run_dir in planned_dirs:
+                    parser.error(f"multiple runs would use the same directory: {run_dir}")
+                planned_dirs.add(run_dir)
+                if run_dir.exists() and any(run_dir.iterdir()):
+                    parser.error(f"run directory already contains data: {run_dir}")
 
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"],
@@ -188,12 +201,14 @@ def main() -> int:
                         simulator_meta = {}
                 run_metadata = {
                     "status": status,
+                    "exit_code": return_code,
                     "error": error,
                     "wall_clock_seconds": wall_seconds,
                     "algorithm": simulator_meta.get("algorithm", algorithm),
                     "cc_mode": simulator_meta.get("cc_mode"),
                     "scenario": simulator_meta.get("scenario", label.upper()),
-                    "seed": simulator_meta.get("rng_seed", args.seed),
+                    "seed": simulator_meta.get("rng_seed", args.seed if args.seed is not None
+                                               else config_value(args.config, "RNG_SEED")),
                     "run": simulator_meta.get("rng_run", run),
                     "config_file": str(effective_config_path),
                     "config_sha256": effective_config_hash,
