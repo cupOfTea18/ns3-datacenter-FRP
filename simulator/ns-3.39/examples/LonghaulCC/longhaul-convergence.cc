@@ -159,6 +159,7 @@ struct FlowInput {
 	bool rx_initialized;
 	bool rtt_initialized;
 	bool finished;
+    uint64_t observed_rx=0, unique_sent=0, payload_sent=0, supply_end_ns=0, completion_ns=0;
 };
 std::vector<FlowInput> flows;
 
@@ -308,6 +309,19 @@ FlowInput *FindFlow(Ptr<RdmaQueuePair> q) {
 	return NULL;
 }
 
+// Observe actual packet transmission, not application completion/ACK delay.
+void ObserveHostTx(Ptr<const Packet> packet, Ptr<RdmaQueuePair> q) {
+    auto f=FindFlow(q); if (!f) return;
+    CustomHeader h(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header);
+    packet->PeekHeader(h);
+    uint64_t bytes=packet->GetSize()-h.GetSerializedSize();
+    f->payload_sent+=bytes;
+    uint64_t previous=f->unique_sent;
+    f->unique_sent=std::max(f->unique_sent,uint64_t(h.udp.seq)+bytes);
+    if (previous<f->size_bytes && f->unique_sent>=f->size_bytes)
+        f->supply_end_ns=Simulator::Now().GetNanoSeconds();
+}
+
 Ptr<RdmaRxQueuePair> FindRxQp(const FlowInput &fi) {
 	if (fi.dst >= serverAddress.size() || fi.src >= serverAddress.size()) return NULL;
 	Ptr<RdmaDriver> rdma = n.Get(fi.dst)->GetObject<RdmaDriver>();
@@ -425,6 +439,7 @@ void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
 			q->tx_wire_bytes - fi->last_tx_wire_bytes);
 	}
 	Ptr<RdmaRxQueuePair> rxQp = FindRxQp(*fi);
+    if (rxQp) fi->observed_rx=rxQp->m_recv_bytes;
 	if (rxQp != NULL && !fi->rx_initialized) {
 		fi->rx_initialized = true;
 		fi->last_recv_bytes = 0;
@@ -438,6 +453,7 @@ void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
 	}
 	FlushRttSamples(q, fi, Simulator::Now().GetNanoSeconds(), true);
 	fi->finished = true;
+    fi->completion_ns=Simulator::Now().GetNanoSeconds();
 	if (selected_cc == "proposed")
 		for (uint32_t id : {dci_left, dci_right})
 			DynamicCast<DciGatewayNode>(n.Get(id))->CompleteFlow(uint32_t(fi - flows.data()) + 1);
@@ -687,6 +703,7 @@ void SampleDciLink() {
 }
 
 #include "longhaul-r3.h"
+#include "longhaul-measurements.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 	uint64_t dci_rate = dci_left_device->GetDataRate().GetBitRate();
@@ -694,6 +711,7 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 	metadata_file << "{\n"
 		<< "  \"program\": \"longhaul-convergence\",\n";
     Proposed::WriteMetadata(metadata_file);
+    LonghaulMeasurements::WriteResources(metadata_file);
     metadata_file
 		<< "  \"algorithm\": \"" << AlgorithmName(cc_mode) << "\",\n"
 		<< "  \"cc_mode\": " << cc_mode << ",\n"
@@ -758,7 +776,9 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 			<< ", \"path_hops\": " << pairHopCount[n.Get(flow.src)][n.Get(flow.dst)]
 			<< ", \"bottleneck_rate_bps\": " << pairBw[flow.src][flow.dst]
 			<< ", \"bdp_bytes\": " << flow_bdp_bytes
-			<< ", \"window_bytes\": " << (has_win ? flow_bdp_bytes : 0) << "}"
+			<< ", \"window_bytes\": " << (has_win ? flow_bdp_bytes : 0);
+        LonghaulMeasurements::WriteFlowPath(metadata_file,flow);
+        metadata_file << "}"
 			<< (i + 1 < flows.size() ? "," : "") << '\n';
 	}
 	metadata_file << "  ]\n}\n";
@@ -861,6 +881,7 @@ void ParseConfig(std::istream &config) {
 		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
 		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
+		else if (key == "PROPOSED_RECONSTRUCT") ReadConfigValue(config, key, Proposed::config.reconstruct);
 		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::config.period);
 		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::config.control);
 		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::config.bin);
@@ -1271,8 +1292,13 @@ int main(int argc, char *argv[])
 	dci_sample_initialized = true;
 	for (uint32_t i = 0; i < flows.size(); ++i)
 		Simulator::Schedule(Seconds(flows[i].start_time), &StartFlow, i);
-	Proposed::Setup();
+    for (uint32_t i=0;i<n.GetN();++i) if (!n.Get(i)->GetNodeType())
+        for (uint32_t j=0;j<n.Get(i)->GetNDevices();++j)
+            if (auto d=DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(j)))
+                d->TraceConnectWithoutContext("RdmaQpDequeue",MakeCallback(&ObserveHostTx));
+    Proposed::Setup();
 	WriteMetadata(node_num, switch_num, link_num);
+    LonghaulMeasurements::StartMeasurements();
 
 	topof.close();
 	flowf.close();
@@ -1286,7 +1312,7 @@ int main(int argc, char *argv[])
 	NS_LOG_INFO("Run Simulation.");
 	Simulator::Stop(Seconds(simulator_stop_time));
 	Simulator::Run();
-	Proposed::Finish();
+	LonghaulMeasurements::Finish();
 	Simulator::Destroy();
 	sender_rate_file.close();
 	receiver_goodput_file.close();

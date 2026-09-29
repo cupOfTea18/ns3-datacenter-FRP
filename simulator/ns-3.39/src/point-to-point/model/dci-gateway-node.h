@@ -16,6 +16,7 @@ class DciGatewayNode : public SwitchNode {
 public:
     static TypeId GetTypeId();
     struct Config {
+        bool reconstruct=true;
         double period=0.0002, control=0.00005, bin=0.00005;
         double reaction=0.00005, gamma=0.0625, recovery=0.0002;
         double probeRate=125000000, increase=625000000, utilization=0.98;
@@ -79,6 +80,8 @@ private:
         bool source=false, marking=false, have=false, dirty=false;
         double delay=0, feedbackRtt=0, lastSend=-1, demandTime=-1;
         double service=0, budget=0, target=0, predicted=0;
+        double queueUsed=0, unconstrained=0;
+        bool fresh=false;
         uint64_t sequence=0, demandSeq=0, peak=0;
         std::vector<uint32_t> flows;
         History history;

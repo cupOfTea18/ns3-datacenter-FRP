@@ -69,113 +69,140 @@ examples/LonghaulCC/topology-longhaul.txt
 ./ns3 build longhaul-convergence -j2
 ```
 
-当前只保留 `longhaul-convergence` 仿真目标，独立的 Proposed 测试目标已删除。
+另有 `longhaul-r3-test` 确定性控制器回归目标。
 
-## 4. 运行实验
+## 4. 运行用途与场景
 
-### 4.1 快速冒烟测试
+默认配置为 **S2、DCQCN、0.38 s 瞬态观察**。`run-longhaul-all.py` 默认依次运行
+DCQCN、HPCC、TIMELY、Bifrost、Proposed，每种一次；这不是完整 FCT 验收或已标定的比较矩阵。
+S2 后加入的七条 3 GB 流只剩 0.17 s，物理上不足以全部完成。
 
-下面的命令只运行场景 `s0` 的 DCQCN，仿真到 0.03 秒，适合检查程序是否
-能够启动并生成结果：
+执行链：`run-longhaul.py` → `run-longhaul-all.py` → `longhaul-convergence.cc` →
+路径注册/网关控制/公共测量 → `analyze-longhaul.py` → `plot-longhaul.py`。
+不迁移到仓库 `run_scripts/run_single_*` 旧入口。
 
 ```bash
-python3 examples/LonghaulCC/run-longhaul.py \
-  --algorithm dcqcn \
-  --config examples/LonghaulCC/config-longhaul.txt \
+# 启动检查，结果不用于完整 FCT 比较；每次使用新目录。
+python3 examples/LonghaulCC/run-longhaul.py --algorithm dcqcn \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
-  --runs 1 \
-  --stop-times 0.03 \
-  --skip-build \
-  --output-root /tmp/longhaul-s0-smoke
-```
+  --purpose transient --stop-times 0.03 --output-root /tmp/longhaul-s0-smoke
 
-`--skip-build` 表示复用已有编译结果；如果尚未编译主程序，应删除该选项。
-`--stop-times 0.03` 只检查启动和输出，不代表流完成或收敛。再次运行时应换一个
-`--output-root`，因为 runner 不覆盖已有运行目录。
-
-### 4.2 默认实验
-
-```bash
-python3 examples/LonghaulCC/run-longhaul-all.py
-```
-
-默认使用公共配置中的 S0 流文件和 0.38 s 停止时间，依次运行 DCQCN、HPCC、TIMELY、
-Bifrost、Proposed，每种算法运行一次。结果写到仓库根目录的：
-
-```text
-results/longhaul-260924-1520/
-```
-
-目录名使用启动时的本地时间，格式为 `longhaul-YYMMDD-HHMM`；同一分钟内再次运行
-会依次加上 `-2`、`-3`。runner 启动时会打印实际输出目录。显式传入
-`--output-root` 时使用指定目录，已有运行数据仍不会被覆盖。
-
-### 4.3 指定场景、算法和重复次数
-
-```bash
-python3 examples/LonghaulCC/run-longhaul.py \
-  --algorithm hpcc \
-  --config examples/LonghaulCC/config-longhaul.txt \
+# 完成实验：1.50 s 只是候选，runner 会检查完成数、FCT 唯一性及 RX payload。
+python3 examples/LonghaulCC/run-longhaul-all.py --algorithms dcqcn proposed \
   --flow-files examples/LonghaulCC/flow-longhaul-s2.txt \
-  --stop-times 1.50 \
-  --runs 3 \
-  --output-root ../../results/longhaul-hpcc-s2
+  --purpose completion --stop-times 1.50 --output-root /tmp/longhaul-s2-completion
 ```
 
-### 4.4 运行完整场景集合
+`--purpose` 默认为 `transient`，记录固定停止规则；`completion` 必须显式指定
+`--stop-times`，未全部完成时 runner 返回非零。进程 `status=ok` 与
+`completion_valid` 是两个不同字段，瞬态实验允许未完成，但分析必须显示未完成数量。
+算法间使用相同输入和停止时刻，不能按效果分别选择时长。
+
+S0–S5 正式输入未改动。新增输入及预先定义的窗口见 `experiment-scenarios.json`：
+
+| 输入 | 设置与目的 |
+|---|---|
+| `flow-longhaul-s2-scaled.txt` | 首流 750 MB，10 ms 启动；七条 150 MB 于 20 ms 加入；观察 20–60 ms |
+| `flow-longhaul-s3-scaled.txt` | 七条 1 MB、一条 1 GB，同在 10 ms 启动；退出时间保守取七条全部完成与实际 TX 停止，之后检查至少一个保持窗口 |
+| `flow-longhaul-s5-scaled.txt` | 八条 500 MB 背景，四条 5 MB 探测于 20/22/24/26 ms 加入；观察 20–75 ms |
+| `flow-longhaul-r3-mechanism.txt` | `0→41`、`0→59` 各 750 MB；30 ms 加入 `42→41` 的 500 MB 本地竞争 |
+| `flow-longhaul-r3-mechanism-control.txt` | 相同两条跨域流，不加本地竞争 |
+
+缩小输入用于事件关系验收，不是按统一比例缩放的正式负载。
+特别是 S3 的原 4.8:1 比例未用于此事件测试；保留七条先退出、一条仍供给的关系，
+正式 `flow-longhaul-s3.txt` 仍为 625 MB/3 GB。首版候选及失败记录保存在验证目录，不能与修订输入混用。
+默认保持判据仍为 ±10%、`max(3×base RTT,20 ms)`，跨域约 30.7 ms；不足窗口单列。
 
 ```bash
-python3 examples/LonghaulCC/run-longhaul-all.py \
-  --flow-files examples/LonghaulCC/flow-longhaul-s0.txt examples/LonghaulCC/flow-longhaul-s1.txt \
-              examples/LonghaulCC/flow-longhaul-s2.txt examples/LonghaulCC/flow-longhaul-s3.txt \
-              examples/LonghaulCC/flow-longhaul-s4.txt examples/LonghaulCC/flow-longhaul-s5.txt \
-  --stop-times 0.38 1.50 1.50 0.60 1.50 1.50 \
-  --runs 5 \
-  --output-root ../../results/longhaul-s0-s5
+python3 examples/LonghaulCC/run-longhaul-all.py --algorithms dcqcn proposed \
+  --flow-files examples/LonghaulCC/flow-longhaul-s2-scaled.txt \
+               examples/LonghaulCC/flow-longhaul-s3-scaled.txt \
+               examples/LonghaulCC/flow-longhaul-s5-scaled.txt \
+  --purpose transient --stop-times 0.18 --output-root /tmp/longhaul-scaled
+
+# 完整 R3，以及无本地竞争对照
+python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
+  --flow-files examples/LonghaulCC/flow-longhaul-r3-mechanism-control.txt \
+               examples/LonghaulCC/flow-longhaul-r3-mechanism.txt \
+  --r3-queue-mode history --stop-times 0.18 --output-root /tmp/r3-history
+
+# 只替换为旧快照队列；B 反应、预算、整形、失效条件完全相同
+python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
+  --flow-files examples/LonghaulCC/flow-longhaul-r3-mechanism.txt \
+  --r3-queue-mode snapshot --stop-times 0.18 --output-root /tmp/r3-snapshot
 ```
 
-该命令显式选择 S0–S5 的流文件和停止时间，共执行 6 场景 × 5 算法 × 5 次运行。
+已按实际 ECMP 验证机制路径共同经过 `81→79`，随后分别到 Leaf73/Leaf75；
+本地流只与 `0→41` 共享 `73→41`。仍可能通过共享源端、上游队列或 PFC 相互影响。
+不能把 B 看到的 CNP 自动归因于 B 内部。
 
-指定算法使用 `run-longhaul.py --algorithm <名称>`；全部算法使用 `run-longhaul-all.py`。
-两者都会保存配置快照、标准输出和运行元数据；已存在的数据目录不会被覆盖。
+runner 默认构建，保存源码内容哈希、Git HEAD/差异哈希、可执行文件及链接库哈希，
+运行前后检查源码与产物是否稳定。`--skip-build` 仅接受匹配的构建记录，否则要求正常构建。
+每次运行保留有效 `config.txt`、流/拓扑副本及其哈希、命令、用途和窗口；不覆盖历史结果。
+输出仍为 `results/longhaul-YYMMDD-HHMM/<scenario>/<algorithm>/seedconfig-runN/`。
+相同 seed/run 的重复不自动等于独立样本；本轮不进行大规模扫描或全面性能矩阵。
 
-主程序的 CLI 只包含 `--conf`、`--cc`、`--flow-file`、`--stop-time`、`--seed`、`--run`。
-参数优先级为：C++ 默认值 < 配置文件 < 显式命令行参数。runner 不改写原始配置文件，
-而是为每次运行生成包含输出路径的有效 `config.txt`；场景名从流文件名生成。
-包大小、速率、窗口、buffer、采样周期和 ECN map 等普通参数不再注册为命令行选项，
-统一放在 `config-longhaul.txt` 中维护。
+C++ CLI 保持 `--conf`、`--cc`、`--flow-file`、`--stop-time`、`--seed`、`--run`。
+旧快照开关为配置项 `PROPOSED_RECONSTRUCT 0`，默认 `1`，runner 的模式参数写入有效配置。
 
-## 5. 结果分析
-
-一次生成 `summary.csv`、`run-summary.csv` 和 `plots/` 下的图：
+## 5. 公共测量与分析
 
 ```bash
-python3 examples/LonghaulCC/analyze-longhaul.py \
-  --root ../../results/longhaul-260924-1520
+python3 examples/LonghaulCC/analyze-longhaul.py --root /tmp/longhaul-scaled
+python3 examples/LonghaulCC/plot-longhaul.py --root /tmp/longhaul-scaled --all-scenarios
 ```
 
-将示例时间戳替换为 runner 打印的实际目录。分析只读取运行元数据中
-`status=ok` 的目录，生成每流阶段的 `summary.csv`、每次运行的 `run-summary.csv` 和
-`plots/` 下的速率、收敛、DCI 队列/利用率、公平性、RTT 等图；失败运行的日志仍保留。
-若运行时指定了 `--output-root`，分析时应将 `--root` 设为同一目录。
+所有算法新增相同的公共记录，由 `longhaul-measurements.h` 实现：
 
-单次运行结果通常位于：
+- `metadata.json` 的 `flow_path_metrics` 包含实际有向 data/ACK 路径及容量，包括本地流。
+- `metadata.json.flow-state.csv`：实际发送序号高水位、TX payload、唯一 RX payload、首次供给结束及完成时刻。
+  TX 包含重传；供给结束取真实发送事件，不能用 ACK 尚未返回代替持续需求。
+- `metadata.json.queues.csv`：路径端口/PG 的队列与暂停采样；WAN、B 向内及其他端口有独立坐标。
+- `metadata.json.summary.json`：所有算法的预期/完成流数、逐流最终字节、全网准入丢弃及停止残留。
+  R3 另保留 `r3.summary.json` 同口径副本。
+- `buffer_resources`：每交换机共享池、逐端口每 PG headroom 及合计池大小。
 
-```text
-../../results/longhaul-YYMMDD-HHMM/<scenario>/<algorithm>/seedconfig-run<run>/
+分析输出：
+
+| 文件 | 口径 |
+|---|---|
+| `flow-summary.csv` | 每条流均保留，含未完成、重复 FCT、RX 残留及重传 payload |
+| `summary.csv` | 持续供给集合变化后的逐流阶段，参考目标、收敛/未收敛/不足窗口/不足样本 |
+| `run-summary.csv` | 未完成数量、资源门槛、可评估阶段数、未收敛比例；收敛中位数仅为已收敛子集 |
+| `direction-summary.csv` | A→B/B→A 分开，整段及预先定义窗口；队列最大值明确为采样最大值 |
+| 每运行的 `queue-window-summary.csv` | 按节点/端口/PG 分开，不合并 WAN、网关内向与其他队列 |
+| `scenario-validation.json` | 加入/退出/背景重叠与机制路径关系，失败明确保留 |
+| `r3-evidence.csv` | 按组去重预测值、A 组积压、最终/端口分配前限额、暂停及实际发送；按 `t+df` 对齐未来 B 队列 |
+
+公平参考采用有向链路约束下等权 max-min **payload** 速率，计入数据头和反向 ACK 的
+平均 wire 消耗；不包含重传、PFC/CNP/STATE 开销或窗口限制，不声称协议必然达到该参考。
+缺少路径时标记 `unavailable_reference`，不退回同向均分。
+供给结束后不再把该流作为持续需求流；此前已进入网络的在途/积压属于排空阶段。
+旧数据缺少公共最终计数时，不自动认证其完成或持续供给状态。
+
+预测误差只在有效快照下评估。未来 B 取首个不早于模型终点的样本，并保留实际采样时刻，
+因此误差包含采样偏差；不能拿 A 在 t 的预测直接与 B 在 t 的队列比较。
+对比模式必须检查 A 当时有积压、实际出队确有变化及其他限制；无收益或效果变差也应保留。
+
+## 6. 验收边界
+
+构建与小型确定性校验：
+
+```bash
+./ns3 build longhaul-convergence longhaul-r3-test -j2
+./ns3 run longhaul-r3-test --no-build
+python3 examples/LonghaulCC/test-longhaul-analysis.py
 ```
 
-未显式指定 `--seed` 时，目录名使用 `seedconfig`；显式指定时使用 `seed<值>`。
-每个目录保存有效 `config.txt`、`runner-metadata.json`、
-`metadata.json`、`stdout.log`，以及发送速率、接收 goodput、DCI、RTT、FCT、PFC CSV。
+`BUFFER_SIZE 50` 不是全系统总缓存：共享 50 MiB 之外还加入逐端口、逐 PG headroom。
+当前公式给出 WAN 每 PG 375,000,000 B、100 Gb/s 内部端口每 PG 56,250 B，未包含
+15 μs 接收处理延迟；本轮保留资源配置，没有凭经验重设 headroom 或调 R3 参数制造结果。
+持续负载已暴露准入丢弃，必须先核查暂停传播/处理及统一资源条件，再开展可信性能比较。
 
-## 6. 注意事项
-
-S0–S5 中原有的 1 TB 大流已调整为 3,000,000,000 B，低于当前 RDMA 数据序号的
-32 位上限。`sender-rate.csv` 的 payload TX 计入重传，接收 goodput 只计入按序有效 payload；
-无丢包场景完成后两者都应覆盖 flow size，有重传时 TX payload 可更大。FCT 参照值使用该 flow
-路径的 RTT 和实际 PPP packet header 序列化字节。运行大流场景时应使用上方对应的停止时间，
-并检查每条流均有完成记录以及接收 payload 与 flow size 闭合。
+1.50 s 等停止时间只作候选，必须依完成与残留检查；不能只排名完成子集。
+HPCC/TIMELY/Bifrost 还需各自在对应拥塞负载下验收，TIMELY 阈值不视作已标定。
+功能通过、场景关系成立、计算触发、实际执行差异和性能收益是不同层次的证据。
+本轮实测记录见 [场景修改验证记录](EXPERIMENT_VALIDATION.md)。
 
 ## Proposed R3（2026-09-29）
 

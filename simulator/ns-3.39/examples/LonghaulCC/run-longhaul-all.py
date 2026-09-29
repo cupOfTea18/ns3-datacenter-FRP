@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -69,6 +71,32 @@ def default_output_root(repo: Path) -> Path:
     return root
 
 
+def sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def source_identity(repo: Path) -> str:
+    paths = subprocess.check_output(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "simulator/ns-3.39"],
+        cwd=repo).split(b"\0")
+    digest = hashlib.sha256()
+    for raw in sorted(set(paths)):
+        path = repo / raw.decode()
+        if raw and path.is_file():
+            digest.update(raw + b"\0" + sha256(path).encode())
+    return digest.hexdigest()
+
+
+def artifacts(binary: Path, ns3: Path) -> dict[str, str]:
+    paths = {binary}
+    for line in subprocess.check_output(["ldd", str(binary)], text=True).splitlines():
+        for token in line.split():
+            if token.startswith(str(ns3 / "build")) and Path(token).is_file():
+                paths.add(Path(token))
+    return {str(p.relative_to(ns3)): sha256(p) for p in sorted(paths)}
+
+
 def main() -> int:
     here = Path(__file__).resolve().parent
     ns3 = here.parents[1]
@@ -91,6 +119,10 @@ def main() -> int:
                         help="number of RngRun values, starting at 1")
     parser.add_argument("--seed", type=int, default=None,
                         help="override RNG_SEED; omit to use C++/config value")
+    parser.add_argument("--purpose", choices=("transient", "completion"), default="transient",
+                        help="fixed-duration transient observation or finite-flow completion validation")
+    parser.add_argument("--r3-queue-mode", choices=("history", "snapshot"), default="history",
+                        help="only replace R3 queue reconstruction; all other control mechanisms stay enabled")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
@@ -121,6 +153,12 @@ def main() -> int:
     else:
         parser.error("--stop-times must contain one value or one value per --flow-files")
 
+    if args.purpose == "completion" and args.stop_times is None:
+        parser.error("completion experiments require an explicit common --stop-times")
+    if any(t is not None and t <= 0 for t in stop_times):
+        parser.error("stop times must be positive")
+    scenarios = json.loads((here / "experiment-scenarios.json").read_text())
+    topology_source = resolve_config_path(config_value(args.config, "TOPOLOGY_FILE"), ns3)
     planned_dirs = set()
     for flow_path in flow_paths:
         for algorithm in args.algorithms:
@@ -134,6 +172,7 @@ def main() -> int:
                     parser.error(f"run directory already contains data: {run_dir}")
 
     print(f"Output directory: {args.output_root}", flush=True)
+    source_before = source_identity(repo)
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"],
                        cwd=ns3, check=True)
@@ -141,7 +180,18 @@ def main() -> int:
     if not binary.is_file():
         raise SystemExit(f"simulator binary not found: {binary}; build it first")
 
+    build_record = ns3 / "build" / "longhaul-build-provenance.json"
+    current_build = {"source_sha256": source_identity(repo), "artifacts": artifacts(binary, ns3)}
+    if current_build["source_sha256"] != source_before:
+        raise SystemExit("source changed during build; rebuild from a stable workspace")
+    if args.skip_build:
+        if not build_record.is_file() or json.loads(build_record.read_text()) != current_build:
+            raise SystemExit("--skip-build has no matching source/binary/library record; run without --skip-build")
+    else:
+        build_record.write_text(json.dumps(current_build, indent=2) + "\n")
     commit = git_commit(repo)
+    diff = subprocess.check_output(["git", "diff", "HEAD", "--binary"], cwd=repo)
+    diff_sha256 = hashlib.sha256(diff).hexdigest()
     args.output_root.mkdir(parents=True, exist_ok=True)
     failures = []
     source_config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
@@ -152,8 +202,15 @@ def main() -> int:
                 seed_label = str(args.seed) if args.seed is not None else "config"
                 run_dir = args.output_root / label / algorithm / f"seed{seed_label}-run{run}"
                 run_dir.mkdir(parents=True, exist_ok=True)
+                input_copy = run_dir / flow_path.name
+                topology_copy = run_dir / topology_source.name
+                shutil.copyfile(flow_path, input_copy)
+                shutil.copyfile(topology_source, topology_copy)
                 effective_config_path = run_dir / "config.txt"
                 effective_config_text = render_config(args.config, {
+                    "FLOW_FILE": input_copy,
+                    "TOPOLOGY_FILE": topology_copy,
+                    "PROPOSED_RECONSTRUCT": int(args.r3_queue_mode == "history"),
                     "FCT_OUTPUT_FILE": run_dir / "fct.csv",
                     "PFC_OUTPUT_FILE": run_dir / "pfc.csv",
                     "RATE_OUTPUT_FILE": run_dir / "sender-rate.csv",
@@ -173,7 +230,7 @@ def main() -> int:
                     f"--run={run}",
                 ]
                 if args.flow_files is not None:
-                    command.append(f"--flow-file={flow_path}")
+                    command.append(f"--flow-file={input_copy}")
                 if args.seed is not None:
                     command.append(f"--seed={args.seed}")
                 if stop_time is not None:
@@ -212,6 +269,18 @@ def main() -> int:
                     except json.JSONDecodeError:
                         simulator_meta = {}
                 run_metadata = {
+                    "purpose": args.purpose,
+                    "stop_rule": "fixed common simulator stop time; no algorithm-specific early selection",
+                    "scenario_contract": scenarios.get(label, {}),
+                    "r3_queue_mode": args.r3_queue_mode if algorithm == "proposed" else None,
+                    "source_identity": current_build,
+                    "git_diff_sha256": diff_sha256,
+                    "source_stable_during_run": source_identity(repo) == source_before,
+                    "artifacts_stable_during_run": artifacts(binary, ns3) == current_build["artifacts"],
+                    "flow_sha256": sha256(input_copy),
+                    "topology_sha256": sha256(topology_copy),
+                    "original_flow_file": str(flow_path),
+                    "original_topology_file": str(topology_source),
                     "status": status,
                     "exit_code": return_code,
                     "error": error,
@@ -231,6 +300,23 @@ def main() -> int:
                     "command": command,
                     "created_at_utc": datetime.now(timezone.utc).isoformat(),
                 }
+                common_summary = run_dir / "metadata.json.summary.json"
+                if common_summary.is_file():
+                    summary = json.loads(common_summary.read_text())
+                    with (run_dir / "fct.csv").open() as stream:
+                        fct_rows = list(csv.DictReader(stream))
+                    identities = {tuple(r[k] for k in ("src", "dst", "sport", "dport", "pg")) for r in fct_rows}
+                    run_metadata["completion_valid"] = (
+                        summary["completed_flows"] == summary["expected_flows"] == len(fct_rows) == len(identities)
+                        and all(f["rx_payload_bytes"] == f["size_bytes"] and f["unique_sent_bytes"] == f["size_bytes"]
+                                for f in summary["flows"]))
+                    run_metadata["admission_drop_packets"] = summary["admission_drop_packets"]
+                else:
+                    run_metadata["completion_valid"] = False
+                if not run_metadata["source_stable_during_run"] or not run_metadata["artifacts_stable_during_run"]:
+                    run_metadata["status"] = status = "source_changed"
+                if args.purpose == "completion" and not run_metadata["completion_valid"]:
+                    failures.append(str(run_dir) + " (incomplete)")
                 (run_dir / "runner-metadata.json").write_text(
                     json.dumps(run_metadata, indent=2) + "\n"
                 )

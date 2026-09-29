@@ -98,22 +98,9 @@ void Setup() {
     NS_ABORT_MSG_IF(groups.empty(),"R3 requires cross-DC flows");
     for (uint32_t node:{dci_left,dci_right}) DynamicCast<DciGatewayNode>(n.Get(node))->Start();
 }
-void Finish() {
-    if (selected_cc!="proposed") return;
-    uint64_t drops=0, queued=0, completed=0;
-    for (const auto& f:flows) completed+=f.finished;
-    for (uint32_t i=0;i<n.GetN();++i) if (auto sw=DynamicCast<SwitchNode>(n.Get(i))) {
-        drops+=sw->m_admissionDropPackets;
-        for (uint32_t j=0;j<sw->GetNDevices();++j)
-            if (auto d=DynamicCast<QbbNetDevice>(sw->GetDevice(j))) queued+=d->GetQueue()->GetNBytesTotal();
-    }
-    std::ofstream summary(output+".summary.json");
-    NS_ABORT_MSG_IF(!summary,"cannot open R3 run summary");
-    summary << "{\"version\":3,\"expected_flows\":" << flows.size() << ",\"completed_flows\":" << completed
-        << ",\"admission_drop_packets\":" << drops << ",\"remaining_switch_queue_bytes\":" << queued << "}\n";
-}
 void WriteMetadata(std::ostream& out) {
     out << "  \"proposed_parameters\": {\"version\":3,\"enabled\":" << (selected_cc=="proposed" ? "true" : "false")
+        << ",\"reconstruct\":" << (config.reconstruct ? "true" : "false")
         << ",\"feedback_scope\":\"path ECN; no boundary isolation\",\"flow_identity\":\"registered IP/UDP ports/PG, no reuse\""
         << ",\"report_period_s\":" << config.period << ",\"control_period_s\":" << config.control
         << ",\"bin_width_s\":" << config.bin << ",\"reaction_window_s\":" << config.reaction

@@ -65,6 +65,17 @@ public:
               "empty past service must not cancel a later burst");
         history.Advance(100000000); Check(!history.Covers(0,100000000),"expired history must be rejected");
 
+        auto ablation=Gateway(true);
+        auto& group=ablation->m_groups.at(1);
+        group.have=true; group.snapshot.queue=1000000;
+        group.snapshot.service=1000000000; group.snapshot.budget=1000000000;
+        ablation->m_flows.at(1).budget=1000000000;
+        ablation->m_config.reconstruct=false; ablation->UpdateSource();
+        double oldTarget=group.target;
+        Check(group.queueUsed==1000000 && group.fresh,"snapshot ablation changed freshness/queue semantics");
+        ablation->m_config.reconstruct=true; ablation->UpdateSource();
+        Check(group.queueUsed==group.predicted && group.target>oldTarget,"history and old snapshot did not isolate queue estimate");
+
         auto a=Gateway(true,25);
         Snapshot(a,1,1); Check(!a->m_groups.at(1).have,"partial state applied");
         Snapshot(a,1,0); Check(a->m_groups.at(1).have && a->m_flows.at(25).budget==1025,"atomic fragmented state");

@@ -237,15 +237,15 @@ u_prev 是接收侧上次计算的目标，不是源侧已经执行的目标。�
 
 | 文件或函数 | 作用 |
 |---|---|
-| [longhaul-convergence.cc](../simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc) | 读取配置、选择算法、建立拓扑、加载流、调用 ResearchSetup，并记录实验元数据 |
-| [longhaul-research.h](../simulator/ns-3.39/examples/LonghaulCC/longhaul-research.h) | 控制状态、采样、预测、目标反馈、虚拟队列和 CNP 实现 |
+| [longhaul-convergence.cc](../../../simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc) | 读取配置、选择算法、建立拓扑、加载流、调用 ResearchSetup，并记录实验元数据 |
+| [longhaul-research.h](../../../simulator/ns-3.39/examples/LonghaulCC/longhaul-research.h) | 控制状态、采样、预测、目标反馈、虚拟队列和 CNP 实现 |
 | ResearchSetup | 绑定 trace，检查拓扑，初始化并启动定时器 |
 | ResearchSourceEnqueue / ResearchSource | 分别统计源侧跨域队列入队与出队字节 |
 | ResearchEnqueue / ResearchDequeue | 统计接收侧出口入队、出队及 ECN 标记观测 |
 | ResearchTelemetry / ResearchTarget | 接收延迟遥测或目标，更新对应状态 |
 | ResearchPredict / ResearchSample | 预测队列、计算目标并记录状态 |
 | ResearchNearSource / ResearchCnp | 更新虚拟队列、选择流并构造 CNP |
-| [run-research.py](../simulator/ns-3.39/examples/LonghaulCC/run-research.py) | 为同一 longhaul 程序生成小规模拓扑、配置和运行目录 |
+| [run-research.py](../../../simulator/ns-3.39/examples/LonghaulCC/run-research.py) | 为同一 longhaul 程序生成小规模拓扑、配置和运行目录 |
 
 头文件被入口程序包含，不是独立的 ns-3 模块。当前组状态采用全局变量保存，流识别依赖已加载的实验流列表，不是通用的动态流发现实现。
 
@@ -314,7 +314,7 @@ python3 simulator/ns-3.39/examples/LonghaulCC/run-research.py \
 
 ## 9. 已有验证与结论
 
-2026 年 9 月 22 日的 LonghaulCC 接入测试已完成编译和运行。上述 4 流场景中，proposed 与 DCQCN 均完成 4/4 条流；proposed 生成 91 个近源 CNP，元数据中的周期、阈值及预测权重符合预期。结果位于 [longhaul-proposed-20260922](../results/longhaul-proposed-20260922/finite/)。这次测试证明代码已接入并执行，不作为性能优势的完整验证。
+2026 年 9 月 22 日的 LonghaulCC 接入测试已完成编译和运行。上述 4 流场景中，proposed 与 DCQCN 均完成 4/4 条流；proposed 生成 91 个近源 CNP，元数据中的周期、阈值及预测权重符合预期。结果位于 [longhaul-proposed-20260922](../../../results/longhaul-proposed-20260922/finite)。这次测试证明代码已接入并执行，不作为性能优势的完整验证。
 
 此前统一实验中，8→1 incast 下 proposed 相比当时的 DCQCN 配置，FCT 中位数从 66.455 ms 降至 43.577 ms，但队列峰值从 21.380 MB 略增至 21.749 MB。关闭预测后的 FCT 为 43.542 ms，说明当前收益在没有预测项时也存在。动态减流实验还出现末段 goodput 仅约 17.78 Gbps 的恢复不足问题。
 
@@ -343,3 +343,6 @@ python3 simulator/ns-3.39/examples/LonghaulCC/run-research.py \
 第三步，记录预测发布时刻及对应的未来真实队列，计算按 H 对齐的误差。由于 H 可能不与采样周期整除，需明确插值或匹配规则，再考虑用平滑误差修正预测。该校准属于后续设计，当前公式中没有误差补偿项。
 
 在上述问题解释清楚后，再评估实际执行延迟估计、恢复机制及多流组扩展。近期实验应围绕这些具体假设开展，避免先增加大量参数或扩大拓扑。
+
+
+> 归档说明（2026-09-29）：本文保留旧版本设计与实验记录；文中的“当前”、TODO 和结果均对应原记录时期，不代表现行 R3。部分旧源码、结果及文献路径可能已失效。现行入口见 [文档索引](../../README.md)。

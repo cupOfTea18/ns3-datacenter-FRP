@@ -1,0 +1,147 @@
+{
+  "s2": {
+    "windows": [
+      [
+        "before_join",
+        0.01,
+        0.21
+      ],
+      [
+        "after_join",
+        0.21,
+        0.38
+      ]
+    ],
+    "purpose": "transient"
+  },
+  "s2-scaled": {
+    "windows": [
+      [
+        "after_join",
+        0.02,
+        0.06
+      ]
+    ],
+    "purpose": "transient",
+    "relation": "join",
+    "event_s": 0.02,
+    "persistent_flows": [
+      1
+    ],
+    "joining_flows": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ]
+  },
+  "s3-scaled": {
+    "windows": [
+      [
+        "competition",
+        0.01,
+        0.1
+      ],
+      [
+        "exit_observation",
+        0.1,
+        0.18
+      ]
+    ],
+    "purpose": "transient",
+    "relation": "exit",
+    "departing_flows": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "persistent_flows": [
+      8
+    ]
+  },
+  "s5-scaled": {
+    "windows": [
+      [
+        "probe_observation",
+        0.02,
+        0.075
+      ]
+    ],
+    "purpose": "transient",
+    "relation": "coexist",
+    "background_flows": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8
+    ],
+    "probe_flows": [
+      9,
+      10,
+      11,
+      12
+    ]
+  },
+  "r3-mechanism": {
+    "windows": [
+      [
+        "before_competition",
+        0.01,
+        0.03
+      ],
+      [
+        "after_competition",
+        0.03,
+        0.08
+      ]
+    ],
+    "purpose": "transient",
+    "persistent_flows": [
+      1,
+      2
+    ],
+    "relation": "mechanism",
+    "competitor_flows": [
+      3
+    ],
+    "event_s": 0.03,
+    "affected_flow": 1,
+    "unaffected_flow": 2,
+    "b_gateway": 81,
+    "target_link": [
+      73,
+      41
+    ]
+  },
+  "r3-mechanism-control": {
+    "windows": [
+      [
+        "before_competition",
+        0.01,
+        0.03
+      ],
+      [
+        "after_competition",
+        0.03,
+        0.08
+      ]
+    ],
+    "purpose": "transient",
+    "persistent_flows": [
+      1,
+      2
+    ],
+    "relation": "control"
+  }
+}

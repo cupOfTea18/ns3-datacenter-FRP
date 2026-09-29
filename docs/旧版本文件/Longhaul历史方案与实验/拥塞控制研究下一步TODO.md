@@ -19,7 +19,7 @@
 
 **为什么做：** 先确定差异发生在哪一层，避免针对错误原因改算法。
 
-- [ ] 打开 [join 总览图](../results/research-20260917/pilot/figures/join-overview.png)，标出新流加入、队列上升、首次丢包、发送下降、吞吐恢复的时间。
+- [ ] 打开 [join 总览图](../../../results/research-20260917/pilot/figures/join-overview.png)，标出新流加入、队列上升、首次丢包、发送下降、吞吐恢复的时间。
 - [ ] 对比 reactive-cnp 和 predictive-cnp 的目标、CNP、发送、队列轨迹，不只比较最终均值。
 - [ ] 列出吞吐空洞的时间区间，检查该区间流是否仍有数据可发；有限流完成后的空闲不算退化。
 - [ ] 写下三个待解释问题：为什么预测目标不同但效果相同？为什么近源版本仍间歇停发？哪些收益可能只是来自预配置的100Gbps组容量？
@@ -45,7 +45,7 @@
 
 **完成标准：** 至少追踪一次目标下降和一次恢复全过程；能将一次吞吐空洞定位到具体状态，而不是笼统称为“收敛慢”。
 
-**代码入口：** [longhaul-research.h](../simulator/ns-3.39/examples/PowerTCP/longhaul-research.h)、[rdma-hw.cc](../simulator/ns-3.39/src/point-to-point/model/rdma-hw.cc)。
+**代码入口：** [longhaul-research.h](../../../simulator/ns-3.39/examples/PowerTCP/longhaul-research.h)、[rdma-hw.cc](../../../simulator/ns-3.39/src/point-to-point/model/rdma-hw.cc)。
 
 ### P0-3：单独验证近源执行器能否跟踪目标
 
@@ -177,10 +177,13 @@
 
 ## 文件入口
 
-- [实验入口](../simulator/ns-3.39/examples/PowerTCP/longhaul-convergence.cc)
-- [研究控制逻辑](../simulator/ns-3.39/examples/PowerTCP/longhaul-research.h)
-- [实验运行器](../simulator/ns-3.39/examples/PowerTCP/run-research.py)
-- [统计与绘图](../simulator/ns-3.39/examples/PowerTCP/analyze-research.py)
-- [现有数值结果](../results/research-20260917/pilot/metrics.csv)
+- [实验入口](../../../simulator/ns-3.39/examples/PowerTCP/longhaul-convergence.cc)
+- [研究控制逻辑](../../../simulator/ns-3.39/examples/PowerTCP/longhaul-research.h)
+- [实验运行器](../../../simulator/ns-3.39/examples/PowerTCP/run-research.py)
+- [统计与绘图](../../../simulator/ns-3.39/examples/PowerTCP/analyze-research.py)
+- [现有数值结果](../../../results/research-20260917/pilot/metrics.csv)
 
 本清单中的目标阶跃、固定目标消融、执行事件日志和本地竞争场景需要后续实现；现有脚本不会自动完成这些待办。
+
+
+> 归档说明（2026-09-29）：本文保留旧版本设计与实验记录；文中的“当前”、TODO 和结果均对应原记录时期，不代表现行 R3。部分旧源码、结果及文献路径可能已失效。现行入口见 [文档索引](../../README.md)。

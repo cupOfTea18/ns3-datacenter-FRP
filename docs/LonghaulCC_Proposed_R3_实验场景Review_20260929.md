@@ -32,7 +32,7 @@
 | [dci-gateway-node.cc](../simulator/ns-3.39/src/point-to-point/model/dci-gateway-node.cc) | B 反应、服务估计、A 预测与发送预算 |
 | [PROPOSED_R3_IMPLEMENTATION.md](../simulator/ns-3.39/examples/LonghaulCC/PROPOSED_R3_IMPLEMENTATION.md) | 当前实现说明；其中的测试记录另由已有结果核验 |
 | [README.md](../simulator/ns-3.39/examples/LonghaulCC/README.md) | 运行方式、建议时长；命令示例不代表已执行 |
-| [研究实验计划-20260917.md](研究实验计划-20260917.md) | 旧版研究背景，不能作为当前 R3 实现或结果依据 |
+| [研究实验计划-20260917.md](旧版本文件/Longhaul历史方案与实验/研究实验计划-20260917.md) | 旧版研究背景，不能作为当前 R3 实现或结果依据 |
 
 必要时还检查了当前拓扑、S0–S5 流文件、runner、分析脚本，以及 `results/r3-validation-20260929-160143` 的原始记录。
 
@@ -150,7 +150,7 @@ TIMELY 的 10.3/11 ms 阈值与约 10.228 ms 基础 RTT 数量级相符，可作
 
 ### 4.3 历史材料边界
 
-`docs/研究实验计划-20260917.md:44–52` 描述旧版小拓扑、直连接收出口和旧控制方式。其统计合同可参考，但已勾选任务、18 次运行、reactive/predictive 对照不能作为 R3 已完成消融的依据。
+`docs/旧版本文件/Longhaul历史方案与实验/研究实验计划-20260917.md:44–52` 描述旧版小拓扑、直连接收出口和旧控制方式。其统计合同可参考，但已勾选任务、18 次运行、reactive/predictive 对照不能作为 R3 已完成消融的依据。
 
 2026-09-24 的 version 2 结果同样不能直接作为当前 R3 结果。当前 R3 未提交源码与已有二进制是否逐字对应，也不能仅凭 runner 记录的 HEAD 确认。
 

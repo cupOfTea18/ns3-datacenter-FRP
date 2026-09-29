@@ -67,7 +67,7 @@ void DciGatewayNode::Configure(const Config& c,const std::string& output) {
     const auto prefix=output+".gateway-"+std::to_string(GetId());
     m_log.open(prefix+".csv"); m_events.open(prefix+".events.csv"); m_packets.open(prefix+".packets.csv");
     NS_ABORT_MSG_IF(!m_log || !m_events || !m_packets,"cannot open R3 logs");
-    m_log << "time_s,node,role,group,flow,generation,queue_bytes,peak_group_bytes,in_bytes,tx_bytes,alpha,reaction_bps,budget_bps,target_bps,service_bps,predicted_queue_bytes,snapshot_seq,snapshot_age_s,active,cnp_count,decrease_count,control_tx_bytes,control_rx_bytes,rejected,unmatched_cnp,admission_drops\n";
+    m_log << "time_s,node,role,group,flow,generation,queue_bytes,peak_group_bytes,in_bytes,tx_bytes,alpha,reaction_bps,budget_bps,target_bps,service_bps,predicted_queue_bytes,snapshot_seq,snapshot_age_s,active,cnp_count,decrease_count,control_tx_bytes,control_rx_bytes,rejected,unmatched_cnp,admission_drops,snapshot_time_s,snapshot_queue_bytes,prediction_end_s,queue_used_bytes,group_target_bps,pre_port_target_bps,paused,snapshot_valid,reconstruct\n";
     m_events << "time_s,event,object,value\n";
     m_packets << "time_ns,role,group,flow,bytes,queue_bytes\n";
 }
@@ -270,6 +270,7 @@ void DciGatewayNode::UpdateSource() {
         g.history.Advance(nowNs);
         bool fresh=g.have && now-g.snapshot.sample*1e-9<=m_config.timeout &&
             g.history.Covers(int64_t(g.snapshot.sample)-Seconds(g.delay).GetNanoSeconds(),nowNs);
+        g.fresh=fresh;
         double sum=0;
         for (auto id:g.flows) {
             auto& f=m_flows.at(id); f.active=f.in>f.tx || (!f.closed && now>=f.reg.start);
@@ -281,12 +282,14 @@ void DciGatewayNode::UpdateSource() {
         if (fresh) {
             g.predicted=g.history.Predict(g.snapshot.sample,Seconds(g.delay).GetNanoSeconds(),nowNs,
                                           g.snapshot.queue,g.snapshot.service);
+            g.queueUsed=m_config.reconstruct ? g.predicted : double(g.snapshot.queue);
             cap=std::min({sum,double(g.snapshot.budget),std::max(0.0,double(g.snapshot.service)-
-                 std::max(0.0,g.predicted-m_config.qref)/m_config.tau)});
+                 std::max(0.0,g.queueUsed-m_config.qref)/m_config.tau)});
         } else if (g.have) {
             // Stale/incomplete reports never authorize a rate increase.
             cap=std::min(g.target,Port(g.port)->GetDataRate().GetBitRate()/8.0*m_config.fallback);
         }
+        g.unconstrained=cap;
         desired[g.id]=cap; byPort[g.port].push_back(g.id);
     }
     for (const auto& entry:byPort) {
@@ -410,7 +413,10 @@ void DciGatewayNode::Tick() {
                 << f.target*8 << ',' << (g.source ? g.snapshot.service : g.service)*8 << ',' << g.predicted << ','
                 << g.snapshot.seq << ',' << (g.have ? now-g.snapshot.sample*1e-9 : -1) << ',' << f.active << ','
                 << f.cnps << ',' << f.decreases << ',' << m_controlTx << ',' << m_controlRx << ',' << m_rejected << ','
-                << m_unmatched << ',' << m_admissionDropPackets << '\n';
+                << m_unmatched << ',' << m_admissionDropPackets << ',' << g.snapshot.sample*1e-9
+                << ',' << g.snapshot.queue << ',' << now+g.delay << ',' << g.queueUsed
+                << ',' << g.target*8 << ',' << g.unconstrained*8 << ',' << Port(g.port)->IsQueuePaused(g.pg)
+                << ',' << g.fresh << ',' << m_config.reconstruct << '\n';
         }
     }
     m_otherTx.clear();
