@@ -101,6 +101,7 @@ void Setup() {
 void WriteMetadata(std::ostream& out) {
     out << "  \"proposed_parameters\": {\"version\":3,\"enabled\":" << (selected_cc=="proposed" ? "true" : "false")
         << ",\"reconstruct\":" << (config.reconstruct ? "true" : "false")
+        << ",\"shaper_ecn\":" << (config.shaperEcn ? "true" : "false")
         << ",\"feedback_scope\":\"path ECN; no boundary isolation\",\"flow_identity\":\"registered IP/UDP ports/PG, no reuse\""
         << ",\"report_period_s\":" << config.period << ",\"control_period_s\":" << config.control
         << ",\"bin_width_s\":" << config.bin << ",\"reaction_window_s\":" << config.reaction

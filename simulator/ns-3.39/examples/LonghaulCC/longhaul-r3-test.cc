@@ -5,6 +5,10 @@
 #include "ns3/qbb-channel.h"
 #include "ns3/ipv4-header.h"
 #include "ns3/simulator.h"
+#include "ns3/qbb-helper.h"
+#include "ns3/internet-stack-helper.h"
+#include "ns3/ipv4-address-helper.h"
+#include "ns3/string.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -47,7 +51,33 @@ class DciGatewayTestCase {
         g->ReceiveSnapshot(p,h);
     }
 public:
+    static void PfcRefreshRegression() {
+        auto sender=CreateObject<SwitchNode>(), peer=CreateObject<SwitchNode>();
+        NodeContainer nodes; nodes.Add(sender); nodes.Add(peer);
+        InternetStackHelper().Install(nodes);
+        QbbHelper helper;
+        helper.SetDeviceAttribute("DataRate",StringValue("100Gbps"));
+        helper.SetChannelAttribute("Delay",TimeValue(MicroSeconds(1)));
+        auto devices=helper.Install(nodes);
+        Ipv4AddressHelper address; address.SetBase("10.0.0.0","255.255.255.0"); address.Assign(devices);
+        auto tx=DynamicCast<QbbNetDevice>(devices.Get(0));
+        auto rx=DynamicCast<QbbNetDevice>(devices.Get(1));
+        uint32_t port=tx->GetIfIndex();
+        sender->m_mmu->xoffUsed[port][3]=1;
+        sender->CheckAndSendPfc(port,3);
+        Simulator::Schedule(MicroSeconds(20),[sender,rx,port]() {
+            Check(rx->IsQueuePaused(3),"ordinary PFC expired while congestion persisted");
+            sender->m_mmu->xoffUsed[port][3]=0;
+            sender->CheckAndSendResume(port,3);
+        });
+        Simulator::Schedule(MicroSeconds(30),[sender,rx]() {
+            Check(!rx->IsQueuePaused(3),"ordinary PFC did not resume after drain");
+            Check(sender->m_pfcRefresh.empty(),"PFC refresh survived explicit resume");
+        });
+        Simulator::Run(); Simulator::Destroy();
+    }
     static void Run() {
+        PfcRefreshRegression();
         auto rates=DciGatewayNode::Allocate({20,60},72);
         Check(rates[0]==20 && rates[1]==52,"capped max-min allocation");
         rates=DciGatewayNode::Allocate({0,20,60},100);
@@ -66,6 +96,16 @@ public:
         history.Advance(100000000); Check(!history.Covers(0,100000000),"expired history must be rejected");
 
         auto ablation=Gateway(true);
+        CustomHeader data(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header);
+        data.l3Prot=0x11; data.sip=1; data.dip=2; data.udp.sport=10001;
+        data.udp.dport=20001; data.udp.pg=3; data.udp.seq=0;
+        auto packet=Create<Packet>(1000); packet->AddHeader(data);
+        Check(ablation->ShouldMarkEcn(0,packet),"legacy shaping ECN must remain default");
+        ablation->m_config.shaperEcn=false;
+        Check(!ablation->ShouldMarkEcn(0,packet),"registered shaping queue still marks ECN");
+        Check(ablation->ShouldMarkEcn(1,packet),"ECN disabled on unrelated egress");
+        data.udp.sport=999; packet=Create<Packet>(1000); packet->AddHeader(data);
+        Check(ablation->ShouldMarkEcn(0,packet),"ECN disabled for unregistered traffic");
         auto& group=ablation->m_groups.at(1);
         group.have=true; group.snapshot.queue=1000000;
         group.snapshot.service=1000000000; group.snapshot.budget=1000000000;

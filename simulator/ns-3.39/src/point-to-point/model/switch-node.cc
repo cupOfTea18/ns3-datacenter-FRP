@@ -169,17 +169,39 @@ Ptr<QbbNetDevice>  SwitchNode::GetOutDevice(Ptr< Packet> p, CustomHeader &ch) {
 
 void SwitchNode::CheckAndSendPfc(uint32_t inDev, uint32_t qIndex) {
     if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority) return;
-	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
 	if (m_mmu->CheckShouldPause(inDev, qIndex)) {
-		device->SendPfc(qIndex, 0);
-		// std::cout << "sending PFC" << std::endl;
 		m_mmu->SetPause(inDev, qIndex);
+		RefreshPfc(inDev, qIndex);
 	}
 }
+
+void SwitchNode::RefreshPfc(uint32_t inDev, uint32_t qIndex) {
+	// The peer expires each pause. Renew while the MMU still requests it,
+	// including periods with no new arrivals. Bifrost owns its separate timer.
+	auto device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
+	UintegerValue duration;
+	device->GetAttribute("PauseTime", duration);
+	NS_ABORT_MSG_IF(duration.Get() == 0, "ordinary PFC requires a positive PauseTime");
+	device->SendPfc(qIndex, 0);
+	m_pfcRefresh[{inDev, qIndex}] = Simulator::Schedule(
+		NanoSeconds(duration.Get() * 1000 / 2), &SwitchNode::RefreshPfc, this, inDev, qIndex);
+}
+
+void SwitchNode::DoDispose() {
+	for (const auto& entry : m_pfcRefresh) Simulator::Cancel(entry.second);
+	m_pfcRefresh.clear();
+	Node::DoDispose();
+}
+
 void SwitchNode::CheckAndSendResume(uint32_t inDev, uint32_t qIndex) {
     if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority) return;
 	Ptr<QbbNetDevice> device = DynamicCast<QbbNetDevice>(m_devices[inDev]);
 	if (m_mmu->CheckShouldResume(inDev, qIndex)) {
+		auto pending = m_pfcRefresh.find({inDev, qIndex});
+		if (pending != m_pfcRefresh.end()) {
+			Simulator::Cancel(pending->second);
+			m_pfcRefresh.erase(pending);
+		}
 		device->SendPfc(qIndex, 1);
 		m_mmu->SetResume(inDev, qIndex);
 	}
@@ -337,7 +359,7 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize(), found);
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize(), found);
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
-        if (m_ecnEnabled)
+        if (m_ecnEnabled && ShouldMarkEcn(ifIndex, p))
         {
             bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
             if (egressCongested)

@@ -372,9 +372,14 @@ uint64_t BifrostMinimumBufferBytes(Ptr<QbbNetDevice> dev) {
 
 uint64_t ConfiguredHeadroomBytes(Ptr<QbbNetDevice> dev) {
 	uint64_t rate_bps = dev->GetDataRate().GetBitRate();
-	uint64_t delay_ns = DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetNanoSeconds();
-	return static_cast<uint64_t>(static_cast<__uint128_t>(rate_bps) * delay_ns * 3 /
-	                             (8ULL * 1000000000ULL));
+	auto channel = DynamicCast<QbbChannel>(dev->GetChannel());
+	auto peer = DynamicCast<QbbNetDevice>(channel->GetDevice(channel->GetDevice(0) == dev ? 1 : 0));
+	// Keep the existing three-propagation-delay allowance, but include both
+	// receive pipelines: the peer processes PAUSE and this port processes data
+	// already on the wire. Receive() delays PFC as well as ordinary packets.
+	uint64_t delay_ns = 3 * channel->GetDelay().GetNanoSeconds() +
+		dev->GetReceiveDelay().GetNanoSeconds() + peer->GetReceiveDelay().GetNanoSeconds();
+	return DivideRoundUp(static_cast<__uint128_t>(rate_bps) * delay_ns, 8ULL * 1000000000ULL);
 }
 
 void ConfigureBifrostDciPort(uint32_t node_id, Ptr<QbbNetDevice> dev) {
@@ -882,6 +887,7 @@ void ParseConfig(std::istream &config) {
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
 		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
 		else if (key == "PROPOSED_RECONSTRUCT") ReadConfigValue(config, key, Proposed::config.reconstruct);
+		else if (key == "PROPOSED_SHAPER_ECN") ReadConfigValue(config, key, Proposed::config.shaperEcn);
 		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::config.period);
 		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::config.control);
 		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::config.bin);
@@ -1163,7 +1169,9 @@ int main(int argc, char *argv[])
 			}
 			sw->m_mmu->SetBufferPool(buffer_size * 1024 * 1024 + totalHeadroom);
 			sw->m_mmu->SetIngressPool(buffer_size * 1024 * 1024);
-			sw->m_mmu->SetEgressLosslessPool(buffer_size * 1024 * 1024);
+			// Lossless packets occupy both ingress and egress accounting. Allow
+			// the already provisioned headroom through egress admission as well.
+			sw->m_mmu->SetEgressLosslessPool(buffer_size * 1024 * 1024 + totalHeadroom);
 			sw->m_mmu->node_id = sw->GetId();
 		}
 	}

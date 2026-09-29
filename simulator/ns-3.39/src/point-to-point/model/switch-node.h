@@ -30,6 +30,8 @@ class SwitchNode : public Node{
 	double m_u[pCnt];
 
 protected:
+	void DoDispose() override;
+	virtual bool ShouldMarkEcn(uint32_t port, Ptr<const Packet> packet) { return true; }
 	bool m_ecnEnabled;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
@@ -83,6 +85,9 @@ protected:
 	std::map<uint32_t, uint32_t> m_prevQBytes;
 
 private:
+	friend class DciGatewayTestCase;
+	std::map<std::pair<uint32_t, uint32_t>, EventId> m_pfcRefresh;
+	void RefreshPfc(uint32_t inDev, uint32_t qIndex);
 	int GetOutDev(Ptr<const Packet>, CustomHeader &ch);
 	Ptr<QbbNetDevice> GetOutDevice(Ptr<Packet> p, CustomHeader &ch);
 	void SendToDev(Ptr<Packet>p, CustomHeader &ch);

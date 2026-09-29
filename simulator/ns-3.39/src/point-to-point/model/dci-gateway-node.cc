@@ -110,6 +110,13 @@ DciGatewayNode::Flow* DciGatewayNode::Match(Ptr<const Packet> p) {
     auto it=m_data.find({h.sip,h.dip,h.udp.sport,h.udp.dport,h.udp.pg});
     return it==m_data.end() ? nullptr : &m_flows.at(it->second);
 }
+bool DciGatewayNode::ShouldMarkEcn(uint32_t port, Ptr<const Packet> packet) {
+    if (!m_enabled || m_config.shaperEcn) return true;
+    auto flow=Match(packet);
+    // Only omit NEW marks from registered shaping queues. Existing ECN bits
+    // survive, and unregistered traffic/other egresses retain ordinary ECN.
+    return !flow || flow->reg.port!=port;
+}
 uint32_t DciGatewayNode::Classify(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t pg) {
     auto f=self->Match(p); return f && f->reg.port==port ? f->queue : pg;
 }

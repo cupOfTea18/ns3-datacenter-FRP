@@ -144,6 +144,10 @@ runner 默认构建，保存源码内容哈希、Git HEAD/差异哈希、可执�
 
 C++ CLI 保持 `--conf`、`--cc`、`--flow-file`、`--stop-time`、`--seed`、`--run`。
 旧快照开关为配置项 `PROPOSED_RECONSTRUCT 0`，默认 `1`，runner 的模式参数写入有效配置。
+另有实验候选 `PROPOSED_SHAPER_ECN 0`：只省略已注册 A/B 整形队列的新增 ECN，
+保留已有标记、普通交换机 ECN、近源 CNP、STATE 和 PFC。默认 `1` 保留原标记行为。
+该候选在两个机制场景 seed 改善跨域 FCT，但历史重建未显示稳定增量收益，
+且 seed 1 仍慢于 DCQCN；配置、对照和负结果见 [R3 实测改进记录](R3_EVALUATION_20260929.md)。
 
 ## 5. 公共测量与分析
 
@@ -159,6 +163,7 @@ python3 examples/LonghaulCC/plot-longhaul.py --root /tmp/longhaul-scaled --all-s
   TX 包含重传；供给结束取真实发送事件，不能用 ACK 尚未返回代替持续需求。
 - `metadata.json.queues.csv`：路径端口/PG 的队列与暂停采样；WAN、B 向内及其他端口有独立坐标。
 - `metadata.json.summary.json`：所有算法的预期/完成流数、逐流最终字节、全网准入丢弃及停止残留。
+  `remaining_mmu_bytes`、`remaining_mmu_egress_bytes` 额外检查 MMU 总量与出口记账是否清空。
   R3 另保留 `r3.summary.json` 同口径副本。
 - `buffer_resources`：每交换机共享池、逐端口每 PG headroom 及合计池大小。
 
@@ -195,9 +200,12 @@ python3 examples/LonghaulCC/test-longhaul-analysis.py
 ```
 
 `BUFFER_SIZE 50` 不是全系统总缓存：共享 50 MiB 之外还加入逐端口、逐 PG headroom。
-当前公式给出 WAN 每 PG 375,000,000 B、100 Gb/s 内部端口每 PG 56,250 B，未包含
-15 μs 接收处理延迟；本轮保留资源配置，没有凭经验重设 headroom 或调 R3 参数制造结果。
-持续负载已暴露准入丢弃，必须先核查暂停传播/处理及统一资源条件，再开展可信性能比较。
+当前 headroom 保留 `3×传播时延` 裕量并加入两端实际接收处理延迟；默认 WAN 每 PG
+375,750,000 B、100 Gb/s 内部端口每 PG 431,250 B。总池和无损出口池均包含 headroom，
+共享 ingress 池仍为 50 MiB。普通 PFC 在 MMU 要求暂停期间每半个暂停周期续发，
+显式恢复时停止；Bifrost 专属端口/PG 沿用自身周期逻辑。
+这些修改来自实测丢弃定位，不构成普遍无损保证。历史资源设置和逐轮失败/对照记录见
+[R3 实测改进记录](R3_EVALUATION_20260929.md)，其他负载和 baseline 须在新资源条件下重新验收。
 
 1.50 s 等停止时间只作候选，必须依完成与残留检查；不能只排名完成子集。
 HPCC/TIMELY/Bifrost 还需各自在对应拥塞负载下验收，TIMELY 阈值不视作已标定。

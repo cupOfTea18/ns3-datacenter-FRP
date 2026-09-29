@@ -35,7 +35,8 @@ void WriteResources(std::ostream& out) {
             out << (comma ? "," : "") << "{\"port\":" << j << ",\"peer\":" << Proposed::Peer(d)
                 << ",\"headroom_per_pg_bytes\":" << h << ",\"pg_count\":8}"; comma=true;
         }
-        out << "],\"buffer_pool_bytes\":" << uint64_t(buffer_size)*1024*1024+headroom << '}'; first=false;
+        out << "],\"buffer_pool_bytes\":" << uint64_t(buffer_size)*1024*1024+headroom
+            << ",\"egress_lossless_pool_bytes\":" << uint64_t(buffer_size)*1024*1024+headroom << '}'; first=false;
     }
     out << "],\n";
 }
@@ -66,17 +67,20 @@ void StartMeasurements() {
 }
 void Finish() {
     Sample(); // exact stop-time counters, including the final partial interval
-    uint64_t drops=0,queued=0,completed=0;
+    uint64_t drops=0,queued=0,completed=0,mmuBytes=0,egressBytes=0;
     for (const auto& f:flows) completed+=f.finished;
     for (uint32_t i=0;i<n.GetN();++i) if (auto sw=DynamicCast<SwitchNode>(n.Get(i))) {
         drops+=sw->m_admissionDropPackets;
+        mmuBytes+=sw->m_mmu->totalUsed;
+        egressBytes+=sw->m_mmu->egressPoolUsed[0]+sw->m_mmu->egressPoolUsed[1];
         for (uint32_t j=0;j<sw->GetNDevices();++j)
             if (auto d=DynamicCast<QbbNetDevice>(sw->GetDevice(j))) queued+=d->GetQueue()->GetNBytesTotal();
     }
     auto write=[&](const std::string& path) {
         std::ofstream out(path); NS_ABORT_MSG_IF(!out,"cannot open run summary");
         out << "{\"expected_flows\":" << flows.size() << ",\"completed_flows\":" << completed
-            << ",\"admission_drop_packets\":" << drops << ",\"remaining_switch_queue_bytes\":" << queued << ",\"flows\":[";
+            << ",\"admission_drop_packets\":" << drops << ",\"remaining_switch_queue_bytes\":" << queued
+            << ",\"remaining_mmu_bytes\":" << mmuBytes << ",\"remaining_mmu_egress_bytes\":" << egressBytes << ",\"flows\":[";
         for (size_t i=0;i<flows.size();++i) {
             const auto& f=flows[i]; auto rx=FindRxQp(f);
             out << (i ? "," : "") << "{\"flow\":" << i+1 << ",\"size_bytes\":" << f.size_bytes

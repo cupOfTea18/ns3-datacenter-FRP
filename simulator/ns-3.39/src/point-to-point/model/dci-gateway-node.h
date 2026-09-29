@@ -17,6 +17,7 @@ public:
     static TypeId GetTypeId();
     struct Config {
         bool reconstruct=true;
+        bool shaperEcn=true;
         double period=0.0002, control=0.00005, bin=0.00005;
         double reaction=0.00005, gamma=0.0625, recovery=0.0002;
         double probeRate=125000000, increase=625000000, utilization=0.98;
@@ -43,6 +44,7 @@ public:
 
 protected:
     void DoDispose() override;
+    bool ShouldMarkEcn(uint32_t port, Ptr<const Packet> packet) override;
 
 private:
     friend class DciGatewayTestCase;
