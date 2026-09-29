@@ -274,7 +274,6 @@ void
 QbbNetDevice::DoDispose()
 {
     Simulator::Cancel(m_shapeWake);
-    m_linkControlReceive = Callback<bool, Ptr<const Packet>>();
     m_groupClassifier = Callback<uint32_t, Ptr<const Packet>, uint32_t>();
 	NS_LOG_FUNCTION(this);
 
@@ -332,11 +331,6 @@ void QbbNetDevice::UpdateShapeTokens(QueueShaper& shaper) {
     shaper.tokens=std::min(double(shaper.burst),shaper.tokens+shaper.rate*(now-shaper.updated).GetSeconds());
     shaper.updated=now;
 }
-void QbbNetDevice::ConfigureQueueShaper(uint32_t queue,double rate,uint32_t burst) {
-    m_defaultShapeQueue=queue;
-    ConfigureGroupShaper(queue,queue,rate,burst);
-}
-void QbbNetDevice::SetQueueShaperRate(double rate) { SetGroupShaperRate(m_defaultShapeQueue,rate); }
 void QbbNetDevice::ConfigureGroupShaper(uint32_t queue,uint32_t priority,double rate,uint32_t burst) {
     NS_ABORT_MSG_IF(priority==0 || priority>=qCnt || burst==0 || m_shapers.count(queue),"invalid/repeated shaper");
     m_queue->ConfigureLogicalQueue(queue,priority);
@@ -577,7 +571,6 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 	}
 
 	m_macRxTrace(packet);
-	if (!m_linkControlReceive.IsNull() && m_linkControlReceive(packet)) return;
 
 	CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
 	ch.getInt = 1; // parse INT header

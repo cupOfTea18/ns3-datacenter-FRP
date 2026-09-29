@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
 import time
@@ -14,7 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-DEFAULT_ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "frp", "rocc", "proposed")
+#DEFAULT_ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "frp", "rocc", "proposed")
+DEFAULT_ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "proposed")
 
 
 def git_commit(repo: Path) -> str:
@@ -59,6 +59,16 @@ def resolve_config_path(raw_path: str, ns3: Path) -> Path:
     return path.resolve() if path.is_absolute() else (ns3 / path).resolve()
 
 
+def default_output_root(repo: Path) -> Path:
+    name = "longhaul-" + datetime.now().strftime("%y%m%d-%H%M")
+    root = repo / "results" / name
+    suffix = 2
+    while root.exists():
+        root = repo / "results" / f"{name}-{suffix}"
+        suffix += 1
+    return root
+
+
 def main() -> int:
     here = Path(__file__).resolve().parent
     ns3 = here.parents[1]
@@ -66,7 +76,8 @@ def main() -> int:
     default_config = here / "config-longhaul.txt"
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-root", type=Path, default=repo / "results" / "longhaul")
+    parser.add_argument("--output-root", type=Path, default=None,
+                        help="result directory; default: results/longhaul-YYMMDD-HHMM")
     parser.add_argument("--config", type=Path, default=default_config,
                         help="full simulator config file")
     parser.add_argument("--flow-files", nargs="+", type=Path, default=None,
@@ -84,7 +95,7 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
 
-    args.output_root = args.output_root.resolve()
+    args.output_root = (args.output_root or default_output_root(repo)).resolve()
     args.config = args.config.resolve()
     if not args.config.is_file():
         parser.error("config file not found: " + str(args.config))
@@ -122,6 +133,7 @@ def main() -> int:
                 if run_dir.exists() and any(run_dir.iterdir()):
                     parser.error(f"run directory already contains data: {run_dir}")
 
+    print(f"Output directory: {args.output_root}", flush=True)
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"],
                        cwd=ns3, check=True)
@@ -140,7 +152,6 @@ def main() -> int:
                 seed_label = str(args.seed) if args.seed is not None else "config"
                 run_dir = args.output_root / label / algorithm / f"seed{seed_label}-run{run}"
                 run_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(args.config, run_dir / "config.snapshot.txt")
                 effective_config_path = run_dir / "config.txt"
                 effective_config_text = render_config(args.config, {
                     "FCT_OUTPUT_FILE": run_dir / "fct.csv",
@@ -150,6 +161,7 @@ def main() -> int:
                     "LINK_STATS_OUTPUT_FILE": run_dir / "dci-link.csv",
                     "RTT_OUTPUT_FILE": run_dir / "measured-rtt.csv",
                     "SUMMARY_META_FILE": run_dir / "metadata.json",
+                    "PROPOSED_OUTPUT": run_dir / "r3",
                 })
                 effective_config_path.write_text(effective_config_text)
                 effective_config_hash = hashlib.sha256(effective_config_text.encode()).hexdigest()
@@ -206,6 +218,8 @@ def main() -> int:
                     "wall_clock_seconds": wall_seconds,
                     "algorithm": simulator_meta.get("algorithm", algorithm),
                     "cc_mode": simulator_meta.get("cc_mode"),
+                    "proposed_version": (simulator_meta.get("proposed_parameters", {}).get("version")
+                                         if algorithm == "proposed" else None),
                     "scenario": simulator_meta.get("scenario", label.upper()),
                     "seed": simulator_meta.get("rng_seed", args.seed if args.seed is not None
                                                else config_value(args.config, "RNG_SEED")),

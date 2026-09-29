@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 
 
-ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "frp", "rocc", "proposed")
-
+#ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "frp", "rocc", "proposed")
+ALGORITHMS = ("dcqcn", "hpcc", "timely", "bifrost", "proposed")
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

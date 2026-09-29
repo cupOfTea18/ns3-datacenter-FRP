@@ -11,7 +11,7 @@
 - Bifrost：`bifrost`
 - FRP：`frp`
 - RoCC：`rocc`
-- Proposed R2：`proposed`
+- Proposed R3：`proposed`
 
 RoCC 在 40/100 Gbps 链路上使用论文参数。论文未给出 200 Gbps 参数；当前实现按
 带宽比例放大 `Qref/Qmid/Qmax`，并保留 100 Gbps 的 PI 基础增益，该策略会写入运行元数据。
@@ -100,11 +100,15 @@ python3 examples/LonghaulCC/run-longhaul-all.py
 ```
 
 默认使用公共配置中的 S0 流文件和 0.38 s 停止时间，依次运行 DCQCN、HPCC、TIMELY、
-Bifrost、FRP、RoCC、Proposed，每种算法运行一次。结果写到仓库根目录的：
+Bifrost、Proposed，每种算法运行一次。结果写到仓库根目录的：
 
 ```text
-results/longhaul/
+results/longhaul-260924-1520/
 ```
+
+目录名使用启动时的本地时间，格式为 `longhaul-YYMMDD-HHMM`；同一分钟内再次运行
+会依次加上 `-2`、`-3`。runner 启动时会打印实际输出目录。显式传入
+`--output-root` 时使用指定目录，已有运行数据仍不会被覆盖。
 
 ### 4.3 指定场景、算法和重复次数
 
@@ -130,7 +134,7 @@ python3 examples/LonghaulCC/run-longhaul-all.py \
   --output-root ../../results/longhaul-s0-s5
 ```
 
-该命令显式选择 S0–S5 的流文件和停止时间，共执行 6 场景 × 7 算法 × 5 次运行。
+该命令显式选择 S0–S5 的流文件和停止时间，共执行 6 场景 × 5 算法 × 5 次运行。
 
 指定算法使用 `run-longhaul.py --algorithm <名称>`；全部算法使用 `run-longhaul-all.py`。
 两者都会保存配置快照、标准输出和运行元数据；已存在的数据目录不会被覆盖。
@@ -147,22 +151,22 @@ python3 examples/LonghaulCC/run-longhaul-all.py \
 
 ```bash
 python3 examples/LonghaulCC/analyze-longhaul.py \
-  --root ../../results/longhaul
+  --root ../../results/longhaul-260924-1520
 ```
 
-这里的 `../../results/longhaul` 与默认 runner 的输出目录相同。分析只读取运行元数据中
+将示例时间戳替换为 runner 打印的实际目录。分析只读取运行元数据中
 `status=ok` 的目录，生成每流阶段的 `summary.csv`、每次运行的 `run-summary.csv` 和
 `plots/` 下的速率、收敛、DCI 队列/利用率、公平性、RTT 等图；失败运行的日志仍保留。
-若运行时指定了其他 `--output-root`，分析时应将 `--root` 设为同一目录。
+若运行时指定了 `--output-root`，分析时应将 `--root` 设为同一目录。
 
 单次运行结果通常位于：
 
 ```text
-../../results/longhaul/<scenario>/<algorithm>/seedconfig-run<run>/
+../../results/longhaul-YYMMDD-HHMM/<scenario>/<algorithm>/seedconfig-run<run>/
 ```
 
 未显式指定 `--seed` 时，目录名使用 `seedconfig`；显式指定时使用 `seed<值>`。
-每个目录保存 `config.snapshot.txt`、有效 `config.txt`、`runner-metadata.json`、
+每个目录保存有效 `config.txt`、`runner-metadata.json`、
 `metadata.json`、`stdout.log`，以及发送速率、接收 goodput、DCI、RTT、FCT、PFC CSV。
 
 ## 6. 注意事项
@@ -173,29 +177,34 @@ S0–S5 中原有的 1 TB 大流已调整为 3,000,000,000 B，低于当前 RDMA
 路径的 RTT 和实际 PPP packet header 序列化字节。运行大流场景时应使用上方对应的停止时间，
 并检查每条流均有完成记录以及接收 payload 与 flow size 闭合。
 
-## Proposed R2（2026-09-24）
+## Proposed R3（2026-09-29）
 
-`--cc=proposed` 仅运行 R2。核心位于 `longhaul-proposed.h`：接收端周期 STATE、
-源端固定分箱发送历史、单一速率公式和逐包 FIFO 整形。旧 Proposed/R1 实现、
-旧算法入口和旧配置键已删除；历史设计文档保留。
+`--cc=proposed` 运行 R3，RNIC 保留 DCQCN。两个 DCI 创建为 `DciGatewayNode`，
+普通 Leaf/Spine 仍为 `SwitchNode`。网关复用交换机转发、ECN、MMU 和 PFC；
+专属逐流状态、CNP 反应、预算分配、消息与预测放在 `dci-gateway-node.{h,cc}`。
+`longhaul-r3.h` 只负责路径验证、连接注册、配置及实验输出接线。
 
-源端使用 `u=min(F,Csource,max(0,Ceff-x-max(0,qhat-qref)/tau))`，不叠加恢复斜坡、
-危险状态控制或虚拟队列。RNIC 仍为 DCQCN。主程序仍只有原六项 CLI，控制参数
-统一放在 `PROPOSED_*` 配置项中；旧 `R1_*` / `RESEARCH_*` 会明确报未知配置键。
+B 按实际向内出口和 PG 分组，合并同一反应窗口内的逐流 CNP，以有界加性方式恢复，
+对同一物理端口的各组联合分配预算。B 反馈自己的跨域队列及逐流预算。
+A 用 WAN 出口实际出队字节分箱重建远端积压，仅在 A 执行排空扣减，并分配逐流限额。
+两端均使用共享有限缓存内的逐流逻辑队列；限速流不会阻塞其他可发送流，物理 PG 暂停仍有效。
 
-三项消融使用同一整形/CNP：`proposed-static` 静态上限，`proposed-reactive` 旧快照
-反应，`proposed-extrapolate` 接收测得速率的常值外推。没有重新保留旧控制器。
-这些消融通过配置项 `PROPOSED_PREDICTOR` 选择，不是独立的 `--cc` 算法。
+当前 RNIC 主要通过 ACK/NACK 的 CNP 标志反馈；网关同时识别该标志和独立 CNP，
+原报文继续转发。未隔离上游 ECN，因此这些事件属于**路径拥塞反馈**，不代表精确定位 B 内部瓶颈。
+快照和需求消息经过真实路由，超过 24 条流记录时分片，接收端校验序号和注册代次后完整应用。
 
-当前源码会沿流的路径识别 DCI 和接收主机的出口，在多跳路径上建立控制组。
-观测点为接收 Leaf 的主机出口；STATE 和 CNP 经过真实多跳路由。多接收主机独立分组，
-双向 WAN 独立分配速率，各组共用原物理 PG/MMU。S0–S5 缩小流量回归均完成，含 S4
-的16条双向流；S4出现公共 headroom 不足导致的丢包，完整规模性能尚未验收。
+默认 runner 将 R3 输出前缀隔离为每次运行目录下的 `r3`：
 
-默认情况下，Proposed 控制日志写入该运行目录的 `metadata.json.control.csv`；
-同名前缀的 `.receiver.csv`、`.events.csv`、`.packets.csv`、`.receiver-events.csv`
-分别保存接收统计、STATE/CNP/目标更新及离线逐包数据。这些逐包 CSV 不进入在线控制器。
-`metadata.json` 的 `proposed_parameters.version=2`，其 `groups` 数组包含各组位置、有效时延和历史存储大小。
-其余发送率、goodput、RTT、FCT、PFC 日志保留。
+- `r3.gateway-<node>.csv`：逐流队列、预算、实际字节、预测值、反馈及拒绝计数。
+- `r3.gateway-<node>.events.csv`：快照、反应、恢复、水位和近源 CNP 事件。
+- `r3.gateway-<node>.packets.csv`：两端实际发送记录，仅用于离线核验。
+- `r3.paths.csv`：流、组和真实数据路径。
+- `r3.summary.json`：完成数、全网 admission drops、停止时交换机剩余队列。
 
-多跳适配、边界及验证记录见 [R2 实现说明](PROPOSED_R2_IMPLEMENTATION.md)。
+`metadata.json` 中 `proposed_parameters.version=3`，记录参数、网关角色及分组。
+直接运行 C++ 而未指定 `PROPOSED_OUTPUT` 时，前缀为 `metadata.json.control.csv`。
+原有 FCT、goodput、RTT、发送率和 PFC 输出继续保留，CLI 仍只有原六项。
+
+R2 控制器及 `PROPOSED_PREDICTOR`、`PROPOSED_WAN_FRACTION`、`PROPOSED_EPSILON`
+已删除，旧配置键会报错。历史研究文档及历史实验结果不改写为 R3 结果。
+实现边界、参数单位与验证命令见 [R3 实现说明](PROPOSED_R3_IMPLEMENTATION.md)。

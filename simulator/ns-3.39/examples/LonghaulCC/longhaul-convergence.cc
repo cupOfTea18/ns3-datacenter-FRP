@@ -35,6 +35,8 @@
 #include <ns3/rdma-client-helper.h>
 #include <ns3/rdma-driver.h>
 #include <ns3/switch-node.h>
+#include <ns3/dci-gateway-node.h>
+#include <ns3/ppp-header.h>
 #include <ns3/sim-setting.h>
 
 using namespace ns3;
@@ -436,6 +438,9 @@ void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
 	}
 	FlushRttSamples(q, fi, Simulator::Now().GetNanoSeconds(), true);
 	fi->finished = true;
+	if (selected_cc == "proposed")
+		for (uint32_t id : {dci_left, dci_right})
+			DynamicCast<DciGatewayNode>(n.Get(id))->CompleteFlow(uint32_t(fi - flows.data()) + 1);
 }
 
 void qp_finish(Ptr<RdmaQueuePair> q) {
@@ -681,7 +686,7 @@ void SampleDciLink() {
 		Simulator::Schedule(MicroSeconds(rate_sample_interval_us), &SampleDciLink);
 }
 
-#include "longhaul-proposed.h"
+#include "longhaul-r3.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 	uint64_t dci_rate = dci_left_device->GetDataRate().GetBitRate();
@@ -856,18 +861,24 @@ void ParseConfig(std::istream &config) {
 		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
 		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
-		else if (key == "PROPOSED_PREDICTOR") ReadConfigValue(config, key, Proposed::predictor);
-		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::period);
-		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::delta);
-		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::binWidth);
-		else if (key == "PROPOSED_QREF") ReadConfigValue(config, key, Proposed::qref);
-		else if (key == "PROPOSED_TAU") ReadConfigValue(config, key, Proposed::tau);
-		else if (key == "PROPOSED_SOURCE_HIGH") ReadConfigValue(config, key, Proposed::sourceHigh);
-		else if (key == "PROPOSED_SOURCE_LOW") ReadConfigValue(config, key, Proposed::sourceLow);
-		else if (key == "PROPOSED_UTILIZATION") ReadConfigValue(config, key, Proposed::utilization);
-		else if (key == "PROPOSED_WAN_FRACTION") ReadConfigValue(config, key, Proposed::wanFraction);
-		else if (key == "PROPOSED_EPSILON") ReadConfigValue(config, key, Proposed::epsilon);
-		else if (key == "PROPOSED_CNP_INTERVAL") ReadConfigValue(config, key, Proposed::cnpInterval);
+		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::config.period);
+		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::config.control);
+		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::config.bin);
+		else if (key == "PROPOSED_QREF") ReadConfigValue(config, key, Proposed::config.qref);
+		else if (key == "PROPOSED_TAU") ReadConfigValue(config, key, Proposed::config.tau);
+		else if (key == "PROPOSED_SOURCE_HIGH") ReadConfigValue(config, key, Proposed::config.sourceHigh);
+		else if (key == "PROPOSED_SOURCE_LOW") ReadConfigValue(config, key, Proposed::config.sourceLow);
+		else if (key == "PROPOSED_UTILIZATION") ReadConfigValue(config, key, Proposed::config.utilization);
+		else if (key == "PROPOSED_CNP_INTERVAL") ReadConfigValue(config, key, Proposed::config.cnpInterval);
+		else if (key == "PROPOSED_REACTION_WINDOW") ReadConfigValue(config, key, Proposed::config.reaction);
+		else if (key == "PROPOSED_GAMMA") ReadConfigValue(config, key, Proposed::config.gamma);
+		else if (key == "PROPOSED_RECOVERY_PERIOD") ReadConfigValue(config, key, Proposed::config.recovery);
+		else if (key == "PROPOSED_PROBE_RATE") ReadConfigValue(config, key, Proposed::config.probeRate);
+		else if (key == "PROPOSED_RATE_INCREASE") ReadConfigValue(config, key, Proposed::config.increase);
+		else if (key == "PROPOSED_PROBE_BYTES") ReadConfigValue(config, key, Proposed::config.probeBytes);
+		else if (key == "PROPOSED_STATE_TIMEOUT") ReadConfigValue(config, key, Proposed::config.timeout);
+		else if (key == "PROPOSED_FALLBACK_FRACTION") ReadConfigValue(config, key, Proposed::config.fallback);
+		else if (key == "PROPOSED_REPORT_MIN_INTERVAL") ReadConfigValue(config, key, Proposed::config.reportMin);
 		else NS_FATAL_ERROR("longhaul: unknown config key: " << key);
 	}
 }
@@ -996,7 +1007,9 @@ int main(int argc, char *argv[])
 			n.Add(CreateObject<Node>());
 			continue;
 		}
-		Ptr<SwitchNode> sw = CreateObject<SwitchNode>();
+		Ptr<SwitchNode> sw;
+		if (i == dci_left || i == dci_right) sw = CreateObject<DciGatewayNode>();
+		else sw = CreateObject<SwitchNode>();
 		sw->SetNodeType(node_type[i]);
 		sw->SetAttribute("EcnEnabled", BooleanValue(enable_qcn));
 		n.Add(sw);
@@ -1273,6 +1286,7 @@ int main(int argc, char *argv[])
 	NS_LOG_INFO("Run Simulation.");
 	Simulator::Stop(Seconds(simulator_stop_time));
 	Simulator::Run();
+	Proposed::Finish();
 	Simulator::Destroy();
 	sender_rate_file.close();
 	receiver_goodput_file.close();

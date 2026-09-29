@@ -15,7 +15,7 @@
 | Bifrost | `bifrost` |
 | FRP | `frp` |
 | RoCC | `rocc` |
-| Proposed R2 | `proposed` |
+| Proposed R3 | `proposed` |
 
 所有算法共用同一拓扑、流文件、包大小、PFC/ECN、buffer、采样周期和
 `RngSeed/RngRun`。HPCC 使用 INT，TIMELY 使用 RTT 时间戳，这是算法本身的反馈机制。
@@ -28,7 +28,7 @@
 | --- | --- |
 | 旧队列分布监控、ToR Power 打印 | 删除；队列统一由 `dci-link.csv` 采样 |
 | 链路故障注入和动态重路由 | 删除；本阶段拓扑是固定基线 |
-| 默认运行算法 | DCQCN/HPCC/TIMELY/Bifrost/FRP/RoCC/Proposed |
+| 默认运行算法 | DCQCN/HPCC/TIMELY/Bifrost/Proposed |
 | 先临时分配 IP、再 BFS 划分 DC、最后回填 | 节点创建后一次性按 node ID 分配唯一地址 |
 | 逐条读取并递归调度流文件 | 一次性读入流清单，再按 `start_time` 调度 |
 | 配置项静默忽略 | 只接受 longhaul 支持的配置键，未知键直接失败 |
@@ -69,16 +69,17 @@ config-longhaul.txt
 
 ## 4. 快速开始
 
-以下命令从 `simulator/ns-3.39` 目录执行：
+以下命令从 `~/newCode/ns3-FRP/simulator/ns-3.39$` 目录执行：
 
 ```bash
 ./ns3 build longhaul-convergence -j2
 python3 examples/LonghaulCC/run-longhaul-all.py
-python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul
+python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul-260924-1520
 ```
 
 默认运行配置文件中的 S0，每种算法 1 个 `RngRun`。短时启动通过不代表算法完成
-和收敛。完整矩阵需要
+和收敛。默认输出目录带本地时间戳 `YYMMDD-HHMM`，分析命令中的示例时间戳应换成
+runner 打印的实际目录；同一分钟重复运行会加 `-2`、`-3`。完整矩阵需要
 通过命令行显式传入 S0--S5 的 flow 文件和停止时间：
 
 ```bash
@@ -91,7 +92,7 @@ python3 examples/LonghaulCC/run-longhaul-all.py \
               examples/LonghaulCC/flow-longhaul-s5.txt \
   --stop-times 0.38 1.50 1.50 0.60 1.50 1.50 \
   --runs 5
-python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul
+python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul-260924-1520
 ```
 
 只跑指定组合：
@@ -99,11 +100,11 @@ python3 examples/LonghaulCC/analyze-longhaul.py --root ../../results/longhaul
 ```bash
 python3 examples/LonghaulCC/run-longhaul.py \
   --algorithm dcqcn \
-  --config examples/LonghaulCC/config-longhaul-common.txt \
+  --config examples/LonghaulCC/config-longhaul.txt \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt examples/LonghaulCC/flow-longhaul-s2.txt \
   --stop-times 0.38 1.50 \
   --runs 1 \
-  --output-root /tmp/longhaulconfig-longhaul.txt
+  --output-root /tmp/longhaul-selected
 ```
 
 `--stop-times 0.03` 仅适合检查启动、文件输出和崩溃，不适合做收敛结论：
@@ -111,11 +112,11 @@ python3 examples/LonghaulCC/run-longhaul.py \
 ```bash
 python3 examples/LonghaulCC/run-longhaul.py \
   --algorithm dcqcn \
-  --config examples/LonghaulCC/config-longhaul-common.txt \
+  --config examples/LonghaulCC/config-longhaul.txt \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
   --stop-times 0.03 --skip-build --output-root /tmp/longhaul-smoke
 ```
-config-longhaul.txt
+
 runner 会编译（除非 `--skip-build`）、创建输出目录、保存配置快照和记录 git
 commit。仿真失败或超时会使 runner 最终返回非零状态。
 
@@ -156,7 +157,7 @@ src dst pg dport size_bytes start_time_seconds
 
 ### 5.3 公共配置
 
-`config-longhaul-common.txt` 保留程序的完整实验参数，便于审阅和复现；C++ 默认值
+`config-longhaul.txt` 保留程序的完整实验参数，便于审阅和复现；C++ 默认值
 只作为配置文件缺省项。切换场景时通过 `--flow-file` 读取不同流文件、通过
 `--stop-time` 设置对应的停止时间，不再创建每个场景的三行配置文件。程序根据
 flow 文件名自动生成场景名，例如 `flow-longhaul-s0.txt` 对应 `S0`。runner 不修改原始
@@ -189,10 +190,9 @@ flow 文件名自动生成场景名，例如 `flow-longhaul-s0.txt` 对应 `S0`�
 一次运行的目录结构为：
 
 ```text
-results/longhaul/
+results/longhaul-260924-1520/
 └── s0/dcqcn/seed1-run1/
     ├── config.txt
-    ├── config.snapshot.txt
     ├── runner-metadata.json
     ├── metadata.json
     ├── stdout.log
@@ -220,8 +220,8 @@ results/longhaul/
   路径瓶颈、BDP 和窗口；
 - `config.txt`：该 run 实际交给 C++ 程序读取的完整配置文件，包含输出路径等由
   runner 设置的普通参数；
-- `config.snapshot.txt`：runner 使用的原始完整配置文件。`cc`、flow、停止时间、
-  seed/run 等六个命令行入口记录在 `runner-metadata.json` 的 `command` 中，同时记录
+- `runner-metadata.json`：在 `command` 中记录完整运行命令，包括配置路径、算法及显式传入的
+  flow、停止时间、seed/run 等参数，同时记录
   hash、git commit 和 wall-clock 时间。
 
 ## 7. 分析口径
@@ -296,3 +296,20 @@ python3 -m py_compile \
 ```
 
 完成代码修改后，先用 S0 做短时启动检查，再按正式停止时间运行所需场景。
+
+## 10. Proposed R3
+
+`--algorithm proposed` 已切换为 R3，仍保留源 RNIC DCQCN。
+参数在 `config-longhaul.txt` 的 `PROPOSED_*` 项中，速率单位为 **byte/s**，时间为秒；
+目前是未标定的实现默认值。R3 的逐流与控制日志按每次运行目录隔离，前缀为 `r3`。
+先检查 `r3.summary.json` 的完成数、全网丢包和剩余队列，再分析性能。
+进程成功退出不代表流全部完成；大流需要按总字节数与瓶颈容量设置足够停止时间。
+
+构建及确定性回归：
+
+```bash
+./ns3 build longhaul-convergence longhaul-r3-test -j2
+./ns3 run longhaul-r3-test --no-build
+```
+
+详细职责、限制和输出字段见 [R3 实现说明](PROPOSED_R3_IMPLEMENTATION.md)。

@@ -12,3 +12,9 @@ build_example(
     ${libapplications}
 )
 set_source_files_properties(cdf.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
+build_example(
+  NAME longhaul-r3-test
+  SOURCE_FILES longhaul-r3-test.cc
+  LIBRARIES_TO_LINK ${libpoint-to-point} ${libinternet}
+)

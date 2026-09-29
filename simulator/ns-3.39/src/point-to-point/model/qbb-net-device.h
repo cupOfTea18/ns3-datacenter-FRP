@@ -114,9 +114,7 @@ public:
 
 
   DataRate GetDataRate();
-  // Optional per-priority switch shaper. The existing FIFO/MMU owns all packets.
-  void ConfigureQueueShaper(uint32_t queue, double bytesPerSecond, uint32_t burst);
-  void SetQueueShaperRate(double bytesPerSecond);
+  // Logical flow queues retain the shared physical PG/MMU accounting.
   void ConfigureGroupShaper(uint32_t groupQueue, uint32_t priority, double rate, uint32_t burst);
   void SetGroupShaperRate(uint32_t groupQueue, double rate);
   Callback<uint32_t, Ptr<const Packet>, uint32_t> m_groupClassifier;
@@ -125,8 +123,7 @@ public:
   Time GetQueuePauseTime(uint32_t queue) const {
       return m_pauseTotal[queue] + (m_paused[queue] ? Simulator::Now()-m_pauseStarted[queue] : Time(0));
   }
-  // A link-local protocol may consume a received frame after link error checking.
-  Callback<bool, Ptr<const Packet>> m_linkControlReceive;
+
 
 
   /**
@@ -228,7 +225,6 @@ protected:
       Time updated;
   };
   std::map<uint32_t, QueueShaper> m_shapers;
-  uint32_t m_defaultShapeQueue=0;
   Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
   EventId m_shapeWake;
   void UpdateShapeTokens(QueueShaper& shaper);

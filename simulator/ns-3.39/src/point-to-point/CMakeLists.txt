@@ -34,6 +34,7 @@ build_lib(
     model/rdma-hw.cc
     model/rdma-queue-pair.cc
     model/switch-mmu.cc
+    model/dci-gateway-node.cc
     model/switch-node.cc
     model/frp-rate-calculator.cc
     helper/qbb-helper.cc
@@ -55,6 +56,7 @@ build_lib(
     model/rdma-hw.h
     model/rdma-queue-pair.h
     model/switch-mmu.h
+    model/dci-gateway-node.h
     model/switch-node.h
     model/frp-rate-calculator.h
     model/trace-format.h
