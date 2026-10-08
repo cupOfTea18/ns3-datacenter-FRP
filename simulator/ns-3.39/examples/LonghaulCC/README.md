@@ -22,8 +22,36 @@ RoCC 在 40/100 Gbps 链路上使用论文参数。论文未给出 200 Gbps 参�
 所有命令默认在 ns-3.39 根目录执行：
 
 ```bash
-cd /home/shemuping/newCode/ns3-FRP/simulator/ns-3.39
+cd /home/smp/Code/ns3-datacenter-FRP/simulator/ns-3.39
 ```
+
+### 本机路径适配
+
+`run-longhaul.py` 根据脚本所在位置自动定位 ns-3 和项目根目录，项目移动后无需修改
+脚本中的绝对路径。`run-longhaul-all.py` 逐个调用它，并为所有算法使用同一个结果根目录。
+
+| 路径 | 解析规则及本机位置 |
+|---|---|
+| ns-3 根目录 | 自动定位为 `/home/smp/Code/ns3-datacenter-FRP/simulator/ns-3.39` |
+| 默认配置 | 自动定位脚本同目录的 `config-longhaul.txt` |
+| 配置中的 `TOPOLOGY_FILE` / `FLOW_FILE` | 相对 ns-3 根目录；当前 `examples/LonghaulCC/...` 无需修改 |
+| 命令行 `--config` / `--flow-files` | 绝对路径直接使用；相对路径先查启动目录，再查 ns-3 根目录 |
+| runner 默认结果目录 | 项目根目录下的 `results/longhaul-YYMMDD-HHMM/` |
+| 命令行 `--output-root` | 自定义结果目录；相对路径以启动目录为基准 |
+| 配置中的各项 `*_OUTPUT_FILE` / `SUMMARY_META_FILE` / `PROPOSED_OUTPUT` | runner 自动改写为本次运行目录下的绝对路径 |
+
+也可从项目根目录启动，例如：
+
+```bash
+python3 simulator/ns-3.39/examples/LonghaulCC/run-longhaul.py --algorithm dcqcn \
+  --flow-files examples/LonghaulCC/flow-longhaul-s0.txt --stop-times 0.03
+```
+
+直接使用 `./ns3 run` 时，配置中的相对输入和输出路径以 ns-3 根目录为基准，
+输出目录需预先创建：`mkdir -p results/longhaul`。这里的结果位于
+`simulator/ns-3.39/results/longhaul/`，与 runner 的项目级结果目录不同。
+
+仓库 `run_scripts/` 中还有旧程序的绝对路径，但它们不参与 LonghaulCC 运行链。
 
 ## 2. 网络拓扑
 
@@ -63,22 +91,31 @@ examples/LonghaulCC/topology-longhaul.txt
 
 ## 3. 编译
 
-编译主程序：
+首次下载后，先配置为 runner 使用的 optimized 构建，再编译主程序：
 
 ```bash
+./ns3 configure --build-profile=optimized --enable-examples --disable-tests \
+  --disable-python-bindings --disable-werror
 ./ns3 build longhaul-convergence -j2
 ```
+
+需要 CMake 3.10 或以上、C/C++ 编译器及 Make 或 Ninja。LonghaulCC 是 C++ 程序，
+无需开启 ns-3 Python bindings；Python runner 已兼容本机 Python 3.10 的文件哈希计算。
+若提示 `CMake not found`，Ubuntu 可通过 `sudo apt install cmake` 安装后重试。
 
 另有 `longhaul-r3-test` 确定性控制器回归目标。
 
 ## 4. 运行用途与场景
 
-默认配置为 **S2、DCQCN、0.38 s 瞬态观察**。`run-longhaul-all.py` 默认依次运行
+默认配置为 **S0、DCQCN、0.38 s 瞬态观察**。`run-longhaul-all.py` 默认依次运行
 DCQCN、HPCC、TIMELY、Bifrost、Proposed，每种一次；这不是完整 FCT 验收或已标定的比较矩阵。
 S2 后加入的七条 3 GB 流只剩 0.17 s，物理上不足以全部完成。
 
-执行链：`run-longhaul.py` → `run-longhaul-all.py` → `longhaul-convergence.cc` →
+批量执行链：`run-longhaul-all.py` → `run-longhaul.py` → `longhaul-convergence.cc` →
 路径注册/网关控制/公共测量 → `analyze-longhaul.py` → `plot-longhaul.py`。
+单算法直接从 `run-longhaul.py` 开始。批量运行首次调用默认构建，后续调用自动使用
+`--skip-build` 跳过编译并复用现有程序；显式指定 `--skip-build` 时，首次调用也跳过编译。
+批量入口的其他实验参数转交单算法入口，完整说明见 `run-longhaul.py --help`。
 不迁移到仓库 `run_scripts/run_single_*` 旧入口。
 
 ```bash
@@ -136,9 +173,9 @@ python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
 本地流只与 `0→41` 共享 `73→41`。仍可能通过共享源端、上游队列或 PFC 相互影响。
 不能把 B 看到的 CNP 自动归因于 B 内部。
 
-runner 默认构建，保存源码内容哈希、Git HEAD/差异哈希、可执行文件及链接库哈希，
-运行前后检查源码与产物是否稳定。`--skip-build` 仅接受匹配的构建记录，否则要求正常构建。
-每次运行保留有效 `config.txt`、流/拓扑副本及其哈希、命令、用途和窗口；不覆盖历史结果。
+runner 默认构建；`--skip-build` 仅跳过编译并使用现有程序，修改 C++ 代码后需重新构建。
+每次运行保留有效 `config.txt`、输入文件路径及哈希、命令、用途和窗口；不覆盖历史结果。
+生成的配置直接引用原始流量和拓扑文件，不复制输入，也不记录 Git 信息或检查源码/构建产物哈希。
 输出仍为 `results/longhaul-YYMMDD-HHMM/<scenario>/<algorithm>/seedconfig-runN/`。
 相同 seed/run 的重复不自动等于独立样本；本轮不进行大规模扫描或全面性能矩阵。
 
