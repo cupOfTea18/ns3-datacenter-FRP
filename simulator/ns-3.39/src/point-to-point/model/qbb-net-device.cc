@@ -235,6 +235,8 @@ QbbNetDevice::GetTypeId(void)
 	                                   PointerValue (),
 	                                   MakePointerAccessor (&QbbNetDevice::m_rdmaEQ),
 	                                   MakePointerChecker<Object> ())
+	                    .AddTraceSource ("QbbAdmitted", "Successful logical queue admission (packet, logical queue, PG).",
+                                         MakeTraceSourceAccessor (&QbbNetDevice::m_traceAdmitted), "ns3::Packet::TracedCallback")
 	                    .AddTraceSource ("QbbEnqueue", "Enqueue a packet in the QbbNetDevice.",
 	                                     MakeTraceSourceAccessor (&QbbNetDevice::m_traceEnqueue), "ns3::Packet::TracedCallback")
 	                    .AddTraceSource ("QbbDequeue", "Dequeue a packet in the QbbNetDevice.",
@@ -344,6 +346,48 @@ void QbbNetDevice::SetGroupShaperRate(uint32_t queue,double rate) {
     Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
 }
 
+void QbbNetDevice::UpdateProbeTokens() {
+    auto now=Simulator::Now();
+    m_probeTokens=std::min(double(m_probeBurst),m_probeTokens+m_probeRate*(now-m_probeUpdated).GetSeconds());
+    m_probeUpdated=now;
+}
+double QbbNetDevice::GetProbeTokens() { UpdateProbeTokens(); return m_probeTokens; }
+void QbbNetDevice::ConfigureProbeBucket(double rate,uint64_t burst) {
+    NS_ABORT_MSG_IF(!std::isfinite(rate) || rate<=0 || !burst || m_probeBurst,"invalid/repeated probe bucket");
+    for (const auto& e:m_shapers)
+        NS_ABORT_MSG_IF(burst<e.second.burst,"probe bucket cannot hold maximum frame");
+    m_probeRate=rate; m_probeBurst=burst; m_probeTokens=burst; m_probeUpdated=Simulator::Now();
+}
+QbbNetDevice::ProbeCounters QbbNetDevice::GetProbeCounters(uint32_t queue) const {
+    return m_shapers.at(queue).grant;
+}
+void QbbNetDevice::GrantProbeBytes(uint32_t queue,uint64_t epoch,uint64_t bytes) {
+    NS_ABORT_MSG_IF(!m_shapers.count(queue) || !epoch || !bytes || !m_probeBurst,"invalid probe grant");
+    auto& g=m_shapers.at(queue).grant;
+    if (epoch<=g.epoch) return; // Delayed/duplicate grants cannot refresh the allowance.
+    g.epoch=epoch; g.remaining=bytes;
+    Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
+}
+void QbbNetDevice::ApplyQueueControls(const std::vector<QueueControl>& controls) {
+    NS_ABORT_MSG_IF(controls.size()!=m_shapers.size(),"batch must include every registered queue");
+    std::set<uint32_t> seen;
+    double sum=0;
+    for (const auto& c:controls) {
+        NS_ABORT_MSG_IF(!m_shapers.count(c.queue) || !seen.insert(c.queue).second ||
+            !std::isfinite(c.bytesPerSec) || c.bytesPerSec<0 || (c.probe && !m_probeBurst),
+            "invalid queue control batch");
+        sum+=c.bytesPerSec;
+    }
+    NS_ABORT_MSG_IF(!std::isfinite(sum) || sum>GetDataRate().GetBitRate()/8.0+1e-6,"batch exceeds physical capacity");
+    UpdateProbeTokens();
+    for (const auto& c:controls) {
+        auto& s=m_shapers.at(c.queue); UpdateShapeTokens(s);
+        s.rate=c.bytesPerSec; s.probe=c.probe;
+        if (!s.rate) s.tokens=0;
+    }
+    Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
+}
+
 void
 QbbNetDevice::DequeueAndTransmit(void)
 {
@@ -412,15 +456,22 @@ QbbNetDevice::DequeueAndTransmit(void)
 	else {  //switch, doesn't care about qcn, just send
         std::set<uint32_t> blocked;
         Time wait=Simulator::GetMaximumSimulationTime();
+        UpdateProbeTokens();
         for (auto &entry:m_shapers) {
             auto &s=entry.second; UpdateShapeTokens(s);
             auto head=m_queue->PeekQueue(entry.first);
             if (!head) continue;
-            NS_ABORT_MSG_IF(head->GetSize()>s.burst,"frame exceeds shaper burst");
-            if (s.rate==0 || s.tokens+1e-6<head->GetSize()) {
+            const auto bytes=head->GetSize();
+            NS_ABORT_MSG_IF(bytes>s.burst,"frame exceeds shaper burst");
+            const bool hardBlocked=m_paused[s.priority] || !s.rate ||
+                (s.probe && (s.grant.remaining<bytes || !m_probeRate));
+            double seconds= s.rate>0 ? std::max(0.0,(bytes-s.tokens)/s.rate) : 0;
+            if (s.probe && m_probeRate>0)
+                seconds=std::max(seconds,std::max(0.0,(bytes-m_probeTokens)/m_probeRate));
+            if (hardBlocked || seconds>1e-15) {
                 blocked.insert(entry.first);
-                if (!m_paused[s.priority] && s.rate>0)
-                    wait=std::min(wait,std::max(NanoSeconds(1),Seconds((head->GetSize()-s.tokens)/s.rate)));
+                if (!hardBlocked)
+                    wait=std::min(wait,std::max(NanoSeconds(1),NanoSeconds(int64_t(std::ceil(seconds*1e9)))));
             }
         }
         if (wait<Simulator::GetMaximumSimulationTime() && m_shapeWake.IsExpired())
@@ -429,6 +480,15 @@ QbbNetDevice::DequeueAndTransmit(void)
         if (p && m_shapers.count(m_queue->GetLastLogicalQueue())) {
             auto &s=m_shapers.at(m_queue->GetLastLogicalQueue());
             s.tokens=std::max(0.0,s.tokens-p->GetSize());
+            if (s.probe) {
+                NS_ABORT_MSG_IF(s.grant.remaining<p->GetSize() || m_probeTokens+1e-6<p->GetSize(),
+                                "probe dequeue exceeded grant/bucket");
+                s.grant.remaining-=p->GetSize();
+                NS_ABORT_MSG_IF(UINT64_MAX-s.grant.sent<p->GetSize() || UINT64_MAX-m_probeSent<p->GetSize(),
+                                "probe counter overflow");
+                s.grant.sent+=p->GetSize(); m_probeSent+=p->GetSize();
+                m_probeTokens=std::max(0.0,m_probeTokens-p->GetSize());
+            }
         }
 		if (p != 0) {
 			m_snifferTrace(p);
@@ -670,7 +730,9 @@ bool QbbNetDevice::Send(Ptr<Packet> packet, const Address &dest, uint16_t protoc
 bool QbbNetDevice::SwitchSend (uint32_t qIndex, Ptr<Packet> packet, CustomHeader &ch) {
 	m_macTxTrace(packet);
 	m_traceEnqueue(packet, qIndex);
-	m_queue->Enqueue(packet, m_groupClassifier.IsNull() ? qIndex : m_groupClassifier(packet,qIndex));
+	uint32_t logical=m_groupClassifier.IsNull() ? qIndex : m_groupClassifier(packet,qIndex);
+    NS_ABORT_MSG_IF(!m_queue->Enqueue(packet,logical),"queue admission failed after MMU charge");
+    m_traceAdmitted(packet,logical,qIndex);
 	DequeueAndTransmit();
 	return true;
 }

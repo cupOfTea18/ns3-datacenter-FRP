@@ -215,11 +215,93 @@ def r3_evidence(run_dir, identity):
     return result
 
 
+def r4_packet_index(rows):
+    """Cumulative queue after each real event; retain node/role/generation identity."""
+    indexed=defaultdict(list)
+    for r in rows:
+        k=(int(r["node"]),r["role"],int(r["flow"]),int(r["generation"]))
+        event={name:int(r[name]) for name in ("time_ns","event_order","bytes","in_total","tx_total","queue_bytes")}
+        event["event"]=r["event"]
+        indexed[k].append(event)
+    for events in indexed.values():
+        events.sort(key=lambda e:(e["time_ns"],e["event_order"]))
+        admitted=sent=0
+        previous=(-1,-1)
+        for e in events:
+            order=(e["time_ns"],e["event_order"])
+            if order<=previous: raise ValueError("duplicate/reversed R4 packet event order")
+            previous=order
+            if e["event"]=="ADMIT": admitted+=e["bytes"]
+            elif e["event"]=="TX": sent+=e["bytes"]
+            else: raise ValueError("unknown R4 packet event")
+            if (e["in_total"],e["tx_total"],e["queue_bytes"])!=(admitted,sent,admitted-sent) or sent>admitted:
+                raise ValueError("R4 cumulative packet accounting mismatch")
+    return {k: ([(e["time_ns"],e["event_order"]) for e in events],events) for k,events in indexed.items()}
+
+
+def r4_endpoint(index,k,time_ns,ordinal=None):
+    orders,events=index.get(k,([],[]))
+    # Default means after ALL events at this ns, not the next periodic sample.
+    end=(time_ns,math.inf if ordinal is None else ordinal)
+    pos=bisect.bisect_right(orders,end)-1
+    return events[pos] if pos>=0 else {"queue_bytes":0,"in_total":0,"tx_total":0}
+
+
+def r4_evidence(run_dir,identity,meta):
+    packets=[]
+    for path in run_dir.glob("r4.gateway-*.packets.csv"): packets.extend(read_csv(path))
+    index=r4_packet_index(packets)
+    registrations={}
+    for gateway in meta["proposed_parameters"]["gateways"]:
+        for f in gateway["flows"]:
+            registrations[(gateway["node"],f["role"],f["id"],f["generation"])]=f
+    stop_ns=round(meta["simulator_stop_time_s"]*1e9)
+    results=[]
+    mapping={}
+    for k,f in registrations.items():
+        if k[1]!="A": continue
+        peer=(f["peer"],"B",k[2],k[3])
+        if peer not in registrations or registrations[peer]["peer"]!=k[0]:
+            raise ValueError("R4 registration peer mismatch")
+        sent=[e for e in index.get(k,([],[]))[1] if e["event"]=="TX"]
+        admitted=[e for e in index.get(peer,([],[]))[1] if e["event"]=="ADMIT"]
+        expected=[e for e in sent if e["time_ns"]+f["forward_delay_ns"]<=stop_ns]
+        mismatches=sum(a["bytes"]!=b["bytes"] or a["time_ns"]+f["forward_delay_ns"]!=b["time_ns"]
+                       for a,b in zip(expected,admitted))+abs(len(expected)-len(admitted))
+        mapping[k]=mismatches
+    for path in run_dir.glob("r4.gateway-*.flows.csv"):
+        for r in read_csv(path):
+            if r["role"]!="A": continue
+            k=(int(r["node"]),"A",int(r["flow"]),int(r["generation"]))
+            f=registrations[k]; peer=(f["peer"],"B",k[2],k[3])
+            endpoint=int(r["prediction_end_ns"]); valid=r["fresh"]=="1" and r["history_covered"]=="1"
+            final=r4_endpoint(index,peer,endpoint) if endpoint<=stop_ns else None
+            sample=r4_endpoint(index,peer,int(r["state_sample_ns"]),int(r["state_ordinal"]))
+            exact_sample=(sample["queue_bytes"]==int(r["state_queue_bytes"]) and
+                          sample["in_total"]==int(r["state_in_total"]) and sample["tx_total"]==int(r["state_tx_total"]))
+            error=float(r["predicted_queue_bytes"])-final["queue_bytes"] if valid and final else None
+            results.append({**identity,"proposed_version":4,"node":k[0],"role":"A","flow":k[2],"generation":k[3],
+                "peer":f["peer"],"time_ns":int(r["time_ns"]),"prediction_end_ns":endpoint,
+                "endpoint_boundary":"after_all_events_at_ns","endpoint_available":final is not None,
+                "state_seq":r["state_seq"],"state_sample_ns":r["state_sample_ns"],"state_ordinal":r["state_ordinal"],
+                "state_sample_matches_events":exact_sample if int(r["state_seq"]) else None,
+                "B_future_queue_bytes":final["queue_bytes"] if final else None,
+                "prediction_error_bytes":error,"A_queue_bytes":r["queue_bytes"],
+                "predicted_queue_bytes":r["predicted_queue_bytes"],"queue_used_bytes":r["queue_used_bytes"],
+                "fresh":r["fresh"],"history_covered":r["history_covered"],"mode":r["mode"],"reason":r["reason"],
+                "target_bps":r["target_bps"],"service_bps":r["service_bps"],"service_source":r["service_source"],
+                "forward_mapping_mismatches":mapping[k],
+                "oracle_queue_bytes":sample["queue_bytes"]+final["in_total"]-sample["in_total"]-
+                                     (final["tx_total"]-sample["tx_total"]) if valid and final else None})
+    return results
+
+
 def analyze_run(run_dir):
     runner=json.loads((run_dir/"runner-metadata.json").read_text())
     meta=json.loads((run_dir/"metadata.json").read_text())
     stop=meta["simulator_stop_time_s"]
-    identity={"algorithm":meta["algorithm"],"queue_mode":runner.get("r3_queue_mode"),
+    identity={"algorithm":meta["algorithm"],"queue_mode":runner.get("queue_mode",runner.get("r3_queue_mode")),
+              "proposed_version":runner.get("proposed_version"),"service_mode":runner.get("service_mode"),
               "scenario":runner.get("scenario",meta["scenario"]),"seed":meta["rng_seed"],"run":meta["rng_run"],"run_dir":str(run_dir)}
     summary_path=run_dir/"metadata.json.summary.json"
     if not summary_path.is_file():
@@ -300,7 +382,9 @@ def analyze_run(run_dir):
          "completed_subset_fct_p50_ns":quantile(fct_values,.5),"completed_subset_fct_p95_ns":quantile(fct_values,.95),
          "admission_drop_packets":final["admission_drop_packets"],"remaining_switch_queue_bytes":final["remaining_switch_queue_bytes"],
          "scenario_relation_status":relation["status"],**convergence_summary(stages,"sender"),**convergence_summary(stages,"receiver")}
-    return run,stages,flow_rows,directional,{**identity,**relation},r3_evidence(run_dir,identity)
+    version=runner.get("proposed_version",meta.get("proposed_parameters",{}).get("version"))
+    evidence=(r4_evidence(run_dir,identity,meta) if version==4 else r3_evidence(run_dir,identity)) if meta["algorithm"]=="proposed" else []
+    return run,stages,flow_rows,directional,{**identity,**relation},evidence
 
 
 def main():
@@ -317,7 +401,9 @@ def main():
         for i,r in enumerate(result): tables[i].extend(r if isinstance(r,list) else [r])
     if not tables[0]:raise SystemExit("no stable successful runs found")
     for name,rows in (("run-summary.csv",tables[0]),(output.name,tables[1]),("flow-summary.csv",tables[2]),
-                      ("direction-summary.csv",tables[3]),("r3-evidence.csv",tables[5])):
+                      ("direction-summary.csv",tables[3]),
+                      ("r3-evidence.csv",[r for r in tables[5] if r.get("proposed_version")!=4]),
+                      ("r4-evidence.csv",[r for r in tables[5] if r.get("proposed_version")==4])):
         write_csv(output.parent/name,rows)
     (output.parent/"scenario-validation.json").write_text(json.dumps(tables[4],indent=2)+"\n")
     print(f"analyzed {len(tables[0])} runs; outputs: {output.parent}")

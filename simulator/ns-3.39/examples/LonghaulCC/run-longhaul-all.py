@@ -26,7 +26,7 @@ def main():
     repo = here.parents[3]
     parser = argparse.ArgumentParser(
         description=__doc__, allow_abbrev=False,
-        epilog="Other experiment options are forwarded to run-longhaul.py; ")
+        epilog="--config, --queue-mode and --service-mode (and other experiment options) are forwarded to run-longhaul.py.")
     parser.add_argument("--algorithms", nargs="+", choices=DEFAULT_ALGORITHMS,
                         default=list(DEFAULT_ALGORITHMS))
     parser.add_argument("--output-root", type=Path, default=None,

@@ -1,6 +1,6 @@
 # LonghaulCC 项目进度与下一步
 
-更新时间：2026-10-02。范围：当前仓库的 `longhaul-convergence`、Proposed R3、相关实验和本机运行准备。
+更新时间：2026-10-02；路径更新：2026-10-08。范围：当前仓库的 `longhaul-convergence`、Proposed R3、相关实验和本机运行准备。
 
 ## 1. 现在做到哪一步了
 
@@ -23,14 +23,16 @@
 | 本机实验结果 | 未找到结果目录 | 先生成启动、完成和机制结果 |
 | 性能研究结论 | 历史文档保留了改进与负结果 | 历史重建收益、baseline 标定及更广负载比较仍待验证 |
 
-## 2. 当前本机快照
+## 2. 本机快照与当前路径
+
+仓库路径已按 2026-10-08 的工作目录更新。下表其余环境、构建和实验状态是 2026-10-02 的记录，尚未在当前环境重新核实。
 
 | 项目 | 检查结果 |
 |---|---|
-| 仓库目录 | `/home/smp/Code/ns3-datacenter-FRP` |
-| ns-3 目录 | `/home/smp/Code/ns3-datacenter-FRP/simulator/ns-3.39` |
-| 当前分支 | `codex/longhaul-local` |
-| 当前提交 | `1773c92`，提交说明为“改善pfc配置” |
+| 仓库目录 | `/home/shemuping/newCode/ns3-FRP` |
+| ns-3 目录 | `/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39` |
+| 当时分支 | `codex/longhaul-local` |
+| 当时提交 | `1773c92`，提交说明为“改善pfc配置” |
 | Python | 3.10.12 |
 | CMake | 3.22.1，现已安装；此前“缺少 CMake”的阻塞已解除 |
 | 编译工具 | `g++`、Make 可用；未找到 Ninja，可使用 Make |
@@ -110,7 +112,7 @@ run-longhaul-all.py（批量时逐个调用单算法入口）
 | [R3 实测改进记录](../simulator/ns-3.39/examples/LonghaulCC/R3_EVALUATION_20260929.md) | 后续资源/PFC 修复、ECN 候选、FCT 对照和预测反例，研究现状重点看此文 |
 | [场景 Review](LonghaulCC_Proposed_R3_实验场景Review_20260929.md)、[场景修改方案](LonghaulCC_Proposed_R3_实验场景修改方案_20260929.md) | 更早的检查和计划；部分“待实施”项目已出现在当前源码中，不能据此重复判定为未实现 |
 | [早期基线计划](../simulator/ns-3.39/examples/LonghaulCC/LONG_HAUL_BASELINE_PLAN.md) | 研究背景；算法范围、配置名称和统计方法部分已被后续实现更新 |
-| [docs/记录.md](记录.md) | 通用编译笔记，仍含旧绝对目录；本机命令以当前 LonghaulCC README 为准 |
+| [docs/记录.md](记录.md) | 通用编译笔记；本机命令以当前 LonghaulCC README 为准 |
 | `docs/旧版本文件/` | R1/R2 及早期设计、参考材料，保留历史用途 |
 
 本次只新增进度与索引说明，不搬动文件或改写历史实验结论。
@@ -147,7 +149,7 @@ run-longhaul-all.py（批量时逐个调用单算法入口）
 当前已有 optimized 配置，可以先直接编译目标：
 
 ```bash
-cd /home/smp/Code/ns3-datacenter-FRP/simulator/ns-3.39
+cd /home/shemuping/newCode/ns3-FRP/simulator/ns-3.39
 ./ns3 build longhaul-convergence longhaul-r3-test -j2
 ./ns3 run longhaul-r3-test --no-build
 python3 examples/LonghaulCC/test-longhaul-analysis.py
@@ -166,7 +168,7 @@ python3 examples/LonghaulCC/run-longhaul-all.py \
   --algorithms dcqcn proposed \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
   --purpose transient --stop-times 0.03 \
-  --output-root /home/smp/Code/ns3-datacenter-FRP/results/local-s0-smoke-20261002
+  --output-root /home/shemuping/newCode/ns3-FRP/results/local-s0-smoke-20261002
 ```
 
 完成标准：两个运行的 `runner-metadata.json` 均为 `status=ok`，有效配置引用原始输入，配置和测量输出存在。S0 是 3 GB 流，0.03 s 只用于启动检查，`completion_valid=false` 不代表启动失败。
@@ -182,10 +184,10 @@ python3 examples/LonghaulCC/run-longhaul-all.py \
   --algorithms dcqcn proposed \
   --flow-files examples/LonghaulCC/flow-longhaul-s0.txt \
   --purpose completion --stop-times 1.50 \
-  --output-root /home/smp/Code/ns3-datacenter-FRP/results/local-s0-completion-20261002
+  --output-root /home/shemuping/newCode/ns3-FRP/results/local-s0-completion-20261002
 
 python3 examples/LonghaulCC/analyze-longhaul.py \
-  --root /home/smp/Code/ns3-datacenter-FRP/results/local-s0-completion-20261002
+  --root /home/shemuping/newCode/ns3-FRP/results/local-s0-completion-20261002
 ```
 
 1.50 s 尚未在本机验证为充分时长；若有未完成，先检查日志与原因，必要时给两算法统一延长后使用新目录重跑。

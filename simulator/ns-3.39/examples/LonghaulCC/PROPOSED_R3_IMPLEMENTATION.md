@@ -1,6 +1,8 @@
 # Proposed R3 实现说明
 
-`--cc=proposed` 对应 R3。本文说明实现，不声明性能提升或无丢包保证。
+本文保留迁移前 R3 的实现与验证记录；文中的“当前”及 `--cc=proposed` 均指对应 R3 源码时期，
+不代表 2026-10-09 工作区。当前主程序包含 `longhaul-r4.h`，`proposed` 对应 R4，说明见
+[R4 实现与功能验证记录](R4_IMPLEMENTATION_VALIDATION.md)。本文不声明性能提升或无丢包保证。
 
 ## 职责与数据路径
 
@@ -79,6 +81,9 @@ A 观察原始 CNP 仅更新抑制近源重复反馈的时间，不执行另一�
 
 `PROPOSED_*` 参数见 `config-longhaul.txt`。时间为秒、字节为 byte，速率为 byte/s，
 日志带 `_bps` 的速率字段转换为 bit/s。配置和完整命令由 runner 保存在每次运行目录。
+
+以下为 R3 快照中的构建/运行命令；当前 CMake 只登记主程序与 `longhaul-r4-test`，
+旧 R3 配置不能直接用于当前 Proposed。历史源码快照出处见当前 README 的 R4 迁移说明。
 
 ```
 ./ns3 build longhaul-convergence longhaul-r3-test -j2

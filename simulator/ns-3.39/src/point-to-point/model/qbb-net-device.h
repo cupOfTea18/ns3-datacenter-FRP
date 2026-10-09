@@ -117,6 +117,15 @@ public:
   // Logical flow queues retain the shared physical PG/MMU accounting.
   void ConfigureGroupShaper(uint32_t groupQueue, uint32_t priority, double rate, uint32_t burst);
   void SetGroupShaperRate(uint32_t groupQueue, double rate);
+
+  struct QueueControl { uint32_t queue; double bytesPerSec; bool probe; };
+  struct ProbeCounters { uint64_t epoch=0, remaining=0, sent=0; };
+  void ApplyQueueControls(const std::vector<QueueControl>& controls);
+  void ConfigureProbeBucket(double bytesPerSec, uint64_t burst);
+  void GrantProbeBytes(uint32_t queue, uint64_t epoch, uint64_t bytes);
+  ProbeCounters GetProbeCounters(uint32_t queue) const;
+  double GetProbeTokens();
+  uint64_t GetProbeSentBytes() const { return m_probeSent; }
   Callback<uint32_t, Ptr<const Packet>, uint32_t> m_groupClassifier;
   Time GetReceiveDelay() const { return m_nicDelay; }
   bool IsQueuePaused(uint32_t queue) const { return m_paused[queue]; }
@@ -159,6 +168,7 @@ public:
 	// ========== Bifrost: 自定义暂停时间的PFC发送 ==========
 	void SendPfcWithTime(uint32_t qIndex, uint32_t type, uint32_t customTime);  // type: 0 = pause, 1 = resume
 
+	TracedCallback<Ptr<const Packet>, uint32_t, uint32_t> m_traceAdmitted;
 	TracedCallback<Ptr<const Packet>, uint32_t> m_traceEnqueue;
 	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDequeue;
 	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDrop;
@@ -223,8 +233,14 @@ protected:
       uint32_t priority=0, burst=0;
       double rate=0, tokens=0;
       Time updated;
+      bool probe=false;
+      ProbeCounters grant;
   };
   std::map<uint32_t, QueueShaper> m_shapers;
+  double m_probeRate=0, m_probeTokens=0;
+  uint64_t m_probeBurst=0, m_probeSent=0;
+  Time m_probeUpdated;
+  void UpdateProbeTokens();
   Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
   EventId m_shapeWake;
   void UpdateShapeTokens(QueueShaper& shaper);

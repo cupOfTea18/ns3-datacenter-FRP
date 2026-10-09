@@ -8,6 +8,8 @@ import json
 import subprocess
 import sys
 import time
+import shutil
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -77,7 +79,7 @@ def main():
     here = Path(__file__).resolve().parent
     ns3 = here.parents[1]
     repo = ns3.parents[1]
-    default_config = here / "config-longhaul.txt"
+    default_config = here / "config-longhaul-r4.txt"
 
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--output-root", type=Path, default=None,
@@ -97,8 +99,10 @@ def main():
                         help="override RNG_SEED; omit to use C++/config value")
     parser.add_argument("--purpose", choices=("transient", "completion"), default="transient",
                         help="fixed-duration transient observation or finite-flow completion validation")
-    parser.add_argument("--r3-queue-mode", choices=("history", "snapshot"), default="history",
-                        help="only replace R3 queue reconstruction; all other control mechanisms stay enabled")
+    parser.add_argument("--r3-queue-mode", choices=("history", "snapshot"), default=None,
+                        help="historical R3 only; replace R3 queue reconstruction; all other control mechanisms stay enabled")
+    parser.add_argument("--queue-mode", choices=("history", "snapshot"), default=None)
+    parser.add_argument("--service-mode", choices=("budget", "busy-observed"), default=None)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--skip-build", action="store_true",
                         help="skip compilation and use the existing simulator binary")
@@ -108,6 +112,14 @@ def main():
     args.config = resolve_input_path(args.config, ns3)
     if not args.config.is_file():
         parser.error("config file not found: " + str(args.config))
+    version = int(config_value(args.config, "PROPOSED_VERSION") or 3)
+    if args.algorithm == "proposed":
+        if version != 4:
+            parser.error("current Proposed requires PROPOSED_VERSION 4; use config-longhaul-r4.txt or the preserved R3 source")
+        if args.r3_queue_mode is not None:
+            parser.error("--r3-queue-mode is R3-only; use --queue-mode with R4")
+    queue_mode = args.queue_mode or ("history" if config_value(args.config, "PROPOSED_RECONSTRUCT") != "0" else "snapshot")
+    service_mode = args.service_mode or config_value(args.config, "PROPOSED_SERVICE_MODE") or "busy-observed"
     if args.runs < 1:
         parser.error("--runs must be positive")
 
@@ -154,6 +166,19 @@ def main():
                 parser.error(f"run directory already contains data: {run_dir}")
 
     print(f"Output directory: {args.output_root}", flush=True)
+    # Record the actual source tree, including untracked R4 files. Do not label a stale
+    # --skip-build executable with the current source identity.
+    source_files = sorted(p for base in (ns3/"src", here, ns3/"build-support")
+                          for p in base.rglob("*") if p.is_file() and
+                          (p.suffix in (".h", ".cc", ".c", ".cmake", ".py", ".txt") or p.name == "CMakeLists.txt")
+                          and "__pycache__" not in p.parts)
+    source_files += [ns3/"CMakeLists.txt", ns3/"ns3"]
+    source_hash = hashlib.sha256()
+    for path in source_files:
+        source_hash.update(str(path.relative_to(ns3)).encode())
+        source_hash.update(path.read_bytes())
+    source_digest = source_hash.hexdigest()
+    stamp = ns3/"build"/"longhaul-r4-build.json"
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"],
                        cwd=ns3, check=True)
@@ -161,6 +186,13 @@ def main():
     if not binary.is_file():
         raise SystemExit(f"simulator binary not found: {binary}; build it first")
 
+    build_identity = {"source_sha256": source_digest, "binary_sha256": sha256(binary),
+                      "library_sha256": {p.name:sha256(p) for p in sorted((ns3/"build"/"lib").glob("*.so"))}}
+    if args.skip_build:
+        if not stamp.is_file() or json.loads(stamp.read_text()) != build_identity:
+            parser.error("--skip-build source/binary identity does not match; run once without --skip-build")
+    else:
+        stamp.write_text(json.dumps(build_identity, indent=2)+"\n")
     args.output_root.mkdir(parents=True, exist_ok=True)
     failures = []
     source_config_hash = hashlib.sha256(args.config.read_bytes()).hexdigest()
@@ -170,11 +202,21 @@ def main():
             seed_label = str(args.seed) if args.seed is not None else "config"
             run_dir = args.output_root / label / algorithm / f"seed{seed_label}-run{run}"
             run_dir.mkdir(parents=True, exist_ok=True)
+            inputs=run_dir/"inputs"; inputs.mkdir()
+            flow_copy=inputs/flow_path.name
+            topology_copy=inputs/("topology-"+topology_source.name)
+            shutil.copy2(flow_path,flow_copy)
+            shutil.copy2(topology_source,topology_copy)
+            (run_dir/"source-version.txt").write_text(subprocess.check_output(["git","rev-parse","HEAD"],cwd=repo,text=True))
+            (run_dir/"source.patch").write_bytes(subprocess.check_output(["git","diff","HEAD","--binary"],cwd=repo))
+            with tarfile.open(run_dir/"source.tar.gz", "w:gz") as archive:
+                for path in source_files: archive.add(path,arcname=str(path.relative_to(ns3)))
             effective_config_path = run_dir / "config.txt"
             effective_config_text = render_config(args.config, {
-                "FLOW_FILE": flow_path,
-                "TOPOLOGY_FILE": topology_source,
-                "PROPOSED_RECONSTRUCT": int(args.r3_queue_mode == "history"),
+                "FLOW_FILE": flow_copy,
+                "TOPOLOGY_FILE": topology_copy,
+                "PROPOSED_RECONSTRUCT": int(queue_mode == "history"),
+                "PROPOSED_SERVICE_MODE": service_mode,
                 "FCT_OUTPUT_FILE": run_dir / "fct.csv",
                 "PFC_OUTPUT_FILE": run_dir / "pfc.csv",
                 "RATE_OUTPUT_FILE": run_dir / "sender-rate.csv",
@@ -182,7 +224,7 @@ def main():
                 "LINK_STATS_OUTPUT_FILE": run_dir / "dci-link.csv",
                 "RTT_OUTPUT_FILE": run_dir / "measured-rtt.csv",
                 "SUMMARY_META_FILE": run_dir / "metadata.json",
-                "PROPOSED_OUTPUT": run_dir / "r3",
+                "PROPOSED_OUTPUT": run_dir / "r4",
             })
             effective_config_path.write_text(effective_config_text)
             effective_config_hash = hashlib.sha256(effective_config_text.encode()).hexdigest()
@@ -194,7 +236,7 @@ def main():
                 f"--run={run}",
             ]
             if args.flow_files is not None:
-                command.append(f"--flow-file={flow_path}")
+                command.append(f"--flow-file={flow_copy}")
             if args.seed is not None:
                 command.append(f"--seed={args.seed}")
             if stop_time is not None:
@@ -236,7 +278,11 @@ def main():
                 "purpose": args.purpose,
                 "stop_rule": "fixed common simulator stop time; no algorithm-specific early selection",
                 "scenario_contract": scenarios.get(label, {}),
-                "r3_queue_mode": args.r3_queue_mode if algorithm == "proposed" else None,
+                "queue_mode": queue_mode if algorithm == "proposed" else None,
+                "service_mode": service_mode if algorithm == "proposed" else None,
+                **build_identity,
+                "binary_file": str(binary),
+                "source_patch_sha256": sha256(run_dir/"source.patch"),
                 "flow_sha256": sha256(flow_path),
                 "topology_sha256": sha256(topology_source),
                 "original_flow_file": str(flow_path),
@@ -272,6 +318,23 @@ def main():
                 run_metadata["admission_drop_packets"] = summary["admission_drop_packets"]
             else:
                 run_metadata["completion_valid"] = False
+            if algorithm=="proposed" and version==4 and status=="ok":
+                last={}
+                for path in run_dir.glob("r4.gateway-*.packets.csv"):
+                    with path.open() as stream:
+                        for row in csv.DictReader(stream):
+                            last[(int(row["node"]),row["role"],int(row["flow"]),int(row["generation"]))]=row
+                closed=True
+                for gateway in simulator_meta["proposed_parameters"]["gateways"]:
+                    for flow in gateway["flows"]:
+                        k=(gateway["node"],flow["role"],flow["id"],flow["generation"])
+                        r=last.get(k,{})
+                        closed &= bool(r) and int(r.get("in_total",0))==int(r.get("tx_total",-1))
+                        if flow["role"]=="A":
+                            peer=last.get((flow["peer"],"B",flow["id"],flow["generation"]),{})
+                            closed &= int(r.get("tx_total",-1))==int(peer.get("in_total",-2))
+                run_metadata["r4_wire_closed"]=closed
+                run_metadata["completion_valid"] &= closed
             if args.purpose == "completion" and not run_metadata["completion_valid"]:
                 failures.append(str(run_dir) + " (incomplete)")
             (run_dir / "runner-metadata.json").write_text(

@@ -707,7 +707,7 @@ void SampleDciLink() {
 		Simulator::Schedule(MicroSeconds(rate_sample_interval_us), &SampleDciLink);
 }
 
-#include "longhaul-r3.h"
+#include "longhaul-r4.h"
 #include "longhaul-measurements.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
@@ -885,16 +885,29 @@ void ParseConfig(std::istream &config) {
 		else if (key == "MULTI_RATE") ReadConfigValue(config, key, multi_rate);
 		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
+		else if (key == "PROPOSED_VERSION") ReadConfigValue(config,key,Proposed::version);
+		else if (key == "PROPOSED_SERVICE_MODE") ReadConfigValue(config,key,Proposed::config.serviceMode);
+		else if (key == "PROPOSED_SERVICE_WINDOW") { ReadConfigValue(config,key,Proposed::config.serviceWindow); Proposed::serviceWindowSet=true; }
+		else if (key == "PROPOSED_SERVICE_MIN_BUSY") { ReadConfigValue(config,key,Proposed::config.serviceMinBusy); Proposed::serviceMinBusySet=true; }
+		else if (key == "PROPOSED_PROBE_PORT_FRACTION") ReadConfigValue(config,key,Proposed::config.probePortFraction);
+		else if (key == "PROPOSED_PROBE_PORT_BURST") ReadConfigValue(config,key,Proposed::config.probePortBurst);
+		else if (key == "PROPOSED_NEAR_CNP") ReadConfigValue(config,key,Proposed::config.nearCnp);
+		else if (key == "PROPOSED_ECN_MODE") { ReadConfigValue(config,key,Proposed::config.ecnMode); Proposed::ecnModeSet=true; }
+		else if (key == "PROPOSED_STARTUP_MODE") ReadConfigValue(config,key,Proposed::config.startupMode);
+		else if (key == "PROPOSED_CONTROL_IP_MTU") ReadConfigValue(config,key,Proposed::config.controlIpMtu);
 		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
 		else if (key == "PROPOSED_RECONSTRUCT") ReadConfigValue(config, key, Proposed::config.reconstruct);
-		else if (key == "PROPOSED_SHAPER_ECN") ReadConfigValue(config, key, Proposed::config.shaperEcn);
+		else if (key == "PROPOSED_SHAPER_ECN") { ReadConfigValue(config, key, Proposed::config.shaperEcn); Proposed::shaperEcnSet=true; }
 		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::config.period);
 		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::config.control);
 		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::config.bin);
-		else if (key == "PROPOSED_QREF") ReadConfigValue(config, key, Proposed::config.qref);
+		else if (key == "PROPOSED_QREF") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
+		else if (key == "PROPOSED_PORT_QREF") ReadConfigValue(config,key,Proposed::config.qref);
 		else if (key == "PROPOSED_TAU") ReadConfigValue(config, key, Proposed::config.tau);
-		else if (key == "PROPOSED_SOURCE_HIGH") ReadConfigValue(config, key, Proposed::config.sourceHigh);
-		else if (key == "PROPOSED_SOURCE_LOW") ReadConfigValue(config, key, Proposed::config.sourceLow);
+		else if (key == "PROPOSED_SOURCE_HIGH") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
+		else if (key == "PROPOSED_SOURCE_PORT_HIGH") ReadConfigValue(config,key,Proposed::config.sourceHigh);
+		else if (key == "PROPOSED_SOURCE_LOW") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
+		else if (key == "PROPOSED_SOURCE_PORT_LOW") ReadConfigValue(config,key,Proposed::config.sourceLow);
 		else if (key == "PROPOSED_UTILIZATION") ReadConfigValue(config, key, Proposed::config.utilization);
 		else if (key == "PROPOSED_CNP_INTERVAL") ReadConfigValue(config, key, Proposed::config.cnpInterval);
 		else if (key == "PROPOSED_REACTION_WINDOW") ReadConfigValue(config, key, Proposed::config.reaction);
@@ -904,7 +917,8 @@ void ParseConfig(std::istream &config) {
 		else if (key == "PROPOSED_RATE_INCREASE") ReadConfigValue(config, key, Proposed::config.increase);
 		else if (key == "PROPOSED_PROBE_BYTES") ReadConfigValue(config, key, Proposed::config.probeBytes);
 		else if (key == "PROPOSED_STATE_TIMEOUT") ReadConfigValue(config, key, Proposed::config.timeout);
-		else if (key == "PROPOSED_FALLBACK_FRACTION") ReadConfigValue(config, key, Proposed::config.fallback);
+		else if (key == "PROPOSED_FALLBACK_FRACTION") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
+		else if (key == "PROPOSED_BUFFER_FALLBACK_FRACTION") ReadConfigValue(config,key,Proposed::config.fallback);
 		else if (key == "PROPOSED_REPORT_MIN_INTERVAL") ReadConfigValue(config, key, Proposed::config.reportMin);
 		else NS_FATAL_ERROR("longhaul: unknown config key: " << key);
 	}

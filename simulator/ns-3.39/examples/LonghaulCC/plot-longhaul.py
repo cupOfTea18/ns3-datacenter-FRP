@@ -93,6 +93,27 @@ def main():
         ax_status.set_xticks(range(len(labels)),labels,rotation=25,ha="right")
         ax_status.set_ylabel("receiver flow-stages");ax_status.set_title(scenario+": reference convergence (±10%, hold=max(3 RTT,20 ms))")
         ax_status.legend(fontsize=8);fig_status.tight_layout();fig_status.savefig(out/(scenario.lower()+"-status.png"),dpi=140);plt.close(fig_status)
+    for run in runs:
+        if run.get("proposed_version")!="4": continue
+        path=Path(run["run_dir"])
+        fig,axes=plt.subplots(2,1,figsize=(11,7),sharex=True)
+        for source in sorted(path.glob("r4.gateway-*.flows.csv")):
+            grouped=defaultdict(list)
+            for row in read(source): grouped[(row["node"],row["role"],row["flow"],row["generation"])].append(row)
+            for key,rows in grouped.items():
+                label="/".join(key)
+                t=[int(r["time_ns"])*1e-6 for r in rows]
+                axes[0].plot(t,[float(r["queue_bytes"])/1e3 for r in rows],label=label+" queue")
+                if key[1]=="A":
+                    axes[0].plot(t,[float(r["predicted_queue_bytes"])/1e3 for r in rows],ls=":",label=label+" predicted B")
+                axes[1].plot(t,[float(r["target_bps"])/1e9 for r in rows],label=label+" target")
+                axes[1].plot(t,[float(r["service_bps"])/1e9 for r in rows],ls=":",label=label+" service estimate")
+        axes[0].set_ylabel("wire queue (kB)"); axes[1].set_ylabel("Gbps"); axes[1].set_xlabel("simulation time (ms)")
+        for ax in axes: ax.legend(fontsize=6); ax.grid(alpha=.2)
+        fig.suptitle("R4 per-flow control: targets and estimates, not actual throughput")
+        fig.tight_layout()
+        # Save per run to avoid collisions across service/queue ablations.
+        fig.savefig(path/"r4-control.png",dpi=140); plt.close(fig)
     print(f"wrote plots to {out}")
 
 

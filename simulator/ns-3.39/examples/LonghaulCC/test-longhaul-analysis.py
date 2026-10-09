@@ -9,6 +9,21 @@ a=importlib.util.module_from_spec(spec);spec.loader.exec_module(a)
 class AnalysisTests(unittest.TestCase):
     def flow(self,i,edges):
         return {"id":i,"data_path":edges,"ack_path":[[v,u,c] for u,v,c in edges],"ack_wire_bytes":0,"ack_interval_bytes":1}
+    def test_r4_event_boundaries_and_generations(self):
+        def event(t,ordinal,kind,amount,admitted,sent,generation=1):
+            return dict(time_ns=t,node=81,event_order=ordinal,event=kind,role="B",flow=1,
+                        generation=generation,bytes=amount,in_total=admitted,tx_total=sent,queue_bytes=admitted-sent)
+        index=a.r4_packet_index([event(10,1,"ADMIT",100,100,0),event(10,2,"TX",40,100,40),
+                                event(20,3,"ADMIT",20,120,40),event(10,4,"ADMIT",7,7,0,2)])
+        key=(81,"B",1,1)
+        self.assertEqual(a.r4_endpoint(index,key,9)["queue_bytes"],0)
+        self.assertEqual(a.r4_endpoint(index,key,10,1)["queue_bytes"],100)
+        self.assertEqual(a.r4_endpoint(index,key,10)["queue_bytes"],60)
+        self.assertEqual(a.r4_endpoint(index,key,19)["queue_bytes"],60)
+        self.assertEqual(a.r4_endpoint(index,key,20)["queue_bytes"],80)
+        self.assertEqual(a.r4_endpoint(index,(81,"B",1,2),10)["queue_bytes"],7)
+        with self.assertRaises(ValueError):
+            a.r4_packet_index([event(10,1,"TX",100,0,100)])
     def test_shared_path(self):
         flows=[self.flow(1,[[0,1,100],[1,2,20]]),self.flow(2,[[0,1,100],[1,3,100]])]
         self.assertEqual(a.path_reference(flows,1000,0),{1:20,2:80})
