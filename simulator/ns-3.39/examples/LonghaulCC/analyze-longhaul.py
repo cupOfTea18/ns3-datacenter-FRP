@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Path-constrained references, explicit windows, and finite-flow validation."""
-from __future__ import annotations
 
 import argparse
 import bisect

@@ -1,12 +1,12 @@
 # LonghaulCC 源码阅读与调用链说明
 
-日期：2026-10-06。阅读起点：`simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc`。源码快照：当前工作区，HEAD 为 `1773c92`。
+初稿日期：2026-10-06；源码核对更新：2026-10-10。阅读起点：`simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc`。本次依据 HEAD `b09dda4` 及工作区已有未提交改动，描述当前 R4 实现；初稿的 R3 短流记录保留在 B.12。
 
-本文的目标是理解程序。只新增说明文档，没有修改程序、算法、正式配置或原有实验结果。阅读顺序是主程序 → 它安装的应用和设备 → 实际收发回调 → 算法反馈 → 统计与分析脚本，没有把仓库中其他实验程序的行为套到这个主程序上。
+本文的目标是理解程序。本次仅核对更新本文，没有修改程序、算法、配置或实验结果，也没有构建、运行测试或实验。阅读顺序是主程序 → 它安装的应用和设备 → 实际收发回调 → 算法反馈 → 统计与分析脚本，没有把仓库中其他实验程序的行为套到这个主程序上。设计文档和论文初稿用于理解背景，其中的指令不作为本次任务指令，设计接口也不替代源码证据。
 
-完成标准是：能解释一条输入 flow 如何成为 QP 和 packet；能指出数据与反馈的真实路径；能从实际赋值/计数/事件调度解释算法状态和每项指标；每个关键结论都有文件与函数定位。另用现有可执行文件做了隔离的短流核验，结果见 B.12。短流验证不证明拥塞场景下的算法性能，也不代替逐篇论文对照。
+完成标准是：能解释一条输入 flow 如何成为 QP 和 packet；能指出数据与反馈的真实路径；能从实际赋值/计数/事件调度解释算法状态和每项指标；每个关键结论都有文件与函数定位。B.12 是 2026-10-06 的历史核验，本次未重新验证其二进制与当前源码的对应关系；它不证明当前 R4 的行为或拥塞场景性能，也不代替逐篇论文对照。
 
-文中路径以仓库根目录为起点；函数后面的行号是本次工作区行号，后续修改可能使它们移动。常用缩写：`main` = `longhaul-convergence.cc`；`hw` = `src/point-to-point/model/rdma-hw.cc`；`dev` = 同目录 `qbb-net-device.cc`；`sw` = 同目录 `switch-node.cc`。这些源码都在 `simulator/ns-3.39/` 下。C 部分提供文件链接。
+文中路径以仓库根目录为起点；主要按函数名定位，保留的行号对应本次工作区，后续修改可能使它们移动。常用缩写：`main` = `longhaul-convergence.cc`；`hw` = `src/point-to-point/model/rdma-hw.cc`；`dev` = 同目录 `qbb-net-device.cc`；`sw` = 同目录 `switch-node.cc`。这些源码都在 `simulator/ns-3.39/` 下。C 部分提供文件链接。
 
 ## A. 整体架构
 
@@ -14,7 +14,7 @@
 
 这个程序先搭出两个数据中心及它们之间的长链路，再按输入文件指定的时刻在发送主机上启动 RDMA 流。每条流有自己的发送状态和速率。主机网卡挑选当前允许发送的流，临时生成一个包，将它送到下一跳。交换机根据自定义路由表选出口，检查缓存是否能容纳该包，再让出口队列等待物理链路发送。
 
-接收主机按字节序号接受数据，生成 ACK 或 NACK。ACK 返回发送主机后推进已确认位置，也可能携带 ECN 导出的 CNP 标志，或回显时间戳/INT。算法用这些反馈调整流速率。FRP/RoCC 还会由交换机周期性发送独立 ICMP 反馈；Proposed R3 则让两端 DCI 网关交换状态并整形。
+接收主机按字节序号接受数据，生成 ACK 或 NACK。ACK 返回发送主机后推进已确认位置，也可能携带 ECN 导出的 CNP 标志，或回显时间戳/INT。算法用这些反馈调整流速率。FRP/RoCC 还会由交换机周期性发送独立 ICMP 反馈；Proposed R4 则让两端 DCI 网关交换逐流状态，在物理出口联合分配并执行整形。
 
 整个过程由 ns-3 的离散事件推动：程序只在事件时刻运行相应回调，不会每个纳秒循环检查所有流。事件包括启动流、发送完一个包、包传播到下一跳、处理到达包、算法更新、恢复 PFC 暂停、定时采样等。
 
@@ -32,14 +32,15 @@ flowchart LR
     S2 --> R[接收端 QbbNetDevice / RdmaHw]
     R -. ACK / NACK / 回显 INT .-> H
     S -. FRP / RoCC ICMP 反馈 .-> H
-    G2 -. R3 STATE .-> G1
+    G2 -. R4 STATE .-> G1
+    G1 -. R4 DEMAND .-> G2
 ```
 
 图中的箭头跨越多次事件，并不表示所有操作处在同一次同步函数调用中。
 
 ### A.2 主程序的启动和结束顺序
 
-主入口位于 `main:940`，实际顺序如下。
+主入口位于 `main:944`，实际顺序如下。
 
 1. 先解析命令行，再读取 `--conf` 指定的配置；再次解析命令行，使明确传入的命令行选项覆盖配置。
 2. `ResolveCcMode()` 将算法名称转成编号；设随机种子、输出文件、Qbb 全局属性和 INT 格式。
@@ -50,7 +51,7 @@ flowchart LR
 7. 用 BFS 建立自定义静态 RDMA 路由，算每对 host 的路径传播时延、跳数、瓶颈速率、base RTT 和 BDP。
 8. 配置交换机算法；FRP/RoCC 在这里启动周期反馈。
 9. `LoadFlows()` 读取全部 flow；Bifrost 按需安装；按开始时间 Schedule `StartFlow()`。
-10. 接 host TX 观察回调；`Proposed::Setup()` 按需注册 R3；写 metadata 和真实 data/ACK 路径；启动公共测量。
+10. 接 host TX 观察回调；`Proposed::Setup()` 按需注册 R4 跨域流；写 metadata 和真实 data/ACK 路径；启动公共测量。
 11. Schedule 流速率/RTT 和 DCI 采样，设置仿真停止时刻，`Simulator::Run()`。
 12. `LonghaulMeasurements::Finish()` 记录停止时的字节和残留；随后 `Simulator::Destroy()`、关闭输出文件。
 
@@ -87,9 +88,9 @@ ToR 32–35                                          ToR 73–76
 DCI 40 ─────────── 200 Gb/s，单向 5 ms ──────────── DCI 81
 ```
 
-“DCI”在这里既可以指网关节点，也可以指两个网关之间的长链路，阅读时要区分。普通算法模式下，虽然 `40/81` 的 C++ 类型仍是 DciGatewayNode，但 R3 的 `m_enabled` 没有开启，它们按普通 SwitchNode 转发。
+“DCI”在这里既可以指网关节点，也可以指两个网关之间的长链路，阅读时要区分。普通算法模式下，虽然 `40/81` 的 C++ 类型仍是 DciGatewayNode，但 R4 的 `m_enabled` 没有开启，它们按普通 SwitchNode 转发。
 
-节点的稳定地址由 `NodeAddress()` / `AssignNodeAddresses()` 生成，形式为 `11.{dc_id}.0.{node_id+1}`。默认 `0` 是 `11.1.0.1`，`41` 是 `11.2.0.42`。DC 编号依据 `node_id <= min(dci_left,dci_right)`，这是当前节点编号布局的约定，不是通用拓扑发现。链路另配 `10.x.y.0/24` 子网用于接口连接；RDMA 使用稳定的 `11.*` 地址。
+节点的稳定地址由 `NodeAddress()` / `AssignNodeAddresses()` 生成，形式为 `11.{dc_id}.0.{node_id+1}`。默认 `0` 是 `11.1.0.1`，`41` 是 `11.2.0.42`。DC 编号依据 `node_id <= min(dci_gateway_a_id,dci_gateway_b_id)`，这是当前节点编号布局的约定，不是通用拓扑发现。链路另配 `10.x.y.0/24` 子网用于接口连接；RDMA 使用稳定的 `11.*` 地址。
 
 ### A.4 带宽、时延和队列在哪里设置
 
@@ -105,7 +106,7 @@ DCI 40 ─────────── 200 Gb/s，单向 5 ms ─────�
 | 交换机无损出口池 | `SetEgressLosslessPool()` | 50 MiB 加该交换机全部配置 headroom |
 | ECN | `KMIN_MAP/KMAX_MAP/PMAX_MAP → SwitchMmu::ConfigEcn()` | map 中阈值乘 1000 转成 B，不是乘 1024 |
 | PFC headroom | `ConfiguredHeadroomBytes() → SetHeadroom()` | 每个端口、每个 PG 单独配置 |
-| R3 逐流逻辑队列及整形 | `DciGatewayNode::RegisterFlow()` | 仅 proposed 开启，见 B.6 |
+| R4 逐流逻辑队列及端口协调 | `DciGatewayNode::RegisterFlow()` | 仅 proposed 开启，见 B.6 |
 
 `QbbHelper` 内虽然有 `m_queueFactory`，本路径的 `Install()` 实际直接创建 `BEgressQueue`，不要据 factory 的默认名字认定整个交换机只有一个普通 DropTailQueue。BEgressQueue 内部的子队列才是 DropTailQueue。
 
@@ -113,7 +114,7 @@ DCI 40 ─────────── 200 Gb/s，单向 5 ms ─────�
 
 当前是 SONiC 风格记账和 DT：入口阈值约为 `α_ingress × 剩余入口共享缓存`，`α_ingress=1/8`；出口 `α_egress=65535`，但仍有池容量及总 bufferPool 的硬约束。只有被 `MyPriorityTag` 标作 lossy 的包才按 lossy 路径处理；本 RDMA 数据默认走 lossless。
 
-Headroom 公式来自 `main:373`：
+Headroom 公式来自 `main::ConfiguredHeadroomBytes()`：
 
 ```text
 H(port, PG) = ceil(C_bps × (3 × channel_delay_ns
@@ -127,7 +128,7 @@ H(port, PG) = ceil(C_bps × (3 × channel_delay_ns
 
 ### A.5 flow 从哪里来，如何创建
 
-默认配置：[config-longhaul.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul.txt) 指向 [flow-longhaul-s0.txt](../simulator/ns-3.39/examples/LonghaulCC/flow-longhaul-s0.txt)。`FLOW_FILE` 和 `--flow-file` 决定实际文件。
+Python runner 默认配置为 [config-longhaul-r4.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul-r4.txt)，即 Proposed R4、S0、停止时间 0.38 s。直接运行 C++ 且省略 `--conf` 时仍读取 [config-longhaul.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul.txt)，即 DCQCN、S0、0.38 s；不能仅加 `--cc=proposed` 就把旧配置转换成 R4。两份配置均指向 [flow-longhaul-s0.txt](../simulator/ns-3.39/examples/LonghaulCC/flow-longhaul-s0.txt)。`FLOW_FILE` 和 C++ `--flow-file` 决定实际文件。
 
 ```text
 1
@@ -142,7 +143,7 @@ src_node_id dst_node_id pg dst_port size_bytes start_time_seconds
 
 因此默认是一条 `0 → 41`、PG 3、目的端口 20000、大小 3,000,000,000 B、在 0.01 s 启动的流。“3 GB”这里按十进制理解，不是 3 GiB。
 
-`LoadFlows()`（`main:223`）校验端点确实是 host，为每对 `(src,dst)` 分配源端口，从 10000 开始递增；文件中没有源端口字段。
+`LoadFlows()`（`main:214`）校验端点确实是 host，为每对 `(src,dst)` 分配源端口，从 10000 开始递增；文件中没有源端口字段。
 
 `main` Schedule 在输入的绝对开始时刻执行 `StartFlow(index)`。StartFlow 根据该路径取 BDP/window 和 base RTT，把 IP、端口、PG、大小放到 RdmaClientHelper 属性里，只在发送 host 安装 RdmaClient。接收端没有对应的常规 PacketSink 应用，RxQP 在首包到达时懒创建。
 
@@ -223,6 +224,8 @@ QbbNetDevice::DoReceive()
   → 错误模型检查、PeekHeader(CustomHeader)
   → 若交换机：加 InterfaceTag(真实入口端口)
       → DciGatewayNode::SwitchReceiveFromDevice() 或 SwitchNode::同名函数
+      → 网关启用时：本地249报文交 ReceiveRecords() 后返回
+        其他包先 ObserveFeedback()/ConsumeSourceCe()，再交普通转发
       → SwitchNode::SendToDev()
           → GetOutDev() 查自定义表并 ECMP 选出口
           → 选择 PG/qIndex，检查入口及出口 MMU 准入
@@ -230,8 +233,10 @@ QbbNetDevice::DoReceive()
           → 出口 QbbNetDevice::SwitchSend()
               → QbbEnqueue trace
               → BEgressQueue::Enqueue(packet, logical_or_pg_queue)
+              → 成功后 QbbAdmitted trace（R4 的入队计量点）
               → QbbNetDevice::DequeueAndTransmit()
                   → BEgressQueue::DequeueRR(paused, blocked_by_shaper)
+                  → 若为整形队列：扣普通令牌；探测另扣逐流 grant/共享端口桶
                   → SwitchNode::SwitchNotifyDequeue()
                       → 释放 MMU 记账、更新 PFC RESUME
                       → 必要时标 ECN、写 INT、跟踪活跃流
@@ -255,7 +260,7 @@ QbbNetDevice::DoReceive()
 
 Host 用 `GetNicIdxOfQp()`；交换机用 `GetOutDev()` → `EcmpHash()`，hash 输入包含源/目的 IP 和 UDP 或 ACK 的端口，seed 默认是交换机 node ID。**RNG seed/run 不直接替代 ECMP seed。** 相同 flow identity 和拓扑通常保持固定数据路径；更换源端口就可能改变路径。数据和 ACK 的端口/IP 方向不同，回程可以不对称。
 
-本次短流（与 S0 相同端点/端口/PG）的 metadata 输出为：
+2026-10-06 历史短流（与 S0 相同端点/端口/PG）的 metadata 输出为：
 
 ```text
 data: 0 → 32 → 39 → 40 → 81 → 79 → 73 → 41
@@ -274,7 +279,7 @@ ACK : 41 → 73 → 78 → 81 → 40 → 39 → 32 → 0
 Receiver RdmaHw::ReceiveUdp()
   → ReceiverCheckSeq(seq, rxQp, payload_size)
   → qbbHeader(seq=下一个期待的字节序号, pg, reversed ports, copied INT)
-  → 若当前数据包有 ECN，则 SetCnp()
+  → 若当前数据包 ecnbits != 0，则 SetCnp()（包含 ECT，见 B.6.7/B.11）
   → IPv4 protocol = ACK 0xFC 或 NACK 0xFD
   → RdmaEnqueueHighPrioQ()
   → TriggerTransmit()
@@ -336,13 +341,13 @@ RATE_BOUND=0：nextAvail = now + IFG + wire_packet_bytes × 8 / qp.m_max_rate_bp
 
 HPCC、FRP/RoCC 用 `ChangeRate()`：调整 m_nextAvail 中上一包的新旧 pacing 时间差，尝试提前重排 NIC 已排的唤醒，再写 m_rate。DCQCN 和 TIMELY 的主体直接赋值 m_rate，没有统一走 ChangeRate；新的速率肯定被后续 PktSent 读取，但已保存的 m_nextAvail 不一定在赋值当刻同步重算。不能画成“所有算法都调用 ChangeRate”。
 
-R3 另有交换机整形：`SetGroupShaperRate(logical_queue, rate_Bps)` → 更新时间与 token → DequeueAndTransmit 根据包大小判是否 blocked → token 不足时 Schedule 唤醒。每发一包扣 wire bytes；物理 TransmitStart 仍按链路速率执行。该层的速率单位是 **B/s**，日志才乘 8 输出 bps。
+R4 另有交换机整形：`CommitControls()` → `ApplyQueueControls()` 批量写整个物理出口的逐流 target → `DequeueAndTransmit()` 检查 PG 暂停、普通令牌及探测模式的逐流 grant/共享端口桶 → 取出 packet 后、QbbDequeue 通知及链路发送前扣 wire bytes。普通令牌不足可排定补足唤醒；额度不足或暂停不会只靠时间经过恢复发送。物理 TransmitStart 仍按链路速率执行。该层计算单位是 **B/s**，逐流 `_bps` 日志乘 8，端口 `_Bps` 日志仍为 B/s。
 
 ### B.6 拥塞控制：选择、初始化、反馈、公式、执行
 
 #### B.6.1 模式入口总表
 
-`ResolveCcMode()` 在 `main:928`；配置用 `CC name`，命令行用 `--cc=name`。Hw 属性 `CcMode` 在 `main:1198`，Switch 属性在后续 switch CC 循环设置。
+`ResolveCcMode()` 在 `main:932`；配置用 `CC name`，命令行用 `--cc=name`。Hw 属性 `CcMode` 在 main 的 host 安装循环设置，Switch 属性在后续 switch CC 循环设置。
 
 | 名称 | 实验 cc_mode | Host/Switch CcMode | 主反馈 | INT 格式 |
 |---|---:|---:|---|---|
@@ -352,7 +357,7 @@ R3 另有交换机整形：`SetGroupShaperRate(logical_queue, rate_Bps)` → 更
 | bifrost | 12 | **1** | Host 保留 DCQCN，DCI 入口方向单独跑 Bifrost PFC | NONE |
 | frp | 13 | 13 | Switch 周期 ICMP FRP feedback | NONE |
 | rocc | 14 | 14 | Switch 周期 ICMP RoCC feedback | NONE |
-| proposed | **1** | **1** | DCQCN + DCI R3 的 STATE/DEMAND、近端 CNP、整形 | NONE |
+| proposed | **1** | **1** | DCQCN + DCI R4 的逐流 STATE/DEMAND、近端 CNP、整形 | NONE |
 
 `AlgorithmName()` 特判 proposed，使 CSV 名称是 proposed，虽然 cc_mode=1。Bifrost 和 proposed 都不是“为 host 启动另一套同编号的新 RNIC 算法”。
 
@@ -362,7 +367,7 @@ Python 单/批量 runner 目前只开放 `dcqcn/hpcc/timely/bifrost/proposed`。
 
 初始化：`RdmaQueuePair` 构造 mlx 状态，alpha=1、first_cnp=true；`AddQueuePair()` 将当前速率/max_rate/targetRate 设为 NIC DataRate。默认这里是 100 Gb/s。主程序把 gain、计时间隔、AI/HAI 等属性注入 Hw。
 
-交换机出队时先减 MMU egress_bytes，再 `ShouldSendCN()` 按剩余 PG 队列标 ECN。接收端 ReceiveUdp 对当前包的 ECN 设置 ACK/NACK 的 CNP 位。发送端 ReceiveAck 检测该位后调用 `cnp_received_mlx()`；ReceiveCnp 也可从独立 `0xFF` 包进入同一函数。**普通 DCQCN 的本接收路径生成的是带 CNP 标志的 ACK/NACK，没有看到周期生成独立 CNP 的接线。** R3 可额外生成独立 CNP。
+交换机出队时先减 MMU egress_bytes，再 `ShouldSendCN()` 按剩余 PG 队列标 ECN。接收端 ReceiveUdp 对当前包的 ECN 设置 ACK/NACK 的 CNP 位。发送端 ReceiveAck 检测该位后调用 `cnp_received_mlx()`；ReceiveCnp 也可从独立 `0xFF` 包进入同一函数。**普通 DCQCN 的本接收路径生成的是带 CNP 标志的 ACK/NACK，没有看到周期生成独立 CNP 的接线。** R4 可额外生成近端独立 CNP。当前 ReceiveUdp 对任何非零 ECN 位都设置 CNP，包含 ECT，见 B.6.7。
 
 实际公式（`hw:775–894`），令 `R` 是 m_rate、`Rt` 是 targetRate、`g=0.0625`：
 
@@ -511,51 +516,71 @@ virtual←clip(virtual-received+grant,0,virtual_bound)
 
 当前 200G、单向 5 ms、T=10 μs 推出最低 H=250500000 B。它不是 egress DCI CSV 中那个单方向发送队列；queued 是按**长链路入口来源**跨所有本地出口汇总的驻留量。
 
-#### B.6.7 Proposed R3：一条额外的网关控制链
+#### B.6.7 Proposed R4：逐流控制与物理端口协调
 
-Proposed 的 RNIC 是 DCQCN；专门的控制状态属于 DciGatewayNode，不属于旧 atcGateway。`longhaul-r3.h::Setup()` 追踪每条 flow 的真实 hash 路径，找到 source gateway A 和 destination gateway B，按 `(B, B_egress, PG)` 分 group。默认左到右 A=40、B=81；反向 flow 的角色互换。同一个物理网关可同时有不同方向的 A/B group。
+Proposed 的 RNIC 仍是 DCQCN；网关运行时状态属于 `DciGatewayNode`，不属于旧 atcGateway。主程序包含 `longhaul-r4.h`，`Proposed::Setup()` 要求显式 `PROPOSED_VERSION 4` 和 `PROPOSED_ECN_MODE`。它追踪每条 flow 的真实 hash 路径，识别 A 的 WAN 出口和 B 的向内出口，并核对 ACK-CNP 与独立 CNP 回程经过 B。本地流不注册 R4；跨域 flow ID 为输入序号加一、generation 默认为 1。
 
-两端对每条跨域 flow 注册稳定 `(IP,port,PG)` identity，生成逐流逻辑队列，从 queue index 8 起。队列挂在对应出口的 BEgressQueue 内，沿普通 MMU 路径记账。ConfigureGroupShaper 的 burst 是一个 wire packet 大小；默认 NONE INT、1000 B payload 时为 1048 B。R3 文档里的 flow identity 也不是硬件 QPN。
+A/B 是随 flow 方向确定的角色：默认左到右 A=40、B=81，反向则互换。内部物理网关 ID 变量为 `dci_gateway_a_id/dci_gateway_b_id`，不能把名称中的 a/b 当作所有 flow 的固定角色；配置 `DCI_LEFT/DCI_RIGHT` 和 metadata `dci_left/dci_right` 仍保留兼容名称。当前没有运行时 Group/Assembly，也没有组间、组内两级分配。
+
+两端按注册 `(源/目的 IP、UDP 端口、PG)` 匹配 flow；这不是硬件 QPN。每个受控出口的逻辑队列从 index 8 起，最多 120 条，挂在 BEgressQueue 内并沿普通 MMU 路径记账；同一个受控出口不能混合 Source/Receiver 角色。`ConfigureGroupShaper` 这个设备接口名称仍保留，burst 为一帧 wire bytes，默认 NONE INT、1000 B payload 时是 1048 B。
 
 ```text
 Proposed::Setup()
   → TracePath() / RegisterFlow(A/B) / DciGatewayNode::Start()
-  → 接 QbbEnqueue/Dequeue 观察注册数据；装逻辑队列 classifier
-  → Schedule(50 μs, Tick)
+  → 接成功入队 QbbAdmitted、真实出队 QbbDequeue；装逻辑队列 classifier
+  → Schedule(control_period, Tick)
 Tick()
-  → UpdateReceiver()：B 合并 CNP，计算 reaction rate / budget / service
-  → UpdateSource()：A 读取快照及实际出队历史，预测 queue，限制 target
-  → SendSnapshot()：B→A STATE，A→B DEMAND
-  → SetGroupShaperRate()：控制真正数据出队
+  → 关闭 B 服务窗口
+  → SamplePorts() → UpdateDemand() → UpdateReceiver() → UpdateSource()
+  → BuildReports() → WriteSamples() → CommitControls()
+  → 发送 B→A STATE、A→B DEMAND，以及待发近端 CNP
+  → 检查逐流 in-tx 与真实逻辑队列一致；排下一次 Tick
 ```
 
-默认周期：control=50 μs；反应窗口=50 μs；普通 report=200 μs，dirty 可至少隔 50 μs 报告；history bin=50 μs；timeout=20 ms。参数里 rate 是 B/s，时间是秒。
+**B：反应上限、预算、队列目标与服务估计。** `Admitted/Dequeue` 对成功入队/真实出队累计 wire bytes，`queue_i=in_i-tx_i`。B 的 `ObserveFeedback()` 看匹配的独立 CNP 或 ACK/NACK-CNP：每个反应窗口更新一次 alpha，有事件才减速，`rate=min(physical,max(probeRate,rate×(1-alpha/2)))`。恢复等待至少 `max(recovery_period,local_feedback_RTT)`，要求无暂停/近期 CNP、真实 TX 推进及近期到达；不能只因定时器到点就加速。
 
-B 的队列计数由 Enqueue/Dequeue trace 累加 packet bytes：`queue_i=in_i-tx_i`。ObserveFeedback 看经过 B 的独立 CNP 或 ACK/NACK-CNP，将 event=true；每反应窗口最多一次按是否见过事件更新 alpha 和 `reaction_rate=max(probeRate,rate×(1-alpha/2))`。最近有 CNP 或端口暂停会延后恢复；恢复需存在实际出队和近期供给。
+A/B 分别按每个物理出口一次 capped max-min 等权分配，跨 PG 共用容量。`SamplePorts()` 估计 `available=max(0,utilization×physical−上个采样间隔非受控实际出队 B/s)`；非受控包括未注册流与控制包，首个间隔无历史竞争样本。B 的 flow cap 来自反应上限，处于 probing 时另受探测量/本地反馈等待限制，暂停或不活动时为零。分配出的预算也是 B shaper target；逐流队列目标为 `floor(port_qref×flow_budget/Σport_budgets)`，不是逐流复制整个 qref，也不是缓存预留。
 
-B 在同一物理端口跨 PG 联合分配，容量估计是 `port_Bps×0.98 - 上周期未注册流/控制包出队B/control_period`。这只是估计剩余容量，未保证未来不受本地竞争影响。按 capped max-min Allocate 给各 active flow budget，并写 B 侧逐流 shaper。
+默认 `busy-observed` 服务估计为 `min(flow_budget,窗口真实出队 bytes/窗口积压墙钟秒数)`。积压时间包括 PFC、令牌和调度等待，不扣除暂停时间；当前暂停输出 0，忙时不足 `service_min_busy` 则回退预算。`budget` 模式直接用预算。**service 是受预算限制的估计，既不是全区间吞吐，也不保证未来排空能力不变。**
 
-`g.service` 主要来自 budget 汇总：若当前有积压，仅累加仍积压 flow 的 budget；无积压时累加所有 flow 的 budget；暂停时置 0。**service_bps 是预算导出的排空能力估计，不是 `Δ真实txBytes/Δt` 实测吞吐。**
-
-A 的历史来自**A 真实数据出队**（不是 host TX），按 bin 存 wire bytes。对于 B 在 t_s 的队列快照和 A→B 延迟 d，History::Predict 从 A 历史区间 `[t_s-d, now]` 重建到 `now+d` 的队列，每段执行：
+**A：逐流历史重建与正常注入。** 历史只记 A 的真实 WAN 数据出队，不记 host 生成/发送或待发 target。对 B 在 `t_s` 的快照、固定前向延迟 `d_f`，History::Predict 回放 A 的 `[t_s-d_f,now]` 发送历史，对应 B 的模型终点 `now+d_f`：
 
 ```text
-q_next=max(0, q_current + 本段发送历史推导的到达bytes - snapshot_service_Bps×本段seconds)
+q_next=max(0, q_current + 本段发送历史推导的到达 bytes
+                           - snapshot_service_Bps×本段 seconds)
+candidate_i=min(snapshot_budget_i,
+                max(0,snapshot_service_i-max(0,queue_used_i-queue_target_i)/tau))
+queue_used_i=predicted_queue_i（history）或 snapshot_queue_i（snapshot 对照）
 ```
 
-它以旧快照的 service 固定推演，并按 bin 内时间比例估计到达量，不是逐包精确未来。fresh 时 A 的 group 允许速率为：
+每桶非负截断，边界桶按时间比例近似，服务保持快照值；不是逐包精确未来。每流 candidate 再参与 A 物理端口分配得到 target，随后批量提交整口控制。`PROPOSED_RECONSTRUCT` / runner `--queue-mode history|snapshot` 只切换使用的队列值；两种模式均维护、计算、校验历史，snapshot 不是零历史成本对照。普通注入要求新鲜 STATE、历史覆盖和远端可发送；接管后的过期/缺历史/暂停会停止普通注入，继续报告。
 
-```text
-cap = min(Σactive_flow_budget, snapshot_group_budget,
-          max(0,snapshot_service-max(0,queue_used-qref)/tau))
-queue_used = predicted_queue（history）或 snapshot_queue（snapshot 对照）
-```
+**启动、许可与关闭。** 默认 optimistic：在首份有效活动 STATE 前，候选为 A/B 注册出口物理容量的较小值，再受 A 端口 available 分配约束；它不用额外启动字节额度。第一份 `sample_time>=start` 且带 HAS_DEMAND 的有效 STATE 接管，包括零预算；接管后不重新授予 optimistic。新鲜不可发送 STATE 优先阻止启动；从 start 起超过 timeout 仍未接管则停发。瞬时空队列不撤销活动流已有的合法发送许可。
 
-再跨共享物理端口分配并写每 flow shaper。无快照先用 probe 限制，失效旧快照不允许增速并回落到 fallback 上限。source queue 超过高水位则在间隔条件下生成近端独立 CNP，提示 RNIC 放慢供给；低水位清除该状态。
+`probe` 启动额度只授一次。恢复探测仅在新鲜、历史覆盖、可发送、正预算、零服务、快照/使用/预测队列均不超过目标且未关闭时触发；首份恢复额度单独授予，后续需剩余额度不足一帧、实际探测发送、新 STATE 序号及 B 累计接收推进。探测发送同时消耗逐流额度和共享端口探测桶，重复 epoch 不刷新额度；optimistic/normal 只使用普通 shaper 令牌。完成回调向两物理网关调用 `CompleteFlow()`，该函数只关闭 Source；B 从 DEMAND 接收关闭标志，仍允许尾部排空。
 
-STATE/DEMAND 是真实 packet：protocol=249/0xF9，带 group/epoch/sequence/sample time/queue/service/budget/逐流记录，进入最高优先队列、经历链路传播和 NicDelay。每片最多 24 条记录；接收端验证身份、版本、时效、顺序和完整分片，收齐后原子应用。不是跨节点直接读取对方内存。
+**控制报文。** STATE/DEMAND 是经路由、最高优先队列、物理链路传播及 NicDelay 的真实 packet：IP protocol=249/0xF9、version=4、公共头 16 B、STATE 记录 152 B、DEMAND 记录 64 B。按 peer/kind 和 IP MTU 装包，单记录不跨包；默认 1500 B MTU、20 B IPv4 头时最多 9 条 STATE 或 22 条 DEMAND，PPP 不计入 IP MTU。结构错误整包拒绝，身份/peer/代次/序号/时间/计数/服务窗口等语义逐记录校验应用，不等待组级分片齐备。模型依赖仿真同步时钟及固定注册/路径/帧延迟。
 
-所有经过 B 的匹配路径 ECN/CNP 都可影响 B，没有按“ECN 究竟在哪个交换机打上”隔离。默认 `PROPOSED_SHAPER_ECN=1` 仍允许注册整形出口新标记 ECN；为 0 时只抑制这些队列的新 mark，既有 ECN 位和其他队列保留。
+**ECN 边界与近端反馈。** 默认 `source-boundary`：A 对匹配 Source 身份及注册出口的 CE 置 pending，并立即改成 ECT(0)，保留 DSCP 和长度，更新解析头并按全局设置重算校验和；不等近端 CNP 真正发出才清 CE。pending 在限频或瞬时空队列下保留，只在近端 CNP 实际发出时消费。A 端口 sourceHigh/Low 按活动流数分摊，用滞回触发本地积压反馈；本地队列及 upstream CE pending 共用近端/原生 CNP 间隔限制。A 观察原生反馈只记账并抑制重复近端反馈，不执行 B 的乘法反应。
+
+source-boundary 的 A/B 注册受控出口都不新增 CE；B 保留已有 CE，其他流/出口及普通交换机继续原 ECN。`path` 模式保留路径 ECN；旧 `PROPOSED_SHAPER_ECN=1|0` 仅允许在 path 显式配置，用来开关受控出口新标记，0 不清已有 CE。**当前 `RdmaHw::ReceiveUdp()` 仍用 `ecnbits!=0` 计拥塞、`if(ecnbits)` 设置 ACK-CNP；A 改写的 ECT(0) 仍可能产生远端反馈。因此网关边界已有代码，端到端反馈隔离尚未成立。**
+
+**配置和资源边界。** 下列是当前 `config-longhaul-r4.txt` 的实现起点，不是性能标定值；共同前缀为 `PROPOSED_`，速率 B/s、队列 wire B、时间秒。
+
+| 配置 | 当前配置值/要求 |
+|---|---|
+| VERSION、ECN_MODE、STARTUP_MODE | 4、source-boundary、optimistic；版本/ECN 模式须显式配置 |
+| RECONSTRUCT、SERVICE_MODE、NEAR_CNP | 1、busy-observed、1；边界模式必须启用近端 CNP |
+| REPORT_PERIOD；CONTROL_PERIOD/BIN_WIDTH/REACTION_WINDOW/REPORT_MIN_INTERVAL/CNP_INTERVAL | 200 μs；其余均 50 μs |
+| RECOVERY_PERIOD；SERVICE_WINDOW/SERVICE_MIN_BUSY | 200 μs；200/50 μs；服务窗口参数省略时分别取 report/control 周期 |
+| PORT_QREF；TAU；SOURCE_PORT_HIGH/LOW | 500000 B；0.02 s；250000/62500 B |
+| GAMMA；PROBE_RATE/RATE_INCREASE；UTILIZATION | 0.0625；125000000/625000000 B/s；0.98 |
+| STATE_TIMEOUT；BUFFER_FALLBACK_FRACTION | 0.02 s；0.05；timeout 须大于 d_f+3×报告周期 |
+| PROBE_BYTES/PROBE_PORT_BURST；PROBE_PORT_FRACTION；CONTROL_IP_MTU | 65536 B；0.05；1500 B |
+
+旧 QREF、SOURCE_HIGH/LOW、FALLBACK_FRACTION 会触发迁移错误，不能作为新键的隐式别名；新键分别是 PORT_QREF、SOURCE_PORT_HIGH/LOW、BUFFER_FALLBACK_FRACTION。边界模式须删除显式旧 SHAPER_ECN 键。不同 B 端口 qref 的合计及不同 A 端口 sourceHigh 的合计均须小于共享缓存 80%。网关 A/B 聚合积压分别按共享缓存 80%/50% 触发/退出保护，保护时将对应 available 乘 fallback；这同时影响 B 预算和排空，不只是限制 A 注入。
+
+这些机制描述的是源码已实现的路径。功能测试范围与历史证据见 B.11 及 [R4 实现与功能验证记录](../simulator/ns-3.39/examples/LonghaulCC/R4_IMPLEMENTATION_VALIDATION.md)；不能由源码存在推出测试通过、长期稳定、严格隔离或性能优势。
 
 ### B.7 指标的严格口径总表
 
@@ -574,11 +599,11 @@ STATE/DEMAND 是真实 packet：protocol=249/0xF9，带 group/epoch/sequence/sam
 | Measured RTT | PktSent 的 packet-end-seq→TX time；推进 ACK 到达时间 | ReceiveAck 产生样本；FlushRttSamples→WriteRttSummary | ns | 每个符合条件 ACK 产样；默认100 μs汇总，有样本才写行 | host TX start 到 sender 收到确认该 packet end 的累计 ACK |
 | TIMELY RTT | SeqTsHeader ih.ts，ACK 原样回显 | UpdateRateTimely，`now-ts` | timestep，默认 ns | 完整更新 ACK 到来时 | 算法自己的 RTT 输入，没有读取 measured-rtt.csv |
 | DCI queue length | DCI出口 BEgressQueue GetNBytesTotal | SampleDciLink 直接取瞬时值 | B（含模拟头） | 默认100 μs | 当前在该出口等待的所有队列；不含已出队发送中/传播中包 |
-| 路径 PG queue length | BEgressQueue GetNBytes(pg) | LonghaulMeasurements::Sample → `.queues.csv` | B | 默认100 μs，Finish再取停止值 | data/ACK 路径上已登记 switch 出口/PG驻留，R3逻辑队列按PG汇总 |
+| 路径 PG queue length | BEgressQueue GetNBytes(pg) | LonghaulMeasurements::Sample → `.queues.csv` | B | 默认100 μs，Finish再取停止值 | data/ACK 路径上已登记 switch 出口/PG驻留，R4逻辑队列按PG汇总 |
 | HPCC queue/txRate/u | Switch出口 INT qlen/txBytes/time | UpdateRateHp 做量化差分和队列归一化 | B；bit/s；无量纲 | INT数据出队和ACK，不是100 μs测量循环 | 算法观察的出口状态；u 还含queue项，不等于CSV利用率 |
 | FRP queue deviation | 当前出口总队列减 qref | ConfigureFeedbackPayload→host HandleFrpFeedback | 线上600B cell；还原B | 默认40 μs活跃出口 | 有符号 queue error，GetQDepth 的值不是绝对队列长度 |
 | ECN events | DCI QbbDequeue trace PeekHeader | CountDciEcn：UDP 且 ECN bits!=0 则累计 | packet 次数 | 每包增计，100 μs输出累计值 | DCI离开时带非零ECN位的数据包数；不能定位新mark发生在哪里 |
-| CNP | ReceiveAck CNP位或ReceiveCnp | DCQCN两组 arrived bits；R3 ObserveFeedback累加cnps | bool；R3 packet/event次数 | 每个反馈；按算法窗口合并 | 拥塞反馈；不等于标记次数，也不等于减速次数 |
+| CNP | ReceiveAck CNP位或ReceiveCnp | DCQCN两组 arrived bits；R4 ObserveFeedback累加cnps | bool；R4 packet/event次数 | 每个反馈；按算法窗口合并 | 拥塞反馈；不等于标记次数，也不等于减速次数 |
 | PFC events | QbbPfc trace type 0/1/2/3 | get_pfc逐事件csv，主程序累计pause/resume | 次数 | 每次发送/接收控制帧；link.csv带累计 | 全网络控制帧事件数，发送/接收各算一次，不是暂停时长 |
 | BDP | pairBaseRtt与pairBw | main：`floor(base_rtt_ns×bottleneck_bps/(8×10^9))` | payload窗口用的B | 建网后一次 | 流路径瓶颈速率乘配置基准RTT的字节数 |
 | Configured/effective window | QP m_win；GetWin() | HasWin启用时取BDP，VarWin时乘m_rate/m_max_rate | B | m_win初始设一次；GetWin按需计算 | 允许在途payload字节，不是队列大小或packet个数 |
@@ -586,6 +611,12 @@ STATE/DEMAND 是真实 packet：protocol=249/0xF9，带 group/epoch/sequence/sam
 | standalone FCT | 路径串行化系数/瓶颈/包数及头部 | qp_finish 的解析公式，见B.8 | ns | 完成时一次 | 无竞争解析参考，非另外运行的单流仿真结果 |
 
 CNP 并没有一个对所有算法统一导出的 `cnp_events` CSV 列。要读普通算法反馈状态或 proposed 网关 cnps，不能把 dci-link 的 ecn_events 改称 CNP 数。非 DCI 交换机的吞吐也不能从 `.queues.csv` 单列直接得到，后者只记瞬时队列与暂停布尔值。
+
+R4 还输出 `<prefix>.gateway-<node>.flows/ports/events/packets.csv` 与 `<prefix>.paths.csv`；runner 的 prefix 为 `r4`。直接 C++ 未设 PROPOSED_OUTPUT 时，prefix 是 `SUMMARY_META_FILE + ".control.csv"`。paths 只含注册跨域流；公共 metadata 的 data/ACK 路径覆盖全部输入 flow。公共停止统计由 LonghaulMeasurements::Finish 生成，并写 R4 同口径副本。
+
+R4 flows 的 `reaction_bps/budget_bps/service_bps/candidate_bps/target_bps` 都是控制上限/估计，实际速率需用 packets 的 TX 或累计 tx 差分；ports 的 `physical_Bps/available_Bps/target_Bps` 单位为 B/s。`WriteSamples()` 早于 `CommitControls()`，同一时刻决策行不能直接解释为已发送。probe_remaining 是额度，probe_sent 是实际探测累计发送；过期/缺覆盖时不能将保留的预测字段当有效新预测。
+
+`analyze-longhaul.py::r4_evidence()` 依据 node/role/flow/generation 和 packet event_order 校验 ADMIT/TX 累计守恒，检查 A TX 按注册延迟映射到 B ADMIT。快照以 state_sample_ns/state_ordinal 精确核对，未来队列取 prediction_end_ns 处**同一 ns 所有事件之后**的 B 事件账本，而非下一条周期样本；终点越过 Stop 时记不可取得，预测误差只在 fresh/history_covered 且终点可取得时计算。事件核对和预测误差不是性能或因果收益证明。
 
 ### B.8 指标细节：采样窗口、RTT、BDP 和 FCT
 
@@ -673,9 +704,9 @@ standalone_FCT = baseRTT
                 + ceil(ACK_wire×S_path)
 ```
 
-这是无排队/丢失/竞争的解析参考，不是实验程序又跑了一次单流；不显式模拟窗口节奏或R3控制启动。回程串行化使用同一个路径系数，默认对称参数可用，在参数不对称拓扑中不能保证匹配真实ACK路径。
+这是无排队/丢失/竞争的解析参考，不是实验程序又跑了一次单流；不显式模拟窗口节奏或网关控制启动。回程串行化使用同一个路径系数，默认对称参数可用，在参数不对称拓扑中不能保证匹配真实ACK路径。
 
-ns-3每包串行化时间的整数ns舍入与该公式集中ceil不同，因此解析值不必成为严格数学下界。本次10KB DCQCN实际FCT10229312 ns，解析参考10229332 ns，差20 ns；不能据这个微小差值判断程序“超过线速”。
+ns-3每包串行化时间的整数ns舍入与该公式集中ceil不同，因此解析值不必成为严格数学下界。2026-10-06 历史10KB DCQCN实际FCT10229312 ns，解析参考10229332 ns，差20 ns；不能据这个微小差值判断程序“超过线速”。
 
 只有完成flow写FCT；到全局Stop时仍未完成不会自动补一行FCT。analyze 输出 `completed_subset_fct_p50_ns/p95_ns` 明确只对完成子集统计，并另记 incomplete；不能把缺行视为FCT=0。
 
@@ -685,7 +716,7 @@ queue采样是瞬时驻留，不是本区间平均queue，也不是累计queue�
 
 ECN概率（出队后剩余PG队列q）：q>kmax必标记；kmin<q≤kmax时按 `pmax×(q-kmin)/(kmax-kmin)`；q≤kmin不标。默认100G kmin/kmax=400000/1600000 B，200G=800000/3200000 B。在恰好kmax处是pmax而非必标，这是条件使用 `>` 的实际效果。
 
-CountDciEcn统计的是已带非零ECN位的UDP packet经过DCI出队，可能标记来自更前面的交换机；也会把非零ECT位算入计数。当前发送包TOS=0，新标记CE=3，因此通常反映CE packet经过次数。它是累计值，区间新增需要差分，不是每100 μs重新清零。
+CountDciEcn统计的是已带非零ECN位的UDP packet经过DCI出队，可能标记来自更前面的交换机；也会把非零ECT位算入计数。Host 数据初始 TOS=0，但 R4 的 A 可将 CE=3 改为 ECT(0)=2，后者仍被该计数统计。因此不能将当前 `ecn_events` 直接当作 CE 数、新标记数或边界隔离证据。它是累计值，区间新增需要差分，不是每100 μs重新清零。
 
 PFC type：0=收到RESUME，1=收到PAUSE，2=发出PAUSE，3=发出RESUME。两个累计量是**全网**值，两条DCI方向行重复带同一全网累计数；合并两行会双计。接收端因定时器到期Resume不产生一个新的QbbPfc接收帧事件，所以这些计数也不是暂停/恢复状态转换总数。路径queues.csv的paused比例是采样布尔比例，不是精确积分的暂停时长。
 
@@ -728,22 +759,24 @@ DCI tx_bps把整包字节记在传输开始时，短区间跨界会有一个pack
 | `FlowInput.unique_sent` | 初始0 | ObserveHostTx取max(seq+payload) | 当前连续顺序发送模型下首次供给终点；不是通用去重集合 |
 | `FlowInput.payload_sent/observed_rx/completion_ns` | 初始0 | host TX trace；采样/完成复制Rx；qp_finish | 停止summary、重传估计、完成验收 |
 
-R3 额外状态（`dci-gateway-node.h:72`）要与以上同名字段区分。
+R4 额外状态（`dci-gateway-node.h` 的 Flow/SourceState/ReceiverState/PortState）要与以上同名字段区分。
 
-| R3 状态 | 来源/更新 | 用途及单位 |
+| R4 状态 | 来源/更新 | 用途及单位 |
 |---|---|---|
-| Flow `in/tx` | QbbEnqueue/QbbDequeue对注册packet计数 | wire B，`in-tx`等于逐流逻辑队列 |
-| Flow `rate` | 初probeRate；B按反馈/恢复调整 | B的反应能力上限，B/s，不是host m_rate |
-| Flow `budget` | B联合Allocate；A从STATE读取 | 逐flow预算B/s |
-| Flow `target` | A/B控制后设定 | 实际交给网关shaper的B/s |
-| Flow `alpha/event/cnps/decreases` | ObserveFeedback计次数/set event；B窗口合并更新 | 反馈到算法减速的账本；次数彼此不必相等 |
-| Flow `window` | B反应时写now | **时间窗口起点，秒；不是RDMA在途字节窗口** |
-| Flow `active/demand/closed` | 最近到包、驻留、DEMAND、发送端完成 | 控制预算是否仍需保留 |
-| Group `service/budget` | B从逐flow预算/积压/暂停汇总 | B/s，service是估计，不是直接实测 |
-| Group `history` | A真实数据出队按bin加wire bytes | 预测远端积压的已发送历史 |
-| Group `snapshot/have/fresh` | 收齐合法STATE后原子更新；Tick校验时效 | 避免不完整/过期快照授权增速 |
-| Group `predicted/queueUsed` | A历史推演，或snapshot对照 | wire B，预测目标是now+d时刻 |
-| Shaper `rate/tokens/burst/updated` | Configure/SetRate及每次调度刷新 | B/s与B；tokens够整包且PG未paused才出队 |
+| Flow `in/tx/peak` | QbbAdmitted/QbbDequeue 对注册 packet 成功入队/实际出队计数 | wire B；in-tx 等于逐流真实逻辑队列 |
+| Flow `rate/alpha/event/cnps/decreases` | B 合并原生反馈及反应/恢复；A 只记录原生反馈 | rate 为反应上限 B/s，不是 host m_rate；反馈次数不等于减速次数 |
+| Flow `budget/target` | B 分配预算；A 从 STATE 读预算并分配 target | B/s；target 执行到设备，仍不是实际吞吐 |
+| Flow `reactionStart/recoverySince/lastCnp` | B 窗口/反馈和恢复逻辑 | ns 时间门限，不是 RDMA 在途字节窗口 |
+| Flow `active/closed/life` | 启动时刻、队列/到达、DEMAND、Source 完成 | NotStarted/Active/Idle/Draining/Closed；空队列可仍是 active |
+| Flow `sourceHigh/sourceLow/marking/upstreamCePending` | A 水位分摊、滞回、CE 消费及近端 CNP 实发 | 水位单位 B，marking/pending 为布尔状态；不是 packet 上的 ECN 位 |
+| ReceiverState `service/queueTarget/window` | B 预算、积压窗口真实出队与暂停状态 | B/s、B、ns；服务可为 BusyObserved/BudgetFallback/BudgetOnly/Paused |
+| SourceState `history` | A 真实 WAN 出队按 bin 加 wire bytes | 逐流历史，预测 B 在 now+d_f 的积压 |
+| SourceState `state/have/fresh/covered` | 每条合法 STATE 独立应用；Tick 校验年龄/历史覆盖 | 不依赖整组分片完成；snapshot 模式仍需历史覆盖 |
+| SourceState `predicted/used/candidate` | 历史推演及候选公式 | B、B、B/s；过期时保留的预测字段不能当作有效新预测 |
+| SourceState `mode/activeStateReceived/probeEpoch` | 有效活动 STATE、许可条件和探测授予 | Normal/StartupProbe/RecoveryProbe/Stopped/OptimisticStartup；接管不可逆 |
+| PortState `physical/available/otherTx` | 注册物理容量、上个间隔非受控 TX 差分、缓冲保护 | B/s、B/s、累计 wire B；同端口一次分配 |
+| 设备 shaper `rate/tokens/burst` | Configure/ApplyQueueControls 和调度刷新 | B/s、B；PG 未暂停且令牌足一帧才允许出队 |
+| 设备 probe `grant/probeTokens` | 新 epoch 授逐流字节额度、端口桶补充、真实出队扣减 | B；限额不足不因时间经过自动刷新逐流 grant |
 
 ### B.10 事件/定时器地图
 
@@ -765,14 +798,14 @@ R3 额外状态（`dci-gateway-node.h:72`）要与以上同名字段区分。
 | 普通PFC CheckAndSendPfc/RefreshPfc | RefreshPfc | 默认PauseTime/2=2.5 μs | 重发PAUSE，保持上游暂停；RESUME时取消 |
 | 收到PFC的Qbb DoReceive | Resume(PG) | PAUSE携带时间，默认5 μs | 清device paused并试发送；新PAUSE取消旧expiry后重排 |
 | SetupBifrost / slot回调自身 | SendBifrostPfcWithCustomTime | 默认10 μs | virtual/grant/received账本更新，必要时发定长pause |
-| R3 Start/Tick自身 | DciGatewayNode::Tick | 默认50 μs | B反应/预算、A预测/整形、报告、日志；DoDispose取消 |
-| Qbb shaper token不足 | DequeueAndTransmit via m_shapeWake | `缺少token/rate`，至少1 ns | token补足后再尝试；SetRate取消旧wake并立即尝试 |
+| R4 Start/Tick自身 | DciGatewayNode::Tick | 默认50 μs | B反应/预算、A预测/整形、报告、日志；DoDispose取消 |
+| Qbb shaper 可补足令牌的队首 | DequeueAndTransmit via m_shapeWake | 本流普通/探测桶等待取较大值，各可唤醒流取最小，至少1 ns | 0 rate、PFC 暂停、逐流额度不足不靠定时补齐；提交控制/授予额度、到包、恢复可重新触发发送 |
 | main / SampleFlowRates自身 | SampleFlowRates | 三个采样间隔最小值，默认100 μs | 差分输出TX/RX、清RTT样本；到Stop不再排 |
 | main / SampleDciLink自身 | SampleDciLink | RATE_SAMPLE_INTERVAL，默认100 μs | 差分DCI bytes，取瞬时queue/累计events |
 | StartMeasurements/Sample自身 | LonghaulMeasurements::Sample | RATE_SAMPLE_INTERVAL，默认100 μs | flow字节与路径PG队列采样；Finish再采停止时刻 |
 | main | Simulator::Stop | SIMULATOR_STOP_TIME，默认0.38 s | 停全仿真；不等价于完成所有flow |
 
-两种常被误称“Timer”的情况：ReceiverCheckSeq 的 `m_nackTimer=Now+500 μs` 是“下次来乱序包时比较的门限”，没有为它Schedule一个回调；FRP的m_lastBottleneckUpdate/m_timerExpired也主要在新反馈到来时检查。R3 reaction/report/recovery在同一个Tick里判断时间条件，并非每一项各有一个独立EventId。
+两种常被误称“Timer”的情况：ReceiverCheckSeq 的 `m_nackTimer=Now+500 μs` 是“下次来乱序包时比较的门限”，没有为它Schedule一个回调；FRP的m_lastBottleneckUpdate/m_timerExpired也主要在新反馈到来时检查。R4 reaction/report/recovery在同一个Tick里判断时间条件，并非每一项各有一个独立EventId。
 
 HPCC/TIMELY的完整更新是ACK序号触发，无固定频率timer。RTT_SAMPLE_INTERVAL只控制测量输出，不控制算法更新。
 
@@ -798,23 +831,27 @@ MMU里有ABM的25 μs updateDequeueRates，但当前main选择DT，未走ActiveB
 | FRP“timeout timer” | type=0分支无独立恢复事件，只在未采用反馈时检查；type=1的RoCC才启动独立100 μsEvent | hw:1564、1624 |
 | FRP/RoCC链路字段范围 | linkRate低15位且10Mb/s单位，只能无损表示到327.67Gb/s；默认100/200G没问题，不能直接推广400G | icmpv4.cc:605–636 |
 | qDepth | 实际线上字段是有符号q_dev=q-qref，并非绝对深度 | sw:766；hw:1433 |
-| Bifrost/proposed编号 | Bifrost host mode=1；proposed实验cc_mode也=1，额外逻辑由名称和网关配置启用 | main:928、1198；Proposed::Setup |
-| R3 service_bps | 预算及积压集合导出的服务估计，非真实出口差分；预测假定快照service继续适用 | dci-gateway-node.cc:260、290 |
-| R3 ECN归属 | 观察经过B的路径反馈，没有ECN生成边界隔离；不能说一定是B下游拥塞 | ObserveFeedback；WriteMetadata |
-| baseRTT/FCT解析参考 | 排除串行化的baseRTT；standalone另外加串行化。不能把baseRTT当所有packet实测RTT，也不能说standalone已是实测无竞争FCT | main:467、1250附近 |
-| 总资源50MiB解释 | 主程序还为每端口8PG配置并累计headroom，DCI池远大于50MiB | main:1140–1174 |
-| ACK_HIGH_PRIO设置范围 | main只设置host RdmaEgressQueue::ack_q_idx，未把SwitchNode::AckHighPrio属性随它设置；默认0相符，改成1时metadata对ACK队列的假设需再核对 | main:1233；sw:43/229；measurements:24 |
+| Bifrost/proposed编号 | Bifrost host mode=1；proposed实验cc_mode也=1，额外逻辑由名称和网关配置启用 | main::ResolveCcMode/host 安装循环；Proposed::Setup |
+| R4 service_bps | 默认逐流忙时观测，夹到预算；暂停为零、忙时不足回退预算，另有 budget 模式；预测假定快照 service 继续适用 | ServiceWindow；UpdateReceiver；History::Predict |
+| R4 ECN归属 | A 消费源侧 CE 并改 ECT(0)，A/B 受控出口不新增 CE；但 host 对非零 ECT 也产生反馈，端到端隔离未成立，不能将 B 的反馈无条件归为下游 CE | ConsumeSourceCe/ShouldMarkEcn/ObserveFeedback；hw::ReceiveUdp |
+| baseRTT/FCT解析参考 | 排除串行化的baseRTT；standalone另外加串行化。不能把baseRTT当所有packet实测RTT，也不能说standalone已是实测无竞争FCT | main::qp_finish/path 参数计算 |
+| 总资源50MiB解释 | 主程序还为每端口8PG配置并累计headroom，DCI池远大于50MiB | main 的 MMU 配置循环 |
+| ACK_HIGH_PRIO设置范围 | main只设置host RdmaEgressQueue::ack_q_idx，未把SwitchNode::AckHighPrio属性随它设置；默认0相符，改成1时metadata对ACK队列的假设需再核对 | main 的 ack_q_idx 赋值；SwitchNode::AckHighPrio/SendToDev；WriteFlowPath |
 | ACK PG访问方式 | switch普通转发用ch.udp.pg读取非TCP包；ACK恰因CustomHeader union的ack.pg/udp.pg在同一偏移而正确读取。不能把ACK说成UDP包 | sw:237；custom-header.h:103/121 |
 | packet序号宽度 | QP状态是64bit，但SeqTsHeader和ACK.seq/ReceiverNextExpectedSeq是32bit；不能由m_size支持uint64推断任意大flow序号可用 | GetNxtPacket；seq-ts-header；RxQP |
 | 完成与后续算法处理顺序 | ReceiveAck可先QpComplete取消/移除QP，再处理该ACK的CNP/算法；完成ACK带反馈时可能再次触及状态/创建事件，需要单独回归确认影响，本轮未拥塞复现 | hw:509–535 |
+
+`longhaul-r4-test.cc` 是 CMake 的独立 example 目标。其无参数 Run 路径包含设备/PFC 续期、边界改写与近端 pending、许可/启动、分配、服务、历史、消息及生命周期断言；11 种拒绝输入须在独立进程选择 Invalid 分支：duplicate、identity、queues、mixed、batch、capacity、timeout、boundary-no-near、boundary-no-ecn、ecn-mode、startup-mode。无参数运行不自动覆盖这些 abort 分支。本次仅阅读断言，未执行；已有通过记录应按 [R4 实现与功能验证记录](../simulator/ns-3.39/examples/LonghaulCC/R4_IMPLEMENTATION_VALIDATION.md) 的日期/归档版本理解，不能用于证明当前二进制身份或性能。
+
+当前额外限制包括固定注册/路由、单对 DCI、固定帧延迟、仿真同步时钟；多网卡 host 与身份复用未支持。历史非受控 TX 和常值 service 不保证未来容量份额；不同龄期的 STATE 预算也不是容量预留。optimistic 在途量可超过队列目标，端口联合分配和共享 PG/PFC 不构成全网公平或严格逐流隔离。
 
 另外，普通queue0控制packet绕过非queue0 MMU准入。`m_bytes[in][out][q]`对queue0会累加但出队只在qIndex!=0分支减；所以不能将所有m_bytes槽求和作为真实全switch缓存值。Bifrost读取PG3，不直接使用queue0残量。
 
 与论文的一致性边界：代码标作Mellanox版本的DCQCN，HPCC/TIMELY采用上述具体实现；FRP文件给出了显式公式，RoCC 200G扩展写有源码策略说明。但本轮没有对原论文逐式、逐参数、逐实验设置审阅，也没有把命名当作完整复现证明。已能确认的是以上内部注释/实际行为差异；“是否违背某篇论文”需要明确论文版本与公式后另行核对。
 
-### B.12 本次可运行核验及其边界
+### B.12 历史短流核验及其边界（2026-10-06，R3 时期）
 
-使用当前已有 `build/examples/LonghaulCC/ns3.39-longhaul-convergence-optimized`，没有重编译。程序和源码时间戳检查及输出字段与本轮分析吻合，但未据此声称构建内容逐字节等同当前源码。
+以下保留初稿记录及原有数值，属于 2026-10-06 的证据，不是本次执行结果。当时使用已有 `build/examples/LonghaulCC/ns3.39-longhaul-convergence-optimized`，没有重编译；时间戳及输出字段检查不构成源码/二进制逐字节同一性证明。本次未检查该历史二进制或临时结果是否仍可取得，也未将记录转换为 R4 验证结果。
 
 临时核验目录：`/tmp/longhaul-reading-o202mkej/`。正式topology仍为82节点默认文件；只在临时flow文件中使用：
 
@@ -838,48 +875,50 @@ simulator/ns-3.39/build/examples/LonghaulCC/ns3.39-longhaul-convergence-optimize
 | FRP | 1/1 | 48 | 10000/10000 | 10480 | 10229312 |
 | RoCC | 1/1 | 48 | 10000/10000 | 10480 | 10229312 |
 | Bifrost | 1/1 | 48 | 10000/10000 | 10480 | 10229312 |
-| Proposed，50ms停止 | 1/1 | 48 | 10000/10000 | 10480 | 20562656 |
+| Proposed R3，50ms停止 | 1/1 | 48 | 10000/10000 | 10480 | 20562656 |
 
 上述完成运行的summary都为准入丢弃0、停止switch queue/MMU/egress记账残留0。三个基础模式的RTT样本数均10；baseRTT均10228000 ns、BDP127850000 B；实际hash路径见B.3。
 
 proposed最初0.03 s运行时 `rx_payload_bytes=10000` 但completed=0、FCT无行、RTT汇总无行。源码链与packet日志解释了这一现象：A第一包真正出队在20.308384 ms，B第一包出队25.323425 ms，最后一包B出队25.398881 ms，最终累计ACK到发送端30.562656 ms，超出最初Stop。延长至0.05 s后正常记录FCT。这个例子直接说明 **RX已收完、发送端完成、交换机队列清空是不同条件**。
 
-以上10KB流很快从host发完，窗口未成为瓶颈，也没有制造ECN拥塞；不能用六种baseline的接近FCT得出“算法收敛/公平性一样”。R3数值是控制启动与整形路径核验，不是正式3GB性能对照。正式S0、拥塞、多流、重传和论文性能均未在本轮重新评测。
+以上10KB流很快从host发完，窗口未成为瓶颈，也没有制造ECN拥塞；不能用六种baseline的接近FCT得出“算法收敛/公平性一样”。R3数值是控制启动与整形路径核验，不是正式3GB性能对照。当时未评测正式S0、拥塞、多流、重传和论文性能；本次文档更新也没有重新评测。
 
 ## C. 核心代码地图
 
 ### C.1 先读这些文件和函数
 
-| 文件 | 重要类/函数（本次行号） | 为什么重要 |
+| 文件 | 重要类/函数 | 为什么重要 |
 |---|---|---|
-| [longhaul-convergence.cc](../simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc) | main 940；LoadFlows 223；StartFlow 247；CalculateRoute 520；SetRoutingEntries 574；SampleFlowRates 616；SampleDciLink 678；qp_finish 467；ParseConfig 826 | 整个实验的对象、属性、路由、flow、算法、测量的装配中心 |
-| [config-longhaul.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul.txt) | CC、NIC_DELAY、HAS_WIN、KMAP、采样与R3参数 | 确认真正运行参数，避免仅看全局默认值 |
+| [longhaul-convergence.cc](../simulator/ns-3.39/examples/LonghaulCC/longhaul-convergence.cc) | main；LoadFlows；StartFlow；CalculateRoute/SetRoutingEntries；SampleFlowRates/SampleDciLink；RecordCompletionSamples/qp_finish；ParseConfig | 整个实验的对象、属性、路由、flow、算法、测量的装配中心 |
+| [config-longhaul-r4.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul-r4.txt)、[config-longhaul.txt](../simulator/ns-3.39/examples/LonghaulCC/config-longhaul.txt) | R4 runner 默认与 C++ 旧默认；CC、NIC_DELAY、HAS_WIN、ECN/采样及 PROPOSED 参数 | 区分入口默认值；以有效配置核对参数，旧配置不能直接运行当前 proposed |
 | [topology-longhaul.txt](../simulator/ns-3.39/examples/LonghaulCC/topology-longhaul.txt) | 节点头、switch列表、105条links | 能把节点ID和实际路径对应起来 |
 | [flow-longhaul-s0.txt](../simulator/ns-3.39/examples/LonghaulCC/flow-longhaul-s0.txt) | 一条src/dst/PG/dport/size/start | 最适合从一个flow理解创建流程 |
 | [rdma-client-helper.cc](../simulator/ns-3.39/src/applications/helper/rdma-client-helper.cc) | 构造函数、Install | 输入值如何变成Application属性 |
-| [rdma-client.cc](../simulator/ns-3.39/src/applications/model/rdma-client.cc) | RdmaClient::StartApplication 141；Finish 131 | 一条应用如何把工作量交给RDMA模块并结束 |
+| [rdma-client.cc](../simulator/ns-3.39/src/applications/model/rdma-client.cc) | RdmaClient::StartApplication；Finish | 一条应用如何把工作量交给RDMA模块并结束 |
 | [rdma-driver.cc](../simulator/ns-3.39/src/point-to-point/model/rdma-driver.cc) | Init、AddQueuePair、QpComplete | 节点对象、NIC和Hw之间的桥接及完成Trace |
-| [rdma-hw.cc](../simulator/ns-3.39/src/point-to-point/model/rdma-hw.cc) | Setup 214；AddQueuePair 262；GetRxQp 327；ReceiveUdp 360；ReceiveAck 467；GetNxtPacket 654；PktSent 705；UpdateNextAvail 724；ChangeRate 758 | RNIC的数据生成/接受、可靠状态、实际发送计数和调速落点 |
+| [rdma-hw.cc](../simulator/ns-3.39/src/point-to-point/model/rdma-hw.cc) | Setup；AddQueuePair；GetRxQp；ReceiveUdp；ReceiveAck；GetNxtPacket；PktSent；UpdateNextAvail；ChangeRate | RNIC的数据生成/接受、可靠状态、实际发送计数和调速落点 |
 | [rdma-hw.h](../simulator/ns-3.39/src/point-to-point/model/rdma-hw.h) | RdmaHw属性、NIC manager、QP map、算法声明 | 读懂Hw共享对象、查找key和控制参数 |
 | [rdma-queue-pair.h](../simulator/ns-3.39/src/point-to-point/model/rdma-queue-pair.h)、[.cc](../simulator/ns-3.39/src/point-to-point/model/rdma-queue-pair.cc) | RdmaQueuePair/RxQueuePair；Acknowledge、GetOnTheFly、GetWin、IsFinished | 全部逐flow状态和窗口单位的权威来源 |
-| [qbb-helper.cc](../simulator/ns-3.39/src/point-to-point/helper/qbb-helper.cc) | QbbHelper::Install 236 | 每条link真实创建哪些设备、队列和channel |
-| [qbb-net-device.cc](../simulator/ns-3.39/src/point-to-point/model/qbb-net-device.cc) | RdmaEgressQueue::GetNextQindex 108；TransmitStart 289；DequeueAndTransmit 348；Receive 533；DoReceive 554；SwitchSend 670；SendPfc 678 | 包怎么开始发送、怎么收、PFC如何暂停；host和switch分支都在这里 |
+| [qbb-helper.cc](../simulator/ns-3.39/src/point-to-point/helper/qbb-helper.cc) | QbbHelper::Install | 每条link真实创建哪些设备、队列和channel |
+| [qbb-net-device.cc](../simulator/ns-3.39/src/point-to-point/model/qbb-net-device.cc) | RdmaEgressQueue::GetNextQindex；TransmitStart；DequeueAndTransmit；Receive/DoReceive；SwitchSend；SendPfc；ApplyQueueControls/GrantProbeBytes | 包怎么收发、PFC如何暂停；成功准入计量、批量整形和探测真实扣减 |
 | [qbb-net-device.h](../simulator/ns-3.39/src/point-to-point/model/qbb-net-device.h) | callbacks、totalBytesSent/Rcvd、shaper、pause状态 | 核对计数范围和回调接口 |
-| [qbb-channel.cc](../simulator/ns-3.39/src/point-to-point/model/qbb-channel.cc) | TransmitStart 91 | 串行化+传播时间如何变成下一跳Receive事件 |
-| [switch-node.cc](../simulator/ns-3.39/src/point-to-point/model/switch-node.cc) | GetOutDev 124；SendToDev 210；SwitchReceiveFromDevice 334；SwitchNotifyDequeue 346 | 自定义实际转发、MMU准入、出队ECN和INT |
-| [switch-mmu.cc](../simulator/ns-3.39/src/point-to-point/model/switch-mmu.cc) | DynamicThreshold 340；CheckIngressAdmission 656；CheckEgressAdmission 742；Update/Remove记账；CheckShouldPause/Resume 1010；ShouldSendCN 1035 | buffer/headroom、PFC/ECN决策的实际来源；不用通读所有旁支 |
-| [broadcom-egress-queue.cc](../simulator/ns-3.39/src/network/utils/broadcom-egress-queue.cc) | BEgressQueue::DoEnqueue 73；DoDequeueRR 101；GetNBytes 256；GetNBytesTotal 266 | 队列存在哪、q0优先/RR、queue byte和累计RX的差异 |
+| [qbb-channel.cc](../simulator/ns-3.39/src/point-to-point/model/qbb-channel.cc) | TransmitStart | 串行化+传播时间如何变成下一跳Receive事件 |
+| [switch-node.cc](../simulator/ns-3.39/src/point-to-point/model/switch-node.cc) | GetOutDev；SendToDev；SwitchReceiveFromDevice；SwitchNotifyDequeue | 自定义实际转发、MMU准入、出队ECN和INT |
+| [switch-mmu.cc](../simulator/ns-3.39/src/point-to-point/model/switch-mmu.cc) | DynamicThreshold；CheckIngressAdmission；CheckEgressAdmission；Update/Remove记账；CheckShouldPause/Resume；ShouldSendCN | buffer/headroom、PFC/ECN决策的实际来源；不用通读所有旁支 |
+| [broadcom-egress-queue.cc](../simulator/ns-3.39/src/network/utils/broadcom-egress-queue.cc) | BEgressQueue::DoEnqueue；DoDequeueRR；GetNBytes；GetNBytesTotal | 队列存在哪、q0优先/RR、queue byte和累计RX的差异 |
 | [custom-header.h](../simulator/ns-3.39/src/network/utils/custom-header.h)、[.cc](../simulator/ns-3.39/src/network/utils/custom-header.cc) | UDP/ACK/CNP/PFC union；GetSerializedSize、Deserialize | 协议号、字段布局、payload扣头、ACK PG访问与包长 |
 | [seq-ts-header.cc](../simulator/ns-3.39/src/network/utils/seq-ts-header.cc)、[qbb-header.cc](../simulator/ns-3.39/src/point-to-point/model/qbb-header.cc) | 数据seq/PG/TS；ACK seq/PG/flags/INT | 数据头和ACK回显的来源 |
 | [int-header.h](../simulator/ns-3.39/src/network/utils/int-header.h)、[.cc](../simulator/ns-3.39/src/network/utils/int-header.cc) | IntHop::Set/GetDelta；IntHeader::PushHop/GetStaticSize | HPCC数据单位、量化、容量、回绕；TIMELY时间戳模式 |
-| [ppp-header.cc](../simulator/ns-3.39/src/point-to-point/model/ppp-header.cc) | GetStaticSize 81 | 当前模型L2头为14B，影响所有wire统计 |
+| [ppp-header.cc](../simulator/ns-3.39/src/point-to-point/model/ppp-header.cc) | GetStaticSize | 当前模型L2头为14B，影响所有wire统计 |
 | [frp-rate-calculator.h](../simulator/ns-3.39/src/point-to-point/model/frp-rate-calculator.h)、[.cc](../simulator/ns-3.39/src/point-to-point/model/frp-rate-calculator.cc) | FrpParameters；CalculateFairRate | FRP/RoCC端口公平rate与参数/单位 |
-| [icmpv4.cc](../simulator/ns-3.39/src/internet/model/icmpv4.cc) | Icmpv4FrpFeedback::Serialize/Deserialize 584以后 | F/qDev/linkRate/flowSport/PG的真实线上编码 |
-| [longhaul-r3.h](../simulator/ns-3.39/examples/LonghaulCC/longhaul-r3.h) | TracePath 15；PathDelay 33；Setup 42 | proposed装配、hash路径检查、组定义、两端注册 |
-| [dci-gateway-node.h](../simulator/ns-3.39/src/point-to-point/model/dci-gateway-node.h)、[.cc](../simulator/ns-3.39/src/point-to-point/model/dci-gateway-node.cc) | RegisterFlow 74；Start 94；ObserveFeedback 152；History::Predict 189；UpdateReceiver 203；UpdateSource 271；Snapshot 328；Tick 408 | R3完整运行状态、反馈/预测/预算/shaper连接 |
-| [longhaul-measurements.h](../simulator/ns-3.39/examples/LonghaulCC/longhaul-measurements.h) | WriteFlowPath 17；Sample 43；StartMeasurements 62；Finish 68 | 所有算法公共真实路径、flow字节、队列和停止验收 |
-| [analyze-longhaul.py](../simulator/ns-3.39/examples/LonghaulCC/analyze-longhaul.py) | path_reference 46；window_metrics 122；analyze_run | 利用率/FCT/完成子集/收敛的二次统计定义 |
+| [icmpv4.cc](../simulator/ns-3.39/src/internet/model/icmpv4.cc) | Icmpv4FrpFeedback::Serialize/Deserialize | F/qDev/linkRate/flowSport/PG的真实线上编码 |
+| [longhaul-r4.h](../simulator/ns-3.39/examples/LonghaulCC/longhaul-r4.h) | TracePath；PathDelay；Setup；WriteMetadata | R4 配置校验、hash 路径及反馈回程检查、两端逐流注册 |
+| [dci-gateway-node.h](../simulator/ns-3.39/src/point-to-point/model/dci-gateway-node.h)、[.cc](../simulator/ns-3.39/src/point-to-point/model/dci-gateway-node.cc) | RegisterFlow/Start；Admitted/Dequeue；ObserveFeedback/ConsumeSourceCe；History/ServiceWindow；UpdateReceiver/UpdateSource；BuildReports/ReceiveRecords/CommitControls/Tick | R4 状态所有权、逐流反馈/预测、端口分配及真实设备执行连接 |
+| [longhaul-measurements.h](../simulator/ns-3.39/examples/LonghaulCC/longhaul-measurements.h) | WriteFlowPath；Sample；StartMeasurements；Finish | 所有算法公共真实路径、flow字节、队列和停止验收 |
+| [analyze-longhaul.py](../simulator/ns-3.39/examples/LonghaulCC/analyze-longhaul.py) | path_reference；window_metrics；r4_packet_index/r4_endpoint/r4_evidence；analyze_run | 路径参考、完成子集、收敛、逐流事件守恒和预测终点的二次统计 |
 | [plot-longhaul.py](../simulator/ns-3.39/examples/LonghaulCC/plot-longhaul.py) | main的payload重分bin、RTT/方向util绘图 | 识别图上聚合方式与原始计数的区别 |
+| [longhaul-r4-test.cc](../simulator/ns-3.39/examples/LonghaulCC/longhaul-r4-test.cc) | DciGatewayTestCase::Run/Invalid；main | 测试断言范围与独立 abort 输入分支；源码存在不等于本次运行通过 |
+| [run-longhaul.py](../simulator/ns-3.39/examples/LonghaulCC/run-longhaul.py)、[run-longhaul-all.py](../simulator/ns-3.39/examples/LonghaulCC/run-longhaul-all.py) | main；输入复制、source/binary identity、completion 验收 | 外层有效配置、构建来源、输出目录及用途门槛 |
 
 ### C.2 算法源码的最短定位
 
@@ -890,14 +929,18 @@ proposed最初0.03 s运行时 `rx_payload_bytes=10000` 但completed=0、FCT无�
 | TIMELY | hw HandleAckTimely 1227；UpdateRateTimely 1236 | switch仅按普通路径转发，TS由host生成/receiver回显 | 直接写m_rate→后续PktSent |
 | FRP | hw ReceiveIcmp 1414；HandleFrpFeedback 1455 | sw TrackActiveFlow 545；PeriodicFeedbackLoop 615；ConfigureFeedbackPayload 694→FrpRateCalculator | ChangeRate→host调度 |
 | RoCC | 同ICMP入口的type=true分支；RoccRecoveryTimer 1634 | 同反馈入口，CalculateFairRate的ccMode=14分支 | ChangeRate，另有timeout恢复事件 |
-| Bifrost | host仍为DCQCN | main SetupBifrost 416；sw ConfigureBifrost 933；slot 956；pause计算974 | PFC改变对端device paused，不直接写host算法rate |
-| Proposed R3 | host仍为DCQCN，近端CNP到ReceiveCnp | R3 Tick/UpdateReceiver/UpdateSource/History/Snapshot | QbbNetDevice逐逻辑队列token shaper |
+| Bifrost | host仍为DCQCN | main SetupBifrost；sw ConfigureBifrost 933；slot 956；pause计算974 | PFC改变对端device paused，不直接写host算法rate |
+| Proposed R4 | host仍为DCQCN，近端CNP到ReceiveCnp | Tick/UpdateReceiver/UpdateSource/History/BuildReports | ApplyQueueControls；逐流令牌，探测另受grant/端口桶限制 |
 
 ### C.3 当前不必先读的部分
 
 旧 atcGateway 的VOQ及其长链路反馈：先读构造和packetIn的早返回，足以确认当前未启用；不要先钻进全部旧VOQ定时器。PowerTCP、DCTCP、HPCC-PINT和MMU ABM等分支：仅在主程序明确选择时再读，当前不会因为代码存在就自动执行。OpenFlow、Wi-Fi和标准traffic-control的queue-disc代码也不是当前Qbb路径。
 
-运行脚本是外层工具链：`run-longhaul-all.py → run-longhaul.py → 主程序二进制`，前者逐算法调用后者，后者处理输入/输出路径、构建和runner metadata。当前runner不替代主程序计数，也不自动调用完整分析/绘图流程；要理解packet先读C++，之后再读脚本。
+运行脚本是外层工具链：`run-longhaul-all.py → run-longhaul.py → 主程序二进制`，前者逐算法调用后者，后者处理输入/输出路径、构建和 runner metadata。当前 runner 不自动调用分析/绘图；后续单独运行 `analyze-longhaul.py`、`plot-longhaul.py`，不能把整条工具链画成 runner 一次调用会自动完成。
+
+runner 从脚本位置定位 ns-3/项目根目录，改写本次输出路径并复制有效配置、拓扑/flow 输入、source.tar.gz、source.patch 和源码/二进制/库指纹。默认结果在项目根 `results/`；直接 C++ 配置中的相对路径以进程启动目录为基准，常用启动目录是 ns-3 根目录。`--skip-build` 必须与已保存的 source/binary identity 一致，不能用旧二进制来证明工作区新源码行为。批量首次默认构建，后续复用并仍做身份检查。
+
+R4 runner 使用 `--queue-mode history|snapshot` 和 `--service-mode busy-observed|budget`，拒绝将旧 `--r3-queue-mode` 用于当前 proposed。默认用途 transient；completion 必须显式给停止时间，并核对预期完成数、FCT 身份/唯一性、唯一发送和接收 payload；R4 另核对两端 wire 闭合。`status=ok`、completion_valid 或程序退出 0 均不单独证明无丢弃、无残留或性能成立；这些要结合公共 summary、队列/MMU、原始事件和匹配的负载条件检查。
 
 ## D. 建议阅读顺序
 
@@ -920,14 +963,14 @@ proposed最初0.03 s运行时 `rx_payload_bytes=10000` 但completed=0、FCT无�
 12. **HPCC。** 先读IntHop编码，再读Switch写INT和Receiver复制INT，最后读UpdateRateHp默认单速率分支。用两份INT手算txRate/u，区分完整更新与fast react。
 13. **FRP。** 先读switch活跃集合的更新/清空和PeriodicFeedbackLoop，再读CalculateFairRate、ICMP字段、host HandleFrpFeedback。特别看qDev单位、CP识别及timeout没有独立事件。
 14. **RoCC/Bifrost。** RoCC围绕FRP共用链的差异读；Bifrost围绕长链路ingress记账、virtual、pause和PFC expiry读，不要把它误当一个新RNIC mode。
-15. **Proposed R3。** 从longhaul-r3.h的真实路径注册开始，顺序为Enqueue/Dequeue→ObserveFeedback→UpdateReceiver→Snapshot→History::Predict→UpdateSource→Qbb shaper。始终把B/s、bps、byte queue和时间window分开。
+15. **Proposed R4。** 从longhaul-r4.h的真实路径注册开始，先读QbbAdmitted/Dequeue与ObserveFeedback/ConsumeSourceCe，再按Tick顺序读ServiceWindow→端口容量/需求→UpdateReceiver→History/UpdateSource→BuildReports→CommitControls→设备真实出队。对照启动/失效/探测及空队列许可；始终把B/s、bps、byte queue和时间window分开。
 
 ### D.3 第三轮：读测量并检验自己的理解
 
 16. **PktSent与ReceiveUdp的实际计数代码 → SampleFlowRates/RecordCompletionSamples。** 取一条CSV行用真实起止时刻手算bps，验证重传、包头和首包到达前0值口径。
 17. **SampleDciLink、CountDciEcn、get_pfc和LonghaulMeasurements。** 查清全网累计事件、单方向TX、PG/总队列和Stop快照，核对summary中TX/RX/残留。
 18. **analyze-longhaul.py、plot-longhaul.py。** 理解路径容量参考含data/ACK开销、但排除control/retransmission/window；收敛是指定窗口内的采样条件；FCT只取完成子集；RTT图是各flow中位数均值。
-19. **最后才回到runner与既有设计/进度文档。** 确认effective config、正式场景和实际二进制，区分本轮源码事实、历史实验记录和论文目标。2026-10-02进度文档记录当时未找到binary；本轮已找到并使用binary，这是时间点差异，不能据旧快照判断今天不可运行。
+19. **最后才回到runner与既有设计/进度文档。** 确认effective config、正式场景和实际二进制，区分本轮源码事实、历史实验记录和论文目标。2026-10-02进度文档和B.12的2026-10-06二进制记录都是历史时间点；本次未验证当前二进制可运行性，也不能据旧记录认定它对应当前源码。
 
 每一轮都可用同一条flow回答这些自检问题：
 

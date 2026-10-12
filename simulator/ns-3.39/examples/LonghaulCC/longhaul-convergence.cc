@@ -1,18 +1,8 @@
-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 /*
-* This program is free software; you can redistribute it and/or modify
-* it under the terms of the GNU General Public License version 2 as
-* published by the Free Software Foundation;
-*
-* This program is distributed in the hope that it will be useful,
-* but WITHOUT ANY WARRANTY; without even the implied warranty of
-* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-* GNU General Public License for more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with this program; if not, write to the Free Software
-* Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-*/
+ * Simulate cross-datacenter RDMA traffic with configurable congestion control.
+ * Record sender rates, receiver goodput, RTTs, flow completion times, and DCI
+ * link statistics for convergence and performance analysis.
+ */
 
 #include <iostream>
 #include <fstream>
@@ -48,6 +38,7 @@ uint32_t cc_mode = 1;
 bool enable_qcn = true;
 uint32_t packet_payload_size = 1000, l2_chunk_size = 4000, l2_ack_interval = 1;
 double pause_time = 5, simulator_stop_time = 0.38;
+std::string confFile = "examples/LonghaulCC/config-longhaul.txt";
 std::string topology_file = "examples/LonghaulCC/topology-longhaul.txt";
 std::string flow_file = "examples/LonghaulCC/flow-longhaul-s0.txt";
 std::string fct_output_file = "fct.txt";
@@ -62,34 +53,32 @@ uint64_t goodput_sample_interval_us = 100;
 uint64_t rtt_sample_interval_us = 100;
 uint32_t rng_seed = 1;
 uint64_t rng_run = 1;
-uint32_t dci_left = 40, dci_right = 81;
+uint32_t dci_gateway_a_id = 40;
+uint32_t dci_gateway_b_id = 81;
 std::string scenario_name = "UNKNOWN";
 
-double alpha_resume_interval = 55, rp_timer = 900, ewma_gain = 1.0 / 16.0;
-double timely_alpha = 0.875, timely_beta = 0.8;
-uint64_t timely_tlow_ns = 5000000, timely_thigh_ns = 10000000, timely_min_rtt_ns = 10000000;
-double rate_decrease_interval = 4;
-uint32_t fast_recovery_times = 5;
-std::string rate_ai = "50Mb/s", rate_hai = "100Mb/s", min_rate = "100Mb/s";
-std::string dctcp_rate_ai = "1000Mb/s";
+// Compiled algorithm parameters for Longhaul experiments. Keep tuning in C++.
+// R4 parameters are defined in DciGatewayNode::Config.
+const double alpha_resume_interval = 55, rp_timer = 900, ewma_gain = 1.0 / 16.0;
+const double timely_alpha = 0.875, timely_beta = 0.8;
+const uint64_t timely_tlow_ns = 10300000, timely_thigh_ns = 11000000, timely_min_rtt_ns = 10230000;
+const double rate_decrease_interval = 4;
+const uint32_t fast_recovery_times = 5;
+const std::string rate_ai = "50Mb/s", rate_hai = "100Mb/s", min_rate = "100Mb/s";
+const std::string dctcp_rate_ai = "1000Mb/s";
+const bool clamp_target_rate = false, fast_react = true;
+const uint32_t mi_thresh = 5, int_multi = 1;
+const bool multi_rate = false, sample_feedback = false;
+const double u_target = 0.95;
+const uint32_t bifrost_slot_us = 10, bifrost_priority = 3, bifrost_leak_slots = 1;
+const uint64_t bifrost_buffer_bytes = 0; // 0 derives the minimum H from the DCI link.
 
-bool clamp_target_rate = false, l2_back_to_zero = false;
+bool l2_back_to_zero = false;
 double error_rate_per_link = 0.0;
 uint32_t has_win = 1;
-uint32_t mi_thresh = 5;
-bool var_win = false, fast_react = true;
-bool multi_rate = false;
-bool sample_feedback = false;
-double u_target = 0.95;
-uint32_t int_multi = 1;
-bool rate_bound = true;
-
+bool var_win = false, rate_bound = true;
 uint32_t ack_high_prio = 0;
 uint32_t buffer_size = 50;
-uint32_t bifrost_slot_us = 10;
-uint32_t bifrost_priority = 3;
-uint32_t bifrost_leak_slots = 1;
-uint64_t bifrost_buffer_bytes = 0; // 0 derives the minimum H from the DCI link.
 uint64_t bifrost_min_buffer_bytes = 0;
 uint64_t bifrost_effective_buffer_bytes = 0;
 
@@ -265,7 +254,7 @@ map<uint32_t, uint32_t> ipToNodeIdMap;  // key: IP (uint32_t), value: nodeId
 
 Ipv4Address NodeAddress(uint32_t node_id) {
 	NS_ABORT_MSG_IF(node_id >= 254, "longhaul supports at most 253 node IDs");
-	uint32_t dc_id = node_id <= std::min(dci_left, dci_right) ? 1 : 2;
+	uint32_t dc_id = node_id <= std::min(dci_gateway_a_id, dci_gateway_b_id) ? 1 : 2;
 	std::string address = "11." + std::to_string(dc_id) + ".0." + std::to_string(node_id + 1);
 	return Ipv4Address(address.c_str());
 }
@@ -295,7 +284,6 @@ uint32_t ip_to_node_id(Ipv4Address ip) {
     if (it != ipToNodeIdMap.end()) {
         return it->second;  // 返回精确的nodeId
     }
-    
 	NS_FATAL_ERROR("longhaul: IP " << ip << " is not mapped to a topology node");
 }
 
@@ -424,8 +412,8 @@ void SetupBifrost() {
 	bifrost_effective_buffer_bytes = bifrost_buffer_bytes == 0
 		? bifrost_min_buffer_bytes
 		: bifrost_buffer_bytes;
-	ConfigureBifrostDciPort(dci_left, dci_left_device);
-	ConfigureBifrostDciPort(dci_right, dci_right_device);
+	ConfigureBifrostDciPort(dci_gateway_a_id, dci_left_device);
+	ConfigureBifrostDciPort(dci_gateway_b_id, dci_right_device);
 }
 
 void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
@@ -460,7 +448,7 @@ void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
 	fi->finished = true;
     fi->completion_ns=Simulator::Now().GetNanoSeconds();
 	if (selected_cc == "proposed")
-		for (uint32_t id : {dci_left, dci_right})
+		for (uint32_t id : {dci_gateway_a_id, dci_gateway_b_id})
 			DynamicCast<DciGatewayNode>(n.Get(id))->CompleteFlow(uint32_t(fi - flows.data()) + 1);
 }
 
@@ -688,12 +676,12 @@ void SampleDciLink() {
 		} else if (now_ns > dci_last_time_ns) {
 		double dt = double(now_ns - dci_last_time_ns) * 1e-9;
 		link_stats_file << AlgorithmName(cc_mode) << ',' << rng_seed << ',' << rng_run << ',' << now_ns << ','
-						<< dci_left << ',' << dci_right << ',' << "left-to-right" << ','
+						<< dci_gateway_a_id << ',' << dci_gateway_b_id << ',' << "left-to-right" << ','
 						<< ((left_tx - dci_left_tx_bytes) * 8.0 / dt) << ','
 						<< LinkQueueBytes(dci_left_device) << ','
 						<< dci_left_ecn_events << ',' << pfc_pause_events << ',' << pfc_resume_events << '\n';
 		link_stats_file << AlgorithmName(cc_mode) << ',' << rng_seed << ',' << rng_run << ',' << now_ns << ','
-						<< dci_right << ',' << dci_left << ',' << "right-to-left" << ','
+						<< dci_gateway_b_id << ',' << dci_gateway_a_id << ',' << "right-to-left" << ','
 						<< ((right_tx - dci_right_tx_bytes) * 8.0 / dt) << ','
 						<< LinkQueueBytes(dci_right_device) << ','
 						<< dci_right_ecn_events << ',' << pfc_pause_events << ',' << pfc_resume_events << '\n';
@@ -735,8 +723,8 @@ void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
 		<< "  \"node_count\": " << node_num << ",\n"
 		<< "  \"switch_count\": " << switch_num << ",\n"
 		<< "  \"link_count\": " << link_num << ",\n"
-		<< "  \"dci_left\": " << dci_left << ",\n"
-		<< "  \"dci_right\": " << dci_right << ",\n"
+		<< "  \"dci_left\": " << dci_gateway_a_id << ",\n"
+		<< "  \"dci_right\": " << dci_gateway_b_id << ",\n"
 		<< "  \"dci_rate_bps\": " << dci_rate << ",\n"
 		<< "  \"nic_rate_bps\": " << nic_rate << ",\n"
 		<< "  \"dci_delay_ns\": " << dci_delay << ",\n"
@@ -828,7 +816,6 @@ void ParseConfig(std::istream &config) {
 	while (config >> key) {
 		if (key == "ENABLE_QCN") ReadConfigValue(config, key, enable_qcn);
 		else if (key == "PAUSE_TIME") ReadConfigValue(config, key, pause_time);
-		else if (key == "CLAMP_TARGET_RATE") ReadConfigValue(config, key, clamp_target_rate);
 		else if (key == "PACKET_PAYLOAD_SIZE") ReadConfigValue(config, key, packet_payload_size);
 		else if (key == "L2_CHUNK_SIZE") ReadConfigValue(config, key, l2_chunk_size);
 		else if (key == "L2_ACK_INTERVAL") ReadConfigValue(config, key, l2_ack_interval);
@@ -836,14 +823,6 @@ void ParseConfig(std::istream &config) {
 		else if (key == "TOPOLOGY_FILE") ReadConfigValue(config, key, topology_file);
 		else if (key == "FLOW_FILE") ReadConfigValue(config, key, flow_file);
 		else if (key == "SIMULATOR_STOP_TIME") ReadConfigValue(config, key, simulator_stop_time);
-		else if (key == "ALPHA_RESUME_INTERVAL") ReadConfigValue(config, key, alpha_resume_interval);
-		else if (key == "RP_TIMER") ReadConfigValue(config, key, rp_timer);
-		else if (key == "EWMA_GAIN") ReadConfigValue(config, key, ewma_gain);
-		else if (key == "FAST_RECOVERY_TIMES") ReadConfigValue(config, key, fast_recovery_times);
-		else if (key == "RATE_AI") ReadConfigValue(config, key, rate_ai);
-		else if (key == "RATE_HAI") ReadConfigValue(config, key, rate_hai);
-		else if (key == "MIN_RATE") ReadConfigValue(config, key, min_rate);
-		else if (key == "DCTCP_RATE_AI") ReadConfigValue(config, key, dctcp_rate_ai);
 		else if (key == "ERROR_RATE_PER_LINK") ReadConfigValue(config, key, error_rate_per_link);
 		else if (key == "CC") ReadConfigValue(config, key, selected_cc);
 		else if (key == "RNG_SEED") ReadConfigValue(config, key, rng_seed);
@@ -856,70 +835,20 @@ void ParseConfig(std::istream &config) {
 		else if (key == "LINK_STATS_OUTPUT_FILE") ReadConfigValue(config, key, link_stats_output_file);
 		else if (key == "RTT_OUTPUT_FILE") ReadConfigValue(config, key, rtt_output_file);
 		else if (key == "SUMMARY_META_FILE") ReadConfigValue(config, key, summary_meta_file);
-		else if (key == "DCI_LEFT") ReadConfigValue(config, key, dci_left);
-		else if (key == "DCI_RIGHT") ReadConfigValue(config, key, dci_right);
-		else if (key == "TIMELY_ALPHA") ReadConfigValue(config, key, timely_alpha);
-		else if (key == "TIMELY_BETA") ReadConfigValue(config, key, timely_beta);
-		else if (key == "TIMELY_TLOW_NS") ReadConfigValue(config, key, timely_tlow_ns);
-		else if (key == "TIMELY_THIGH_NS") ReadConfigValue(config, key, timely_thigh_ns);
-		else if (key == "TIMELY_MIN_RTT_NS") ReadConfigValue(config, key, timely_min_rtt_ns);
-		else if (key == "RATE_DECREASE_INTERVAL") ReadConfigValue(config, key, rate_decrease_interval);
+		else if (key == "DCI_LEFT") ReadConfigValue(config, key, dci_gateway_a_id);
+		else if (key == "DCI_RIGHT") ReadConfigValue(config, key, dci_gateway_b_id);
 		else if (key == "FCT_OUTPUT_FILE") ReadConfigValue(config, key, fct_output_file);
 		else if (key == "PFC_OUTPUT_FILE") ReadConfigValue(config, key, pfc_output_file);
 		else if (key == "HAS_WIN") ReadConfigValue(config, key, has_win);
-		else if (key == "MI_THRESH") ReadConfigValue(config, key, mi_thresh);
 		else if (key == "VAR_WIN") ReadConfigValue(config, key, var_win);
-		else if (key == "FAST_REACT") ReadConfigValue(config, key, fast_react);
-		else if (key == "U_TARGET") ReadConfigValue(config, key, u_target);
-		else if (key == "INT_MULTI") ReadConfigValue(config, key, int_multi);
 		else if (key == "RATE_BOUND") ReadConfigValue(config, key, rate_bound);
 		else if (key == "ACK_HIGH_PRIO") ReadConfigValue(config, key, ack_high_prio);
 		else if (key == "KMAX_MAP") ReadKMap(config, key, rate2kmax);
 		else if (key == "KMIN_MAP") ReadKMap(config, key, rate2kmin);
 		else if (key == "PMAX_MAP") ReadPmaxMap(config, key);
 		else if (key == "BUFFER_SIZE") ReadConfigValue(config, key, buffer_size);
-		else if (key == "BIFROST_SLOT_US") ReadConfigValue(config, key, bifrost_slot_us);
-		else if (key == "BIFROST_PRIORITY") ReadConfigValue(config, key, bifrost_priority);
-		else if (key == "BIFROST_LEAK_SLOTS") ReadConfigValue(config, key, bifrost_leak_slots);
-		else if (key == "BIFROST_H_BYTES") ReadConfigValue(config, key, bifrost_buffer_bytes);
-		else if (key == "MULTI_RATE") ReadConfigValue(config, key, multi_rate);
-		else if (key == "SAMPLE_FEEDBACK") ReadConfigValue(config, key, sample_feedback);
 		else if (key == "NIC_DELAY") ReadConfigValue(config, key, nic_delay_ns);
-		else if (key == "PROPOSED_VERSION") ReadConfigValue(config,key,Proposed::version);
-		else if (key == "PROPOSED_SERVICE_MODE") ReadConfigValue(config,key,Proposed::config.serviceMode);
-		else if (key == "PROPOSED_SERVICE_WINDOW") { ReadConfigValue(config,key,Proposed::config.serviceWindow); Proposed::serviceWindowSet=true; }
-		else if (key == "PROPOSED_SERVICE_MIN_BUSY") { ReadConfigValue(config,key,Proposed::config.serviceMinBusy); Proposed::serviceMinBusySet=true; }
-		else if (key == "PROPOSED_PROBE_PORT_FRACTION") ReadConfigValue(config,key,Proposed::config.probePortFraction);
-		else if (key == "PROPOSED_PROBE_PORT_BURST") ReadConfigValue(config,key,Proposed::config.probePortBurst);
-		else if (key == "PROPOSED_NEAR_CNP") ReadConfigValue(config,key,Proposed::config.nearCnp);
-		else if (key == "PROPOSED_ECN_MODE") { ReadConfigValue(config,key,Proposed::config.ecnMode); Proposed::ecnModeSet=true; }
-		else if (key == "PROPOSED_STARTUP_MODE") ReadConfigValue(config,key,Proposed::config.startupMode);
-		else if (key == "PROPOSED_CONTROL_IP_MTU") ReadConfigValue(config,key,Proposed::config.controlIpMtu);
 		else if (key == "PROPOSED_OUTPUT") ReadConfigValue(config, key, Proposed::output);
-		else if (key == "PROPOSED_RECONSTRUCT") ReadConfigValue(config, key, Proposed::config.reconstruct);
-		else if (key == "PROPOSED_SHAPER_ECN") { ReadConfigValue(config, key, Proposed::config.shaperEcn); Proposed::shaperEcnSet=true; }
-		else if (key == "PROPOSED_REPORT_PERIOD") ReadConfigValue(config, key, Proposed::config.period);
-		else if (key == "PROPOSED_CONTROL_PERIOD") ReadConfigValue(config, key, Proposed::config.control);
-		else if (key == "PROPOSED_BIN_WIDTH") ReadConfigValue(config, key, Proposed::config.bin);
-		else if (key == "PROPOSED_QREF") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
-		else if (key == "PROPOSED_PORT_QREF") ReadConfigValue(config,key,Proposed::config.qref);
-		else if (key == "PROPOSED_TAU") ReadConfigValue(config, key, Proposed::config.tau);
-		else if (key == "PROPOSED_SOURCE_HIGH") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
-		else if (key == "PROPOSED_SOURCE_PORT_HIGH") ReadConfigValue(config,key,Proposed::config.sourceHigh);
-		else if (key == "PROPOSED_SOURCE_LOW") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
-		else if (key == "PROPOSED_SOURCE_PORT_LOW") ReadConfigValue(config,key,Proposed::config.sourceLow);
-		else if (key == "PROPOSED_UTILIZATION") ReadConfigValue(config, key, Proposed::config.utilization);
-		else if (key == "PROPOSED_CNP_INTERVAL") ReadConfigValue(config, key, Proposed::config.cnpInterval);
-		else if (key == "PROPOSED_REACTION_WINDOW") ReadConfigValue(config, key, Proposed::config.reaction);
-		else if (key == "PROPOSED_GAMMA") ReadConfigValue(config, key, Proposed::config.gamma);
-		else if (key == "PROPOSED_RECOVERY_PERIOD") ReadConfigValue(config, key, Proposed::config.recovery);
-		else if (key == "PROPOSED_PROBE_RATE") ReadConfigValue(config, key, Proposed::config.probeRate);
-		else if (key == "PROPOSED_RATE_INCREASE") ReadConfigValue(config, key, Proposed::config.increase);
-		else if (key == "PROPOSED_PROBE_BYTES") ReadConfigValue(config, key, Proposed::config.probeBytes);
-		else if (key == "PROPOSED_STATE_TIMEOUT") ReadConfigValue(config, key, Proposed::config.timeout);
-		else if (key == "PROPOSED_FALLBACK_FRACTION") { double ignored; ReadConfigValue(config,key,ignored); Proposed::legacyKeys.push_back(key); }
-		else if (key == "PROPOSED_BUFFER_FALLBACK_FRACTION") ReadConfigValue(config,key,Proposed::config.fallback);
-		else if (key == "PROPOSED_REPORT_MIN_INTERVAL") ReadConfigValue(config, key, Proposed::config.reportMin);
 		else NS_FATAL_ERROR("longhaul: unknown config key: " << key);
 	}
 }
@@ -955,39 +884,29 @@ int main(int argc, char *argv[])
 {
 	clock_t begint, endt;
 	begint = clock();
-	std::ifstream conf;
-	std::string confFile = "examples/LonghaulCC/config-longhaul.txt";
 	CommandLine cmd;
+	cmd.AddValue("config", "experiment config file", confFile);
 	cmd.AddValue("cc", "dcqcn, hpcc, timely, bifrost, frp, rocc, or proposed", selected_cc);
-	cmd.AddValue("conf", "config file path", confFile);
 	// Experiment selection: ordinary model parameters stay in the config file.
 	cmd.AddValue("flow-file", "flow input path", flow_file);
 	cmd.AddValue("stop-time", "simulation stop time in seconds", simulator_stop_time);
 	cmd.AddValue("seed", "ns-3 RNG seed", rng_seed);
 	cmd.AddValue("run", "ns-3 RNG run", rng_run);
 
-	cmd.Parse (argc, argv);
-	conf.open(confFile.c_str());
+	// Resolve the config path first, then reapply explicit experiment overrides.
+	cmd.Parse(argc, argv);
+	std::ifstream conf(confFile);
 	if (!conf.is_open())
 		NS_FATAL_ERROR("longhaul: cannot open config file: " << confFile);
 	ParseConfig(conf);
 	conf.close();
-	// Re-parse so only explicitly supplied command-line values override the
-	// values loaded from the configuration file.
 	cmd.Parse(argc, argv);
 
 	scenario_name = ScenarioFromFlowFile(flow_file);
 	cc_mode = ResolveCcMode(selected_cc);
 	if (selected_cc == "proposed" && Proposed::output.empty())
 		Proposed::output = summary_meta_file + ".control.csv";
-	NS_ABORT_MSG_IF(packet_payload_size == 0, "PACKET_PAYLOAD_SIZE must be positive");
-	NS_ABORT_MSG_IF(cc_mode == 12 && !enable_qcn,
-		"Bifrost experiments require DCQCN, but ENABLE_QCN is disabled");
-	NS_ABORT_MSG_IF(cc_mode == 12 && (bifrost_slot_us == 0 || bifrost_leak_slots == 0 ||
-		bifrost_priority == 0 || bifrost_priority >= QbbNetDevice::qCnt),
-		"invalid Bifrost slot, priority, or leak interval");
-	NS_ABORT_MSG_IF(rate_sample_interval_us == 0 || goodput_sample_interval_us == 0 ||
-		rtt_sample_interval_us == 0, "rate, goodput, and RTT sample intervals must be positive");
+
 	// Longhaul writes measurements to CSV; keep historical model diagnostics out
 	// of the run log unless another program explicitly leaves this disabled.
 	g_longhaul_quiet = true;
@@ -1027,10 +946,6 @@ int main(int argc, char *argv[])
 
 	std::ifstream topof(topology_file.c_str());
 	std::ifstream flowf(flow_file.c_str());
-	if (!topof.is_open())
-		NS_FATAL_ERROR("longhaul: cannot open topology file: " << topology_file);
-	if (!flowf.is_open())
-		NS_FATAL_ERROR("longhaul: cannot open flow file: " << flow_file);
 	uint32_t node_num, switch_num, tor_count, link_num;
 	if (!(topof >> node_num >> switch_num >> tor_count >> link_num))
 		NS_FATAL_ERROR("longhaul: malformed topology header");
@@ -1049,7 +964,7 @@ int main(int argc, char *argv[])
 			continue;
 		}
 		Ptr<SwitchNode> sw;
-		if (i == dci_left || i == dci_right) sw = CreateObject<DciGatewayNode>();
+		if (i == dci_gateway_a_id || i == dci_gateway_b_id) sw = CreateObject<DciGatewayNode>();
 		else sw = CreateObject<SwitchNode>();
 		sw->SetNodeType(node_type[i]);
 		sw->SetAttribute("EcnEnabled", BooleanValue(enable_qcn));
@@ -1064,7 +979,6 @@ int main(int argc, char *argv[])
 
 	//
 	// Explicitly create the channels required by the topology.
-	//
 
 	Ptr<RateErrorModel> rem = CreateObject<RateErrorModel>();
 	Ptr<UniformRandomVariable> uv = CreateObject<UniformRandomVariable>();
@@ -1140,12 +1054,12 @@ int main(int argc, char *argv[])
 		Ptr<QbbNetDevice> dstDev = DynamicCast<QbbNetDevice>(d.Get(1));
 		srcDev->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, &pfc_file, srcDev));
 		dstDev->TraceConnectWithoutContext("QbbPfc", MakeBoundCallback (&get_pfc, &pfc_file, dstDev));
-		if (src == dci_left && dst == dci_right) {
+		if (src == dci_gateway_a_id && dst == dci_gateway_b_id) {
 			dci_left_device = srcDev;
 			dci_right_device = dstDev;
 			srcDev->TraceConnectWithoutContext("QbbDequeue", MakeBoundCallback (&CountDciEcn, srcDev));
 			dstDev->TraceConnectWithoutContext("QbbDequeue", MakeBoundCallback (&CountDciEcn, dstDev));
-		} else if (src == dci_right && dst == dci_left) {
+		} else if (src == dci_gateway_b_id && dst == dci_gateway_a_id) {
 			dci_right_device = srcDev;
 			dci_left_device = dstDev;
 			srcDev->TraceConnectWithoutContext("QbbDequeue", MakeBoundCallback (&CountDciEcn, srcDev));
@@ -1306,7 +1220,7 @@ int main(int argc, char *argv[])
 
 	LoadFlows(flowf);
 	if (dci_left_device == NULL || dci_right_device == NULL)
-		NS_FATAL_ERROR("longhaul: could not identify the DCI link " << dci_left << " <-> " << dci_right);
+		NS_FATAL_ERROR("longhaul: could not identify the DCI link " << dci_gateway_a_id << " <-> " << dci_gateway_b_id);
 	SetupBifrost();
 	dci_left_tx_bytes = LinkTxCounter(dci_left_device);
 	dci_right_tx_bytes = LinkTxCounter(dci_right_device);

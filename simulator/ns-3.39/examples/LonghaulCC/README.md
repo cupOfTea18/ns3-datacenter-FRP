@@ -33,9 +33,9 @@ cd /home/shemuping/newCode/ns3-FRP/simulator/ns-3.39
 | 路径 | 解析规则及本机位置 |
 |---|---|
 | ns-3 根目录 | 自动定位；当前仓库中为 `/home/shemuping/newCode/ns3-FRP/simulator/ns-3.39` |
-| 默认配置 | 自动定位脚本同目录的 `config-longhaul-r4.txt`（旧 R3 配置保留） |
+| 默认配置 | 自动定位脚本同目录的 `config-longhaul.txt`，只保存实验设置 |
 | 配置中的 `TOPOLOGY_FILE` / `FLOW_FILE` | 相对 ns-3 根目录；当前 `examples/LonghaulCC/...` 无需修改 |
-| 命令行 `--config` / `--flow-files` | 绝对路径直接使用；相对路径先查启动目录，再查 ns-3 根目录 |
+| 命令行 `--flow-files` | 绝对路径直接使用；相对路径先查启动目录，再查 ns-3 根目录 |
 | runner 默认结果目录 | 项目根目录下的 `results/longhaul-YYMMDD-HHMM/` |
 | 命令行 `--output-root` | 自定义结果目录；相对路径以启动目录为基准 |
 | 配置中的各项 `*_OUTPUT_FILE` / `SUMMARY_META_FILE` / `PROPOSED_OUTPUT` | runner 自动改写为本次运行目录下的绝对路径 |
@@ -107,10 +107,14 @@ examples/LonghaulCC/topology-longhaul.txt
 
 ## 4. 运行用途与场景
 
-runner 默认读取 `config-longhaul-r4.txt`，其配置为 **S0、Proposed R4、0.38 s**，
+runner 从 `config-longhaul.txt` 生成运行目录中的 `config.txt`，通过 C++ 的 `--config` 直接读取它，
+不创建 `examples/` 目录或配置符号链接。直接启动 C++ 时默认读取 `config-longhaul.txt`，当前为 **S0、Proposed R4、0.38 s**。
 运行用途由 runner 默认记为 `transient`；`--algorithm` 覆盖配置中的 `CC`。
-直接运行 C++ 且省略 `--conf` 时仍读取旧 `config-longhaul.txt`，该文件为 S0、DCQCN、0.38 s；
-直接选择 R4 必须指定 `--conf=examples/LonghaulCC/config-longhaul-r4.txt`。
+配置仅保存拓扑、流量、算法选择、随机数、通用传输/网络设置、采样与输出。
+DCQCN/HPCC/TIMELY/Bifrost 参数在 `longhaul-convergence.cc` 的编译期常量区修改；
+R4 参数在 `src/point-to-point/model/dci-gateway-node.h` 的 `DciGatewayNode::Config` 修改。
+修改算法参数后重新构建，实际参数仍写入 `metadata.json`。
+配置不再接受算法调参项或 `PROPOSED_VERSION`；`PROPOSED_OUTPUT` 仅指定控制日志输出前缀。
 `run-longhaul-all.py` 默认依次运行
 DCQCN、HPCC、TIMELY、Bifrost、Proposed，每种一次；这不是完整 FCT 验收或已标定的比较矩阵。
 S2 后加入的七条 3 GB 流只剩 0.17 s，物理上不足以全部完成。
@@ -165,12 +169,12 @@ python3 examples/LonghaulCC/run-longhaul-all.py --algorithms dcqcn proposed \
 python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
   --flow-files examples/LonghaulCC/flow-longhaul-r3-mechanism-control.txt \
                examples/LonghaulCC/flow-longhaul-r3-mechanism.txt \
-  --queue-mode history --service-mode busy-observed --stop-times 0.18 --output-root /tmp/r4-history
+  --stop-times 0.18 --output-root /tmp/r4-history
 
-# 只替换为旧快照队列；B 反应、预算、整形、失效条件完全相同
+# 快照对照：先在 DciGatewayNode::Config 中设 reconstruct=false，重新构建后运行
 python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
   --flow-files examples/LonghaulCC/flow-longhaul-r3-mechanism.txt \
-  --queue-mode snapshot --service-mode busy-observed --stop-times 0.18 --output-root /tmp/r4-snapshot
+  --stop-times 0.18 --output-root /tmp/r4-snapshot
 ```
 
 已按实际 ECMP 验证机制路径共同经过 `81→79`，随后分别到 Leaf73/Leaf75；
@@ -178,17 +182,15 @@ python3 examples/LonghaulCC/run-longhaul.py --algorithm proposed \
 不能把 B 看到的 CNP 自动归因于 B 内部。
 
 runner 默认构建；`--skip-build` 要求当前源码、二进制与共享库哈希匹配上次 runner 构建记录。
-每次运行保留有效 `config.txt`、`inputs/` 输入副本、源码归档、Git HEAD 和未提交差异、
-二进制/共享库哈希、命令、用途和窗口。有效配置引用输入副本，不覆盖历史结果。
+每次运行保留有效 `config.txt`、`inputs/` 输入副本、结果和运行元数据；
+元数据记录源码/二进制/共享库哈希、命令、用途和窗口。有效配置引用输入副本，不覆盖历史结果。
 输出仍为 `results/longhaul-YYMMDD-HHMM/<scenario>/<algorithm>/seedconfig-runN/`。
 相同 seed/run 的重复不自动等于独立样本；本轮不进行大规模扫描或全面性能矩阵。
 
-C++ CLI 保持 `--conf`、`--cc`、`--flow-file`、`--stop-time`、`--seed`、`--run`。
-旧快照开关为配置项 `PROPOSED_RECONSTRUCT 0`，默认 `1`，runner 的模式参数写入有效配置。
-R4 默认显式配置 `PROPOSED_ECN_MODE source-boundary`，A/B 注册受控出口均不新增 CE；
-此模式拒绝显式设置旧 `PROPOSED_SHAPER_ECN` 键。只有显式 `path` 模式允许该键：
-`1` 允许 A/B 受控出口按原规则标记，`0` 同时禁止其新增标记，且不清除已有 CE。
-普通交换机 ECN、STATE 和 PFC 仍保留；这项旧开关不能替代 A 的 CE 转近端反馈边界。
+C++ CLI 提供 `--config`、`--cc`、`--flow-file`、`--stop-time`、`--seed`、`--run`；显式实验选项覆盖配置值。
+runner 不再提供 `--queue-mode`、`--service-mode` 或 `--r3-queue-mode` 算法参数覆盖；
+队列/服务模式从仿真输出的元数据读取，避免脚本中的默认值与实际实现不一致。
+R4 的 `reconstruct`、`serviceMode`、`ecnMode` 等选项直接在 `DciGatewayNode::Config` 修改。
 历史 R3 的关闭整形标记候选在两个机制场景 seed 改善跨域 FCT，但历史重建未显示稳定增量收益，
 且 seed 1 仍慢于 DCQCN；配置、对照和负结果见 [R3 实测改进记录](R3_EVALUATION_20260929.md)。
 
@@ -265,10 +267,9 @@ R4 的实现核对及分版本验证记录见 [R4 实现与功能验证记录](R
 本节对应 2026-10-09 工作区源码核对；本次未构建或运行测试。2026-10-08 的测试与实验
 属于已有记录，不自动证明当前工作区或二进制已重新验证。
 
-当前 `--cc=proposed` 运行 R4，入口为 `longhaul-r4.h`，必须显式配置 `PROPOSED_VERSION 4`。
-使用 `config-longhaul-r4.txt`；旧 `config-longhaul.txt` 不静默迁移，旧 QREF、
-SOURCE_HIGH/LOW、FALLBACK_FRACTION 需分别改成 PORT_QREF、SOURCE_PORT_HIGH/LOW、
-BUFFER_FALLBACK_FRACTION。runner 的 `--r3-queue-mode` 用于 R4 会明确报错。
+当前 `--cc=proposed` 固定运行 R4，入口为 `longhaul-r4.h`。
+实验设置读取 `config-longhaul.txt`；算法参数来自 `DciGatewayNode::Config` 的源码默认值。
+旧算法配置键会作为未知配置项拒绝，防止误以为它们仍能覆盖实现。
 
 `DciGatewayNode` 持有逐流反应、STATE/DEMAND、服务窗口、发送历史和生命周期；
 每个物理出口对所有流做一次带上限等权分配。无 Group/Assembly。
@@ -280,20 +281,19 @@ BUFFER_FALLBACK_FRACTION。runner 的 `--r3-queue-mode` 用于 R4 会明确报�
 在 `QbbDequeue` 通知及链路发送之前扣减普通令牌，探测模式另扣逐流额度与端口共享探测令牌。
 普通交换机、DCQCN 和 PG/PFC 保持原职责。
 
-默认 `PROPOSED_STARTUP_MODE optimistic`：A 按本地/B 出口容量起步，B 首次活动从出口容量初始化，均受端口联合分配约束，不使用额外启动字节额度。
+默认 `Config::startupMode="optimistic"`：A 按本地/B 出口容量起步，B 首次活动从出口容量初始化，均受端口联合分配约束，不使用额外启动字节额度。
 首次有效活动 STATE（sample>=start 且 HAS_DEMAND，包括活动零预算）接管后不再重新乐观启动；无活动反馈达到 start+STATE_TIMEOUT 停发。
 `probe` 保留一次有限启动探测；启动前零预算 STATE 不跳过启动。失效/缺历史/暂停停止普通注入但保持控制报告；
 恢复探测要求新鲜可发送状态、低积压和正预算，后续额度必须有 B 累计接收推进。
 完成标志通过 DEMAND 传到 B，尾部继续排空，身份保留到仿真结束。
 端口目标队列按预算比例分配；源侧高低水位按有需求流等分，不随流数复制总量。
 
-`--queue-mode history|snapshot` 只改变控制使用的队列值，两者均维护、检查历史。
-`--service-mode budget|busy-observed` 分别使用预算或窗口实际出队/积压墙钟时间；
-busy-observed 取 `min(当前预算, 窗口实际出队字节/积压墙钟时间)`；积压时间包含暂停、令牌和调度等待，
-不扣除暂停时间。当前暂停输出零，忙时不足回退预算。配置文件窗口 200 μs、最小忙时 50 μs；
-省略这两项时，接线分别使用报告周期和控制周期。
-必须显式配置 `PROPOSED_ECN_MODE source-boundary|path`。默认 source-boundary：A 将上游 CE 记录为近端 CNP 待反馈，并改写为 ECT(0)，保留 DSCP；A/B 受控出口禁止新标记，B 保留已有 CE，下游普通队列继续 ECN。B 的整形积压由 STATE→A 注入控制处理，不再通过自身标记降低自身预算。元数据 `ecn_policy_revision=2` 区分此前保留 B 标记的版本。上游 CE 与 A 积压共用限频，空队列/限频不会丢失待反馈。
-正常边界模式要求 `PROPOSED_NEAR_CNP 1`。旧 `PROPOSED_SHAPER_ECN` 键只在显式 path 模式允许，保留原 A/B 同时开关语义；旧配置必须显式迁移，不能直接以其值 0 替代 A 边界。
+`Config::reconstruct` 选择重建队列或报告快照，两者均维护、检查历史。
+`Config::serviceMode` 可设为 `budget` 或 `busy-observed`；后者取
+`min(当前预算, 窗口实际出队字节/积压墙钟时间)`，积压时间包含暂停、令牌和调度等待。
+当前暂停输出零，忙时不足回退预算。`serviceWindow` 默认 200 μs，`serviceMinBusy` 默认 50 μs。
+`Config::ecnMode` 默认 `source-boundary`：A 将上游 CE 记录为近端 CNP 待反馈，并改写为 ECT(0)，保留 DSCP；A/B 受控出口禁止新标记，B 保留已有 CE，下游普通队列继续 ECN。B 的整形积压由 STATE→A 注入控制处理，不再通过自身标记降低自身预算。元数据 `ecn_policy_revision=2` 区分此前保留 B 标记的版本。上游 CE 与 A 积压共用限频，空队列/限频不会丢失待反馈。
+边界模式要求 `nearCnp=true` 和 `shaperEcn=true`；`path` 模式下 `shaperEcn` 控制 A/B 受控出口是否新增标记。
 当前 `RdmaHw::ReceiveUdp` 仍以非零 ECN 计拥塞并设置 ACK-CNP，A 改写为 ECT(0) 后仍可能
 触发远端反馈。网关边界代码已实现，端到端源域反馈隔离尚未成立；`longhaul-r4-test`
 中的网关/设备回归不覆盖主机接收端这项语义修正。

@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="940" viewBox="0 0 1500 940">
+<defs>
+<marker id="data" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L9 6 L1 11" fill="none" stroke="#079b90" stroke-width="2.5"/></marker>
+<marker id="state" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L9 6 L1 11" fill="none" stroke="#2878bc" stroke-width="2.5"/></marker>
+<marker id="demand" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L9 6 L1 11" fill="none" stroke="#68778d" stroke-width="2.5"/></marker>
+<marker id="cnp" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L9 6 L1 11" fill="none" stroke="#dd7900" stroke-width="2.5"/></marker>
+<marker id="near" markerWidth="12" markerHeight="12" refX="9" refY="6" orient="auto" markerUnits="userSpaceOnUse"><path d="M1 1 L9 6 L1 11" fill="none" stroke="#9257b1" stroke-width="2.5"/></marker>
+</defs><rect width="1500" height="940" fill="#fcfcfd"/><g font-family="Noto Sans CJK SC, sans-serif" fill="#172331">
+<text x="750" y="52" font-size="32" fill="#172331" font-weight="bold" text-anchor="middle">当前 R4：双网关整形与拥塞反馈</text>
+<text x="750" y="88" font-size="19" fill="#64748b" font-weight="normal" text-anchor="middle">按现有实现绘制 · 非“B 只反馈、不整形”的候选方案</text>
+<rect x="50" y="285" width="240" height="215" rx="18" fill="#e9edf1" stroke="#657892" stroke-width="3"/>
+<text x="170.0" y="326" font-size="25" fill="#172331" font-weight="bold" text-anchor="middle">Sender</text>
+<text x="170.0" y="361" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">RNIC</text>
+<text x="170.0" y="396" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">响应 CNP</text>
+<text x="170.0" y="431" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">调整发送速率</text>
+<rect x="410" y="285" width="280" height="215" rx="18" fill="#e9edf1" stroke="#657892" stroke-width="3"/>
+<text x="550.0" y="326" font-size="25" fill="#172331" font-weight="bold" text-anchor="middle">DCI-A Gateway</text>
+<text x="550.0" y="361" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">源端控制</text>
+<text x="550.0" y="396" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">STATE + 实际发送历史</text>
+<text x="550.0" y="431" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">预测队列 → 计算目标</text>
+<text x="550.0" y="466" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">逐流整形 / 端口分配</text>
+<rect x="810" y="285" width="280" height="215" rx="18" fill="#e9edf1" stroke="#657892" stroke-width="3"/>
+<text x="950.0" y="326" font-size="25" fill="#172331" font-weight="bold" text-anchor="middle">DCI-B Gateway</text>
+<text x="950.0" y="361" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">接收侧控制</text>
+<text x="950.0" y="396" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">CNP → 反应速率 / 预算</text>
+<text x="950.0" y="431" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">观测队列与服务速率</text>
+<text x="950.0" y="466" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">逐流整形 / 端口分配</text>
+<rect x="1210" y="285" width="240" height="215" rx="18" fill="#e9edf1" stroke="#657892" stroke-width="3"/>
+<text x="1330.0" y="326" font-size="25" fill="#172331" font-weight="bold" text-anchor="middle">Receiver</text>
+<text x="1330.0" y="361" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">RNIC</text>
+<text x="1330.0" y="396" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">处理数据 ECN</text>
+<text x="1330.0" y="431" font-size="20" fill="#172331" font-weight="normal" text-anchor="middle">返回拥塞反馈</text>
+<path d="M290 355 H410" fill="none" stroke="#079b90" stroke-width="4" marker-end="url(#data)"/>
+<path d="M690 355 H810" fill="none" stroke="#079b90" stroke-width="4" marker-end="url(#data)"/>
+<path d="M1090 355 H1210" fill="none" stroke="#079b90" stroke-width="4" marker-end="url(#data)"/>
+<text x="750" y="325" font-size="20" fill="#079b90" font-weight="normal" text-anchor="middle">WAN</text>
+<text x="750" y="130" font-size="23" fill="#079b90" font-weight="normal" text-anchor="middle">数据传输：Sender → A → B → Receiver（省略域内交换机）</text>
+<path d="M950 285 V188 H550 V285" fill="none" stroke="#2878bc" stroke-width="4" marker-end="url(#state)"/>
+<text x="750" y="174" font-size="20" fill="#2878bc" font-weight="normal" text-anchor="middle">← STATE：预算、服务速率、队列、累计收发量</text>
+<path d="M620 285 V246 H880 V285" fill="none" stroke="#68778d" stroke-width="4" marker-end="url(#demand)" stroke-dasharray="10 7"/>
+<text x="750" y="231" font-size="19" fill="#68778d" font-weight="normal" text-anchor="middle">DEMAND：发送进度与需求状态 →</text>
+<path d="M1330 500 V605 H170 V500" fill="none" stroke="#dd7900" stroke-width="4" marker-end="url(#cnp)"/>
+<circle cx="950" cy="605" r="5" fill="#dd7900"/>
+<path d="M950 605 V500" fill="none" stroke="#dd7900" stroke-width="4" marker-end="url(#cnp)" stroke-dasharray="10 7"/>
+<circle cx="480" cy="605" r="5" fill="#dd7900"/>
+<path d="M480 605 V500" fill="none" stroke="#dd7900" stroke-width="4" marker-end="url(#cnp)" stroke-dasharray="10 7"/>
+<text x="750" y="650" font-size="23" fill="#dd7900" font-weight="normal" text-anchor="middle">← 原生 CNP / ACK-CNP：经 B、跨 WAN、经 A，继续返回 Sender</text>
+<text x="750" y="683" font-size="20" fill="#64748b" font-weight="normal" text-anchor="middle">B 观察反馈并降低预算；A 记录反馈，用于 near-CNP 间隔抑制</text>
+<path d="M410 462 H350 V545 H220 V500" fill="none" stroke="#9257b1" stroke-width="4" marker-end="url(#near)"/>
+<text x="296" y="577" font-size="21" fill="#9257b1" font-weight="normal" text-anchor="middle">← near-CNP</text>
+<rect x="70" y="725" width="1360" height="175" rx="15" fill="#f1f4f7"/>
+<text x="100" y="764" font-size="23" fill="#172331" font-weight="normal" text-anchor="start">远端控制：接收端反馈 → B 调整预算并整形 → STATE → A 调整注入并整形</text>
+<text x="100" y="807" font-size="23" fill="#172331" font-weight="normal" text-anchor="start">源端控制：A 队列积压 / 已消费的源域 CE → near-CNP → Sender 调整速率</text>
+<text x="100" y="852" font-size="21" fill="#64748b" font-weight="normal" text-anchor="start">当前反馈不在 B 截止；ACK-CNP 表示 ACK/NACK 携带拥塞标志。</text>
+<text x="100" y="882" font-size="18" fill="#64748b" font-weight="normal" text-anchor="start">注：源域 CE 转 near-CNP 适用于 source-boundary 模式；图示控制关系不代表逐次必然降速。</text>
+</g></svg>

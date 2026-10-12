@@ -1,11 +1,8 @@
 // Experiment wiring only. All R4 runtime control state belongs to DciGatewayNode.
 namespace Proposed {
+// Algorithm defaults live in DciGatewayNode::Config, not the experiment config.
 DciGatewayNode::Config config;
 std::string output;
-uint32_t version=0;
-bool serviceWindowSet=false,serviceMinBusySet=false;
-bool ecnModeSet=false,shaperEcnSet=false;
-std::vector<std::string> legacyKeys;
 Ipv4Address ControlAddress(uint32_t node) { return DciGatewayNode::ControlAddress(node); }
 Ptr<Packet> RoutePacket(Ipv4Address src,Ipv4Address dst,uint8_t protocol) {
     auto p=Create<Packet>(); Ipv4Header ip; ip.SetSource(src); ip.SetDestination(dst);
@@ -45,16 +42,9 @@ double PathDelay(const std::vector<uint32_t>& path,uint32_t bytes) {
 }
 void Setup() {
     if (selected_cc!="proposed") return;
-    NS_ABORT_MSG_IF(version!=4,"Proposed R4 requires PROPOSED_VERSION 4; use config-longhaul-r4.txt");
-    NS_ABORT_MSG_IF(!ecnModeSet,"R4 requires explicit PROPOSED_ECN_MODE source-boundary or path; migrate legacy configs");
-    NS_ABORT_MSG_IF(shaperEcnSet && config.ecnMode!="path",
-        "PROPOSED_SHAPER_ECN is a legacy path-mode ablation; remove it for source-boundary mode");
-    NS_ABORT_MSG_IF(!legacyKeys.empty(),"R4 legacy parameter must be migrated to PORT_QREF/SOURCE_PORT_HIGH/LOW/BUFFER_FALLBACK_FRACTION");
-    if (!serviceWindowSet) config.serviceWindow=config.period;
-    if (!serviceMinBusySet) config.serviceMinBusy=config.control;
     config.bufferBytes=uint64_t(buffer_size)*1024*1024;
     NS_ABORT_MSG_IF(config.sourceHigh>=buffer_size*1024.0*1024,"R4 source watermark exceeds shared buffer");
-    for (uint32_t target:{dci_left,dci_right}) {
+    for (uint32_t target:{dci_gateway_a_id,dci_gateway_b_id}) {
         auto gateway=DynamicCast<DciGatewayNode>(n.Get(target));
         NS_ABORT_MSG_IF(!gateway,"DCI must be a DciGatewayNode"); gateway->Configure(config,output);
         CalculateRoute(n.Get(target)); auto address=ControlAddress(target);
@@ -72,7 +62,7 @@ void Setup() {
         auto path=TracePath(f.src,f.dst,packet,h);
         size_t wan=path.size();
         for (size_t j=0;j+1<path.size();++j)
-            if ((path[j]==dci_left && path[j+1]==dci_right) || (path[j]==dci_right && path[j+1]==dci_left)) wan=j;
+            if ((path[j]==dci_gateway_a_id && path[j+1]==dci_gateway_b_id) || (path[j]==dci_gateway_b_id && path[j+1]==dci_gateway_a_id)) wan=j;
         if (wan==path.size()) continue;
         NS_ABORT_MSG_IF(wan+2>=path.size(),"R4 missing inward gateway egress");
         uint32_t a=path[wan],b=path[wan+1];
@@ -108,7 +98,7 @@ void Setup() {
         paths << '\n';
     }
     NS_ABORT_MSG_IF(!registered,"R4 requires cross-DC flows");
-    for (uint32_t node:{dci_left,dci_right}) DynamicCast<DciGatewayNode>(n.Get(node))->Start();
+    for (uint32_t node:{dci_gateway_a_id,dci_gateway_b_id}) DynamicCast<DciGatewayNode>(n.Get(node))->Start();
 }
 void WriteMetadata(std::ostream& out) {
     out << "  \"proposed_parameters\": {\"version\":4,\"schema_version\":1,\"enabled\":" << (selected_cc=="proposed" ? "true" : "false")
@@ -136,7 +126,7 @@ void WriteMetadata(std::ostream& out) {
         << ",\"probe_port_burst_bytes\":" << config.probePortBurst << ",\"near_cnp\":" << (config.nearCnp ? "true" : "false")
         << ",\"control_ip_mtu\":" << config.controlIpMtu << ",\"gateways\":[";
     bool comma=false;
-    if (selected_cc=="proposed") for (uint32_t node:{dci_left,dci_right}) {
+    if (selected_cc=="proposed") for (uint32_t node:{dci_gateway_a_id,dci_gateway_b_id}) {
         if (comma) out << ',';
         DynamicCast<DciGatewayNode>(n.Get(node))->WriteMetadata(out); comma=true;
     }
