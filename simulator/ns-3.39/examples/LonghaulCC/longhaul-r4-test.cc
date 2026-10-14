@@ -1,5 +1,7 @@
 // Deterministic controller regressions, independent of research performance runs.
 #include "ns3/dci-gateway-node.h"
+#include "ns3/rdma-hw.h"
+#include "ns3/qbb-header.h"
 #include "ns3/ppp-header.h"
 #include "ns3/pause-header.h"
 #include "ns3/qbb-channel.h"
@@ -110,6 +112,80 @@ class DciGatewayTestCase {
         d->TraceDisconnectWithoutContext("QbbDequeue",MakeBoundCallback(&DciGatewayNode::Dequeue,PeekPointer(g),uint32_t(0)));
     }
 public:
+    static void ReceiverEcnRegression() {
+        // Exercise the host receive path and inspect the generated ACK, not a helper predicate.
+        auto g=Gateway(true); auto hw=CreateObject<RdmaHw>(); hw->SetNode(g);
+        hw->m_ack_interval=1; hw->m_nic.emplace_back(g->Port(0)); hw->m_rtTable[1]={0};
+        for (uint8_t ecn:{uint8_t(0),uint8_t(1),uint8_t(2),uint8_t(3)}) {
+            auto p=Data(ecn,10001+ecn); auto h=Header(p); h.udp.seq=0;
+            hw->ReceiveUdp(p,h);
+            auto ack=g->Port(0)->GetRdmaQueue()->m_ackQ->Dequeue();
+            Check(bool(ack),"ECN test produced no ACK");
+            bool ce=ecn==CustomHeader::ECN_CE;
+            Check(bool(Header(ack).ack.flags&(1<<qbbHeader::FLAG_CNP))==ce,
+                  "non-CE triggered ACK-CNP or CE lost feedback");
+            auto q=hw->GetRxQp(h.dip,h.sip,h.udp.dport,h.udp.sport,h.udp.pg,false);
+            Check(q->m_ecn_source.qfb==uint32_t(ce) && q->m_ecn_source.ecnbits==(ce ? ecn : 0),
+                  "receiver congestion counters treated ECT as CE");
+        }
+        Simulator::Destroy();
+    }
+    static void ReceiverRecoveryRegression() {
+        auto b=Gateway(false); b->SamplePorts();
+        auto& f=b->m_flows.at(1); f.active=true; f.in=1000000;
+        f.lastArrival=0; f.rate=b->m_config.probeRate;
+        Simulator::Schedule(MilliSeconds(1),[b]() {
+            auto& f=b->m_flows.at(1); f.tx=1048;
+            b->UpdateReceiver();
+            Check(f.rate==b->m_config.probeRate+b->m_config.increase,
+                  "backlogged receiver cannot recover without fresh arrivals");
+        });
+        Simulator::Schedule(MilliSeconds(2),[b]() {
+            auto& f=b->m_flows.at(1); double rate=f.rate;
+            b->UpdateReceiver(); Check(f.rate==rate,"receiver recovered without actual transmission");
+            f.tx+=1048; f.lastCnp=Simulator::Now().GetNanoSeconds();
+            b->UpdateReceiver(); Check(f.rate==rate,"receiver recovered despite recent CNP");
+        });
+        Simulator::Schedule(MilliSeconds(3),[b]() {
+            auto& f=b->m_flows.at(1); double rate=f.rate; f.tx+=1048;
+            Pause(b,100); b->UpdateDemand(); b->UpdateReceiver();
+            Check(f.rate==rate && !f.budget,"receiver recovered through PFC pause");
+        });
+        Simulator::Run(); Simulator::Destroy();
+    }
+    static void BufferProtectionRegression() {
+        auto b=Gateway(false,2),a=Gateway(true,2);
+        for (auto& e:b->m_flows) { e.second.reg.peer=a->GetId(); e.second.lastArrival=0; }
+        for (auto& e:a->m_flows) e.second.reg.peer=b->GetId();
+        b->m_flows.at(1).in=b->m_config.bufferBytes;
+        b->SamplePorts(); b->UpdateDemand(); b->UpdateReceiver();
+        double available=b->m_ports.at(0).available;
+        Check(b->m_receiverOverload && available==b->m_config.utilization*b->m_ports.at(0).physical,
+              "B protection throttled drain capacity");
+        Check(b->m_flows.at(1).budget+b->m_flows.at(2).budget==available,
+              "B protection reduced allocated output budgets");
+        b->BuildReports();
+        for (auto p:b->m_reports) Receive(a,p->Copy());
+        Check(!a->m_rejected,"receiver protection STATE rejected");
+        a->SamplePorts(); a->UpdateDemand(); a->UpdateSource(); a->CommitControls();
+        auto& f=a->m_flows.at(2); double budget=b->m_flows.at(2).budget;
+        Check((f.source.state[10]&DciGatewayNode::BUFFER_PROTECTION) &&
+              f.target==budget*a->m_config.fallback &&
+              DynamicCast<TestDevice>(a->Port(0))->Rate(f.queue)==f.target,
+              "remote protection did not constrain A shaper");
+        Check(f.source.state[5]==budget && f.source.state[6]==budget,
+              "protection distorted reported budget or service");
+        Simulator::Schedule(MicroSeconds(200),[a,b]() {
+            b->m_flows.at(1).tx=b->m_flows.at(1).in;
+            b->SamplePorts(); b->UpdateDemand(); b->UpdateReceiver(); b->m_reports.clear(); b->BuildReports();
+            for (auto p:b->m_reports) Receive(a,p->Copy());
+            a->SamplePorts(); a->UpdateDemand(); a->UpdateSource(); a->CommitControls();
+            auto& f=a->m_flows.at(2);
+            Check(!b->m_receiverOverload && !(f.source.state[10]&DciGatewayNode::BUFFER_PROTECTION) &&
+                  f.target==b->m_flows.at(2).budget,"drained B did not release A protection cap");
+        });
+        Simulator::Run(); Simulator::Destroy();
+    }
     static void BoundaryRegression() {
         auto a=Gateway(true); auto peer=Connect(a); auto& f=a->m_flows.at(1);
         auto p=Data(); auto h=Header(p);
@@ -390,6 +466,7 @@ public:
         throw std::runtime_error("invalid registration was accepted");
     }
     static void Run() {
+        ReceiverEcnRegression(); ReceiverRecoveryRegression(); BufferProtectionRegression();
         PfcRefreshRegression(); DeviceRegression(); AdmissionRegression();
         BoundaryRegression(); PermitAndStartupRegression();
         auto rates=DciGatewayNode::Allocate({20,80},100);

@@ -105,7 +105,7 @@ void WriteMetadata(std::ostream& out) {
         << ",\"reconstruct\":" << (config.reconstruct ? "true" : "false")
         << ",\"shaper_ecn\":" << (config.shaperEcn ? "true" : "false")
         << ",\"ecn_mode\":\"" << config.ecnMode << "\",\"startup_mode\":\"" << config.startupMode << "\""
-        << ",\"ecn_policy_revision\":2"
+        << ",\"ecn_policy_revision\":3"
         << ",\"source_ce_to_near_cnp\":" << (config.ecnMode=="source-boundary" ? "true" : "false")
         << ",\"source_ce_clear\":" << (config.ecnMode=="source-boundary" ? "true" : "false")
         << ",\"source_shaper_ecn\":" << (config.ecnMode=="path" && config.shaperEcn ? "true" : "false")

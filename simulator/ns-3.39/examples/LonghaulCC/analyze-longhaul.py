@@ -401,7 +401,6 @@ def main():
     if not tables[0]:raise SystemExit("no stable successful runs found")
     for name,rows in (("run-summary.csv",tables[0]),(output.name,tables[1]),("flow-summary.csv",tables[2]),
                       ("direction-summary.csv",tables[3]),
-                      ("r3-evidence.csv",[r for r in tables[5] if r.get("proposed_version")!=4]),
                       ("r4-evidence.csv",[r for r in tables[5] if r.get("proposed_version")==4])):
         write_csv(output.parent/name,rows)
     (output.parent/"scenario-validation.json").write_text(json.dumps(tables[4],indent=2)+"\n")

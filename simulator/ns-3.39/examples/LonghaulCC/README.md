@@ -223,7 +223,7 @@ python3 examples/LonghaulCC/plot-longhaul.py --root /tmp/longhaul-scaled --all-s
 | 每运行的 `queue-window-summary.csv` | 按节点/端口/PG 分开，不合并 WAN、网关内向与其他队列 |
 | `scenario-validation.json` | 加入/退出/背景重叠与机制路径关系，失败明确保留 |
 | `r4-evidence.csv` | 按 node/role/flow/generation 和注册 peer 关联，终点取该 ns 全部 B 事件之后；核对报告 ordinal、累计字节、固定前向时延和预测误差 |
-| `r3-evidence.csv`（历史） | 按组去重预测值、A 组积压、最终/端口分配前限额、暂停及实际发送；按 `t+df` 对齐未来 B 队列 |
+按 `t+df` 对齐未来 B 队列 |
 
 公平参考采用有向链路约束下等权 max-min **payload** 速率，计入数据头和反向 ACK 的
 平均 wire 消耗；不包含重传、PFC/CNP/STATE 开销或窗口限制，不声称协议必然达到该参考。
@@ -292,14 +292,16 @@ R4 的实现核对及分版本验证记录见 [R4 实现与功能验证记录](R
 `Config::serviceMode` 可设为 `budget` 或 `busy-observed`；后者取
 `min(当前预算, 窗口实际出队字节/积压墙钟时间)`，积压时间包含暂停、令牌和调度等待。
 当前暂停输出零，忙时不足回退预算。`serviceWindow` 默认 200 μs，`serviceMinBusy` 默认 50 μs。
-`Config::ecnMode` 默认 `source-boundary`：A 将上游 CE 记录为近端 CNP 待反馈，并改写为 ECT(0)，保留 DSCP；A/B 受控出口禁止新标记，B 保留已有 CE，下游普通队列继续 ECN。B 的整形积压由 STATE→A 注入控制处理，不再通过自身标记降低自身预算。元数据 `ecn_policy_revision=2` 区分此前保留 B 标记的版本。上游 CE 与 A 积压共用限频，空队列/限频不会丢失待反馈。
+`Config::ecnMode` 默认 `source-boundary`：A 将上游 CE 记录为近端 CNP 待反馈，并改写为 ECT(0)，保留 DSCP；A/B 受控出口禁止新标记，B 保留已有 CE，下游普通队列继续 ECN。B 的整形积压由 STATE→A 注入控制处理，不再通过自身标记降低自身预算。元数据 `ecn_policy_revision=3` 标识接收端仅 CE 反馈的版本。上游 CE 与 A 积压共用限频，空队列/限频不会丢失待反馈。
 边界模式要求 `nearCnp=true` 和 `shaperEcn=true`；`path` 模式下 `shaperEcn` 控制 A/B 受控出口是否新增标记。
-当前 `RdmaHw::ReceiveUdp` 仍以非零 ECN 计拥塞并设置 ACK-CNP，A 改写为 ECT(0) 后仍可能
-触发远端反馈。网关边界代码已实现，端到端源域反馈隔离尚未成立；`longhaul-r4-test`
-中的网关/设备回归不覆盖主机接收端这项语义修正。
+`RdmaHw::ReceiveUdp` 仅对 CE 计拥塞并设置 ACK-CNP；Not-ECT、ECT(1)、ECT(0) 不触发。
+B 在无近期 CNP、出口未暂停且恢复周期内实际发送增长时恢复速率，不要求新包到达。
 活动流瞬时空队列保留合法整形许可，新包按已有许可调度，不等待下一控制周期；暂停和令牌约束仍生效。
 端口目标/高水位总和须小于共享缓存的 80%；应急保护采用 A/B 各自累计积压的
-80%/50% 高低水位，仅作为安全机制，不是缓冲预留或无损证明。
+80%/50% 高低水位。A 本地保护仍缩减 A 端口容量；B 保护不缩减 B 出队预算或服务观测，
+而在 STATE flags 中设置 `BUFFER_PROTECTION=16`。A 对新鲜报告按
+`min(原候选速率, B预算 × buffer_fallback_fraction)` 限制注入，再做端口分配；保护解除后恢复原控制。
+报告通过 WAN 存在延迟，PFC 和 MMU 准入继续生效；该机制不是缓冲预留或无损证明。
 
 控制报文为 version 4、16 B 公共头、152 B STATE 或 64 B DEMAND，按 IP MTU 分包，
 每条记录独立校验应用。日志前缀为 `r4`：

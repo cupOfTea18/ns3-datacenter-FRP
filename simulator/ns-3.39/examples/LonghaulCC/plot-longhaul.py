@@ -36,31 +36,55 @@ def main():
         labels=[]
         for i,r in enumerate(selected):
             path=Path(r["run_dir"]);meta=json.loads((path/"metadata.json").read_text())
-            label=f'{r["algorithm"]}/{r["queue_mode"] or "native"}/seed{r["seed"]}-run{r["run"]}'
+            label=f'{r["algorithm"]}/{r["queue_mode"] or "native"}'
             labels.append(label)
             directions={}
-            for f in meta["flow_path_metrics"]:
+            flow_labels={}
+            fig_flows,flow_axes=plt.subplots(2,1,figsize=(12,8),sharex=True)
+            for flow_id,f in enumerate(meta["flow_path_metrics"],1):
                 edges={tuple(e[:2]) for e in f.get("data_path",[])}
                 direct="left-to-right" if (meta["dci_left"],meta["dci_right"]) in edges else "right-to-left" if (meta["dci_right"],meta["dci_left"]) in edges else "local"
-                directions[tuple(str(f[k]) for k in ("src","dst","sport","dport","pg"))]=direct
+                key=tuple(str(f[k]) for k in ("src","dst","sport","dport","pg"))
+                directions[key]=direct
+                flow_labels[key]=f'Flow {flow_id}: {f["src"]} → {f["dst"]}'
             for row_index,filename,field in ((0,"sender-rate.csv","tx_payload_bps"),(1,"receiver-goodput.csv","goodput_bps")):
                 values=defaultdict(float)
+                flow_values=defaultdict(lambda: defaultdict(float))
                 step=meta["rate_sample_interval_us" if row_index==0 else "goodput_sample_interval_us"]*1000
                 # Rebin byte deltas, including short completion intervals. Summing
                 # only equal endpoint timestamps would omit other active flows.
                 byte_field="tx_payload_bytes" if row_index==0 else "goodput_bytes"
                 for point in read(path/filename):
-                    direct=directions[tuple(point[k] for k in ("src","dst","sport","dport","pg"))]
+                    key=tuple(point[k] for k in ("src","dst","sport","dport","pg"))
+                    direct=directions[key]
                     start,end=int(point["interval_start_ns"]),int(point["time_ns"])
                     if end<=start:continue
                     for index in range(start//step,(end-1)//step+1):
                         overlap=max(0,min(end,(index+1)*step)-max(start,index*step))
-                        values[(direct,(index+1)*step)]+=int(point[byte_field])*8*1e9*overlap/(end-start)/step
+                        rate=int(point[byte_field])*8*1e9*overlap/(end-start)/step
+                        values[(direct,(index+1)*step)]+=rate
+                        flow_values[key][(index+1)*step]+=rate
                 for col,direct in enumerate(("left-to-right","right-to-left")):
                     points=sorted((t,v) for (d,t),v in values.items() if d==direct)
                     rate_axes[row_index,col].plot([t*1e-6 for t,v in points],[v/1e9 for t,v in points],label=label)
                     rate_axes[row_index,col].set_title(direct+" "+("sender payload TX" if row_index==0 else "receiver goodput"))
                     rate_axes[row_index,col].set_ylabel("Gbps")
+                ax=flow_axes[row_index]
+                for flow_index,(key,flow_label) in enumerate(flow_labels.items()):
+                    points=sorted(flow_values[key].items())
+                    ax.plot([t*1e-6 for t,v in points],[v/1e9 for t,v in points],
+                            label=flow_label,color=f"C{flow_index%10}",
+                            linestyle=("-","--",":","-.")[flow_index%4],linewidth=1.2)
+                ax.set_title("Actual sender payload TX (includes retransmissions)" if row_index==0
+                             else "Receiver goodput (unique payload)")
+                ax.set_ylabel("Gbps");ax.set_ylim(bottom=0);ax.grid(alpha=.25)
+                ax.legend(fontsize=8,ncol=2)
+            flow_axes[1].set_xlabel("simulation time (ms)")
+            flow_axes[1].set_xlim(0,meta["simulator_stop_time_s"]*1000)
+            fig_flows.suptitle(f"{scenario}: {label} — per-flow payload rates")
+            suffix="-".join(str(v) for v in (r["algorithm"],r.get("queue_mode"),r.get("service_mode")) if v)
+            filename=f'{scenario.lower()}-{suffix}-seed{r["seed"]}-run{r["run"]}-flow-rates.png'
+            fig_flows.tight_layout();fig_flows.savefig(out/filename,dpi=140);plt.close(fig_flows)
             rtts=defaultdict(list)
             for point in read(path/"measured-rtt.csv"):rtts[int(point["time_ns"])].append(float(point["rtt_p50_ns"]))
             points=sorted((t,sum(v)/len(v)) for t,v in rtts.items())

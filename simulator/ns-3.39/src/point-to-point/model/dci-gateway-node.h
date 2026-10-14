@@ -48,7 +48,7 @@ protected:
     bool ShouldMarkEcn(uint32_t,Ptr<const Packet>) override;
 private:
     friend class DciGatewayTestCase;
-    enum : uint64_t { HAS_DEMAND=1, BACKLOG=2, NO_MORE_HOST_DATA=4, SENDABLE=8 };
+    enum : uint64_t { HAS_DEMAND=1, BACKLOG=2, NO_MORE_HOST_DATA=4, SENDABLE=8, BUFFER_PROTECTION=16 };
     enum : uint32_t { STATE=1, DEMAND=2 };
     using Record=std::array<uint64_t,19>;
     struct History {

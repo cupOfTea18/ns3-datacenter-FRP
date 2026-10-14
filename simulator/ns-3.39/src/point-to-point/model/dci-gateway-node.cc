@@ -349,7 +349,8 @@ void DciGatewayNode::UpdateDemand() {
     protection(a,m_sourceOverload,"A_aggregate"); protection(b,m_receiverOverload,"B_aggregate");
     for (auto& e:m_ports) {
         bool source=m_flows.at(e.second.flows.front()).IsSource();
-        if (source ? m_sourceOverload : m_receiverOverload) e.second.available*=m_config.fallback;
+        // B must keep draining; its protection flag limits injection at A.
+        if (source && m_sourceOverload) e.second.available*=m_config.fallback;
     }
 }
 void DciGatewayNode::UpdateReceiver() {
@@ -368,7 +369,8 @@ void DciGatewayNode::UpdateReceiver() {
         if (f.paused || (f.lastCnp>=0 && now-f.lastCnp<wait)) {
             f.recoverySince=now; f.previousTx=f.tx;
         } else if (now-f.recoverySince>=wait) {
-            if (f.tx>f.previousTx && f.lastArrival>=0 && now-f.lastArrival<=wait) {
+            // Upstream PFC can stop arrivals while this queue still has work to drain.
+            if (f.tx>f.previousTx) {
                 f.rate=std::min(m_ports.at(f.reg.port).physical,f.rate+m_config.increase);
                 f.probing=false; Event("B_RECOVER",f.reg.id,f.rate*8);
             }
@@ -460,6 +462,10 @@ void DciGatewayNode::UpdateSource() {
                     a.candidate=std::min(double(a.state[5]),m_config.probeRate);
             }
         }
+        if (a.fresh && (a.state[10]&BUFFER_PROTECTION)) {
+            a.candidate=std::min(a.candidate,double(a.state[5])*m_config.fallback);
+            if (a.candidate>0) a.reason="remote_buffer_protection";
+        }
         if (old!=a.mode) Event("MODE",f.reg.id,uint32_t(a.mode),a.reason);
     }
     for (auto& e:m_ports) {
@@ -502,7 +508,7 @@ void DciGatewayNode::BuildReports() {
         else {
             auto& b=f.receiver; const auto& w=b.window.observation;
             r[5]=uint64_t(std::floor(f.budget)); r[6]=uint64_t(std::floor(b.service)); r[7]=b.queueTarget;
-            r[8]=f.in; r[9]=f.tx; r[10]=flags|(f.paused ? 0 : SENDABLE); r[11]=uint32_t(b.serviceSource);
+            r[8]=f.in; r[9]=f.tx; r[10]=flags|(f.paused ? 0 : SENDABLE)|(m_receiverOverload ? BUFFER_PROTECTION : 0); r[11]=uint32_t(b.serviceSource);
             r[12]=w.begin; r[13]=w.end; r[14]=w.busy; r[15]=w.bytes; r[16]=w.pause;
             r[17]=b.lastBudgetChange; r[18]=m_ordinal;
         }
@@ -536,7 +542,7 @@ bool DciGatewayNode::ApplyRecord(Flow& f,const Record& r,uint32_t kind,const cha
     if (!r[2] || r[2]<=old[2] || r[3]>uint64_t(now) || now-int64_t(r[3])>Ns(m_config.timeout) ||
         (old[2] && (r[3]<old[3] || ordinal<oldOrdinal || (r[3]==old[3] && ordinal<=oldOrdinal)))) return false;
     reason="flags";
-    if (flags&~uint64_t(HAS_DEMAND|BACKLOG|NO_MORE_HOST_DATA|(state ? SENDABLE : 0)) ||
+    if (flags&~uint64_t(HAS_DEMAND|BACKLOG|NO_MORE_HOST_DATA|(state ? SENDABLE|BUFFER_PROTECTION : 0)) ||
         bool(flags&BACKLOG)!=(r[4]>0) || (r[4]>0 && !(flags&HAS_DEMAND)) ||
         ((old[state ? 10 : 6]&NO_MORE_HOST_DATA) && !(flags&NO_MORE_HOST_DATA))) return false;
     if (state) {
