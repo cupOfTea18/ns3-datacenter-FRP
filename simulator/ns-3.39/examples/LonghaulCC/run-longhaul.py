@@ -150,7 +150,7 @@ def main():
                 parser.error(f"run directory already contains data: {run_dir}")
 
     print(f"Output directory: {args.output_root}", flush=True)
-    # Record the actual source tree, including untracked R4 files. Do not label a stale
+    # Record the actual source tree, including untracked R5 files. Do not label a stale
     # --skip-build executable with the current source identity.
     source_files = sorted(p for base in (ns3/"src", here, ns3/"build-support")
                           for p in base.rglob("*") if p.is_file() and
@@ -162,7 +162,7 @@ def main():
         source_hash.update(str(path.relative_to(ns3)).encode())
         source_hash.update(path.read_bytes())
     source_digest = source_hash.hexdigest()
-    stamp = ns3/"build"/"longhaul-r4-build.json"
+    stamp = ns3/"build"/"longhaul-build.json"
     if not args.skip_build:
         subprocess.run([str(ns3 / "ns3"), "build", "longhaul-convergence", "-j2"],
                        cwd=ns3, check=True)
@@ -202,7 +202,7 @@ def main():
                 "LINK_STATS_OUTPUT_FILE": run_dir / "dci-link.csv",
                 "RTT_OUTPUT_FILE": run_dir / "measured-rtt.csv",
                 "SUMMARY_META_FILE": run_dir / "metadata.json",
-                "PROPOSED_OUTPUT": run_dir / "r4",
+                "PROPOSED_OUTPUT": run_dir / "r5",
             })
             effective_config_path.write_text(effective_config_text)
             effective_config_hash = hashlib.sha256(effective_config_text.encode()).hexdigest()
@@ -257,8 +257,7 @@ def main():
                 "purpose": args.purpose,
                 "stop_rule": "fixed common simulator stop time; no algorithm-specific early selection",
                 "scenario_contract": scenarios.get(label, {}),
-                "queue_mode": (("history" if proposed_parameters["reconstruct"] else "snapshot")
-                               if "reconstruct" in proposed_parameters else None),
+                "queue_mode": proposed_parameters.get("queue_mode"),
                 "service_mode": proposed_parameters.get("service_mode"),
                 **build_identity,
                 "binary_file": str(binary),
@@ -297,22 +296,17 @@ def main():
                 run_metadata["admission_drop_packets"] = summary["admission_drop_packets"]
             else:
                 run_metadata["completion_valid"] = False
-            if algorithm=="proposed" and run_metadata["proposed_version"]==4 and status=="ok":
-                last={}
-                for path in run_dir.glob("r4.gateway-*.packets.csv"):
-                    with path.open() as stream:
-                        for row in csv.DictReader(stream):
-                            last[(int(row["node"]),row["role"],int(row["flow"]),int(row["generation"]))]=row
-                closed=True
-                for gateway in simulator_meta["proposed_parameters"]["gateways"]:
-                    for flow in gateway["flows"]:
-                        k=(gateway["node"],flow["role"],flow["id"],flow["generation"])
-                        r=last.get(k,{})
-                        closed &= bool(r) and int(r.get("in_total",0))==int(r.get("tx_total",-1))
-                        if flow["role"]=="A":
-                            peer=last.get((flow["peer"],"B",flow["id"],flow["generation"]),{})
-                            closed &= int(r.get("tx_total",-1))==int(peer.get("in_total",-2))
-                run_metadata["r4_wire_closed"]=closed
+            if algorithm=="proposed" and run_metadata["proposed_version"]==5 and status=="ok":
+                final = json.loads((run_dir / "r5.final.json").read_text())["proposed_parameters"]
+                last = {(g["node"], f["role"], f["id"]): f
+                        for g in final["gateways"] for f in g["flows"]}
+                closed = bool(last)
+                for (node, role, fid), flow in last.items():
+                    closed &= flow["in_total"] > 0 and flow["in_total"] == flow["tx_total"]
+                    if role == "A":
+                        peer = last.get((flow["peer"], "B", fid), {})
+                        closed &= flow["tx_total"] == peer.get("in_total", -1)
+                run_metadata["r5_wire_closed"] = closed
                 run_metadata["completion_valid"] &= closed
             if args.purpose == "completion" and not run_metadata["completion_valid"]:
                 failures.append(str(run_dir) + " (incomplete)")

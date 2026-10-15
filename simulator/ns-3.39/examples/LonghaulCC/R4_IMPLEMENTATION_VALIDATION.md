@@ -1,3 +1,5 @@
+> 历史 R4 验证记录。当前 Proposed 已迁移到 R5，见 [R5_IMPLEMENTATION_VALIDATION.md](R5_IMPLEMENTATION_VALIDATION.md)；下文接口与命令仅适用于历史源码。
+
 # R4 实现与功能验证记录（2026-10-08）
 
 实现依据：[R4 代码修改方案](../../../../docs/LonghaulCC_R4_代码详细设计与修改方案_20261008.md)。

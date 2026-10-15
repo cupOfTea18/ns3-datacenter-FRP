@@ -115,17 +115,11 @@ public:
 
   DataRate GetDataRate();
   // Logical flow queues retain the shared physical PG/MMU accounting.
-  void ConfigureGroupShaper(uint32_t groupQueue, uint32_t priority, double rate, uint32_t burst);
-  void SetGroupShaperRate(uint32_t groupQueue, double rate);
-
-  struct QueueControl { uint32_t queue; double bytesPerSec; bool probe; };
-  struct ProbeCounters { uint64_t epoch=0, remaining=0, sent=0; };
-  void ApplyQueueControls(const std::vector<QueueControl>& controls);
-  void ConfigureProbeBucket(double bytesPerSec, uint64_t burst);
-  void GrantProbeBytes(uint32_t queue, uint64_t epoch, uint64_t bytes);
-  ProbeCounters GetProbeCounters(uint32_t queue) const;
-  double GetProbeTokens();
-  uint64_t GetProbeSentBytes() const { return m_probeSent; }
+  // A single token bucket is shared by all backlogged flow queues in a group.
+  void ConfigureInjectionGroup(uint32_t group, uint32_t burst);
+  void BindInjectionQueue(uint32_t queue, uint32_t priority, uint32_t group);
+  struct InjectionControl { uint32_t group; double bytesPerSec; };
+  void ApplyInjectionControls(const std::vector<InjectionControl>& controls);
   Callback<uint32_t, Ptr<const Packet>, uint32_t> m_groupClassifier;
   Time GetReceiveDelay() const { return m_nicDelay; }
   bool IsQueuePaused(uint32_t queue) const { return m_paused[queue]; }
@@ -173,6 +167,8 @@ public:
 	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDequeue;
 	TracedCallback<Ptr<const Packet>, uint32_t> m_traceDrop;
 	TracedCallback<uint32_t> m_tracePfc; // 0: resume, 1: pause
+    typedef void (*PauseStateCallback)(uint32_t pg, bool paused);
+    TracedCallback<uint32_t, bool> m_tracePauseState; // PG and actual paused state, including expiry
 	uint64_t getTxBytes(){
 				uint64_t temp=numTxBytes;
 				numTxBytes=0;
@@ -229,21 +225,18 @@ protected:
    * @see class InfiniteQueue
    */
   Ptr<BEgressQueue> m_queue;
-  struct QueueShaper {
-      uint32_t priority=0, burst=0;
+  struct InjectionBucket {
+      uint32_t burst=0;
       double rate=0, tokens=0;
       Time updated;
-      bool probe=false;
-      ProbeCounters grant;
+      uint32_t priority=0, next=0;
+      std::vector<uint32_t> queues;
   };
-  std::map<uint32_t, QueueShaper> m_shapers;
-  double m_probeRate=0, m_probeTokens=0;
-  uint64_t m_probeBurst=0, m_probeSent=0;
-  Time m_probeUpdated;
-  void UpdateProbeTokens();
+  std::map<uint32_t, InjectionBucket> m_injectionGroups;
+  std::map<uint32_t, uint32_t> m_queueGroup;
   Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
   EventId m_shapeWake;
-  void UpdateShapeTokens(QueueShaper& shaper);
+  void UpdateInjectionTokens(InjectionBucket& bucket);
 
 
   Ptr<DropTailQueue<Packet>> m_queueFifo;

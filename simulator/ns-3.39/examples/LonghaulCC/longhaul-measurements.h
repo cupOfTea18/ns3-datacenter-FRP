@@ -17,10 +17,10 @@ void WritePath(std::ostream& out,const std::vector<uint32_t>& path,uint32_t pg) 
 void WriteFlowPath(std::ostream& out,const FlowInput& f) {
     CustomHeader h(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header);
     h.l3Prot=0x11; h.udp.sport=f.port; h.udp.dport=f.dport; h.udp.pg=f.pg;
-    auto path=Proposed::TracePath(f.src,f.dst,Proposed::RoutePacket(serverAddress[f.src],serverAddress[f.dst],0x11),h);
+    auto path=LonghaulRouting::TracePath(f.src,f.dst,LonghaulRouting::RoutePacket(serverAddress[f.src],serverAddress[f.dst],0x11),h);
     out << ",\"data_path\":"; WritePath(out,path,f.pg);
     h.l3Prot=0xfc; h.ack.sport=f.dport; h.ack.dport=f.port;
-    auto reverse=Proposed::TracePath(f.dst,f.src,Proposed::RoutePacket(serverAddress[f.dst],serverAddress[f.src],0xfc),h);
+    auto reverse=LonghaulRouting::TracePath(f.dst,f.src,LonghaulRouting::RoutePacket(serverAddress[f.dst],serverAddress[f.src],0xfc),h);
     out << ",\"ack_path\":"; WritePath(out,reverse,ack_high_prio ? 0 : f.pg);
     out << ",\"ack_wire_bytes\":" << RdmaAckWireBytes() << ",\"ack_interval_bytes\":" << l2_ack_interval;
 }
@@ -32,7 +32,7 @@ void WriteResources(std::ostream& out) {
         bool comma=false;
         for (uint32_t j=0;j<n.Get(i)->GetNDevices();++j) if (auto d=DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(j))) {
             uint64_t h=ConfiguredHeadroomBytes(d); headroom+=8*h;
-            out << (comma ? "," : "") << "{\"port\":" << j << ",\"peer\":" << Proposed::Peer(d)
+            out << (comma ? "," : "") << "{\"port\":" << j << ",\"peer\":" << LonghaulRouting::Peer(d)
                 << ",\"headroom_per_pg_bytes\":" << h << ",\"pg_count\":8}"; comma=true;
         }
         out << "],\"buffer_pool_bytes\":" << uint64_t(buffer_size)*1024*1024+headroom
@@ -53,7 +53,7 @@ void Sample() {
     for (const auto& entry:observedPorts) {
         uint32_t node,port,pg; std::tie(node,port,pg)=entry;
         auto d=DynamicCast<QbbNetDevice>(n.Get(node)->GetDevice(port));
-        queues << now.GetNanoSeconds() << ',' << node << ',' << port << ',' << Proposed::Peer(d) << ',' << pg
+        queues << now.GetNanoSeconds() << ',' << node << ',' << port << ',' << LonghaulRouting::Peer(d) << ',' << pg
             << ',' << d->GetQueue()->GetNBytes(pg) << ',' << d->IsQueuePaused(pg) << '\n';
     }
     if (now+MicroSeconds(rate_sample_interval_us)<Seconds(simulator_stop_time))

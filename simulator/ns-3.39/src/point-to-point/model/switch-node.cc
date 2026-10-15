@@ -252,6 +252,7 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 				m_mmu->UpdateEgressAdmission(idx, qIndex, p->GetSize(), found);
 			} else {
 				++m_admissionDropPackets;
+                NotifyAdmissionDrop(idx, qIndex, p);
 				return; // Drop
 			}
 			CheckAndSendPfc(inDev, qIndex);
@@ -359,7 +360,7 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize(), found);
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize(), found);
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
-        if (m_ecnEnabled && ShouldMarkEcn(ifIndex, p))
+        if (m_ecnEnabled)
         {
             bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
             if (egressCongested)

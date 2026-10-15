@@ -183,42 +183,11 @@ def relation_check(contract, flows, states, stop, hold):
     return result
 
 
-def r3_evidence(run_dir, identity):
-    grouped=defaultdict(dict)
-    for path in run_dir.glob("r3.gateway-*.csv"):
-        if ".events." in path.name or ".packets." in path.name: continue
-        with path.open() as stream:
-            for r in csv.DictReader(stream):
-                k=(r["role"],int(r["group"])); t=float(r["time_s"])
-                if t not in grouped[k]: grouped[k][t]={**r,"group_queue":0,"group_tx":0}
-                grouped[k][t]["group_queue"]+=int(r["queue_bytes"])
-                grouped[k][t]["group_tx"]+=int(r["tx_bytes"])
-    result=[]
-    for (role,gid), samples in grouped.items():
-        if role!="A": continue
-        b=grouped.get(("B",gid),{}); times=sorted(b)
-        ordered=sorted(samples)
-        for index,t in enumerate(ordered[:-1]):
-            r=samples[t]; end=float(r.get("prediction_end_s",t)); pos=bisect.bisect_left(times,end)
-            observed=b[times[pos]]["group_queue"] if pos<len(times) else None
-            next_r=samples[ordered[index+1]]
-            result.append({**identity,"group":gid,"time_s":t,"prediction_end_s":end,
-                "B_sample_time_s":times[pos] if pos<len(times) else None,
-                "B_future_queue_bytes":observed,"prediction_error_bytes":float(r["predicted_queue_bytes"])-observed if observed is not None and r.get("snapshot_valid")=="1" else None,
-                "A_group_queue_bytes":r["group_queue"],"predicted_queue_bytes":r["predicted_queue_bytes"],
-                "queue_used_bytes":r.get("queue_used_bytes"),"snapshot_seq":r["snapshot_seq"],
-                "snapshot_queue_bytes":r.get("snapshot_queue_bytes"),"group_target_bps":r.get("group_target_bps"),
-                "pre_port_target_bps":r.get("pre_port_target_bps"),"paused":r.get("paused"),
-                "snapshot_valid":r.get("snapshot_valid"),
-                "next_interval_actual_bps":(next_r["group_tx"]-r["group_tx"])*8/(ordered[index+1]-t)})
-    return result
-
-
-def r4_packet_index(rows):
-    """Cumulative queue after each real event; retain node/role/generation identity."""
+def r5_packet_index(rows):
+    """Full PG queues, including uncontrolled arrivals; nanosecond + event order boundaries."""
     indexed=defaultdict(list)
     for r in rows:
-        k=(int(r["node"]),r["role"],int(r["flow"]),int(r["generation"]))
+        k=(int(r["node"]),r["role"],int(r["group"]))
         event={name:int(r[name]) for name in ("time_ns","event_order","bytes","in_total","tx_total","queue_bytes")}
         event["event"]=r["event"]
         indexed[k].append(event)
@@ -228,78 +197,68 @@ def r4_packet_index(rows):
         previous=(-1,-1)
         for e in events:
             order=(e["time_ns"],e["event_order"])
-            if order<=previous: raise ValueError("duplicate/reversed R4 packet event order")
+            if order<=previous: raise ValueError("duplicate/reversed R5 group event order")
             previous=order
             if e["event"]=="ADMIT": admitted+=e["bytes"]
             elif e["event"]=="TX": sent+=e["bytes"]
-            else: raise ValueError("unknown R4 packet event")
+            elif e["event"]!="DROP": raise ValueError("unknown R5 packet event")
             if (e["in_total"],e["tx_total"],e["queue_bytes"])!=(admitted,sent,admitted-sent) or sent>admitted:
-                raise ValueError("R4 cumulative packet accounting mismatch")
+                raise ValueError("R5 cumulative group accounting mismatch")
     return {k: ([(e["time_ns"],e["event_order"]) for e in events],events) for k,events in indexed.items()}
 
 
-def r4_endpoint(index,k,time_ns,ordinal=None):
+def r5_endpoint(index,k,time_ns,ordinal=None):
     orders,events=index.get(k,([],[]))
-    # Default means after ALL events at this ns, not the next periodic sample.
-    end=(time_ns,math.inf if ordinal is None else ordinal)
-    pos=bisect.bisect_right(orders,end)-1
+    pos=bisect.bisect_right(orders,(time_ns,math.inf if ordinal is None else ordinal))-1
     return events[pos] if pos>=0 else {"queue_bytes":0,"in_total":0,"tx_total":0}
 
 
-def r4_evidence(run_dir,identity,meta):
+def r5_evidence(run_dir,identity,meta):
     packets=[]
-    for path in run_dir.glob("r4.gateway-*.packets.csv"): packets.extend(read_csv(path))
-    index=r4_packet_index(packets)
-    registrations={}
+    for path in run_dir.glob("r5.gateway-*.group-packets.csv"): packets.extend(read_csv(path))
+    index=r5_packet_index(packets)
+    flows=defaultdict(list)
+    for path in run_dir.glob("r5.gateway-*.packets.csv"):
+        for r in read_csv(path): flows[(int(r["node"]),r["role"],int(r["flow"]))].append(r)
+    stop_ns=round(meta["simulator_stop_time_s"]*1e9)
+    mismatches=defaultdict(int)
     for gateway in meta["proposed_parameters"]["gateways"]:
         for f in gateway["flows"]:
-            registrations[(gateway["node"],f["role"],f["id"],f["generation"])]=f
-    stop_ns=round(meta["simulator_stop_time_s"]*1e9)
-    results=[]
-    mapping={}
-    for k,f in registrations.items():
-        if k[1]!="A": continue
-        peer=(f["peer"],"B",k[2],k[3])
-        if peer not in registrations or registrations[peer]["peer"]!=k[0]:
-            raise ValueError("R4 registration peer mismatch")
-        sent=[e for e in index.get(k,([],[]))[1] if e["event"]=="TX"]
-        admitted=[e for e in index.get(peer,([],[]))[1] if e["event"]=="ADMIT"]
-        expected=[e for e in sent if e["time_ns"]+f["forward_delay_ns"]<=stop_ns]
-        mismatches=sum(a["bytes"]!=b["bytes"] or a["time_ns"]+f["forward_delay_ns"]!=b["time_ns"]
-                       for a,b in zip(expected,admitted))+abs(len(expected)-len(admitted))
-        mapping[k]=mismatches
-    for path in run_dir.glob("r4.gateway-*.flows.csv"):
+            if f["role"]!="A": continue
+            sent=[r for r in flows[(gateway["node"],"A",f["id"])]
+                  if r["event"]=="TX" and int(r["arrival_ns"])<=stop_ns]
+            received=[r for r in flows[(f["peer"],"B",f["id"])] if r["event"]=="ADMIT"]
+            mismatches[(gateway["node"],f["group"])]+=abs(len(sent)-len(received))+sum(
+                a["bytes"]!=b["bytes"] or a["arrival_ns"]!=b["time_ns"] for a,b in zip(sent,received))
+    result=[]
+    for path in run_dir.glob("r5.gateway-*.groups.csv"):
         for r in read_csv(path):
             if r["role"]!="A": continue
-            k=(int(r["node"]),"A",int(r["flow"]),int(r["generation"]))
-            f=registrations[k]; peer=(f["peer"],"B",k[2],k[3])
-            endpoint=int(r["prediction_end_ns"]); valid=r["fresh"]=="1" and r["history_covered"]=="1"
-            final=r4_endpoint(index,peer,endpoint) if endpoint<=stop_ns else None
-            sample=r4_endpoint(index,peer,int(r["state_sample_ns"]),int(r["state_ordinal"]))
-            exact_sample=(sample["queue_bytes"]==int(r["state_queue_bytes"]) and
-                          sample["in_total"]==int(r["state_in_total"]) and sample["tx_total"]==int(r["state_tx_total"]))
-            error=float(r["predicted_queue_bytes"])-final["queue_bytes"] if valid and final else None
-            results.append({**identity,"proposed_version":4,"node":k[0],"role":"A","flow":k[2],"generation":k[3],
-                "peer":f["peer"],"time_ns":int(r["time_ns"]),"prediction_end_ns":endpoint,
-                "endpoint_boundary":"after_all_events_at_ns","endpoint_available":final is not None,
-                "state_seq":r["state_seq"],"state_sample_ns":r["state_sample_ns"],"state_ordinal":r["state_ordinal"],
-                "state_sample_matches_events":exact_sample if int(r["state_seq"]) else None,
-                "B_future_queue_bytes":final["queue_bytes"] if final else None,
-                "prediction_error_bytes":error,"A_queue_bytes":r["queue_bytes"],
-                "predicted_queue_bytes":r["predicted_queue_bytes"],"queue_used_bytes":r["queue_used_bytes"],
-                "fresh":r["fresh"],"history_covered":r["history_covered"],"mode":r["mode"],"reason":r["reason"],
-                "target_bps":r["target_bps"],"service_bps":r["service_bps"],"service_source":r["service_source"],
-                "forward_mapping_mismatches":mapping[k],
-                "oracle_queue_bytes":sample["queue_bytes"]+final["in_total"]-sample["in_total"]-
-                                     (final["tx_total"]-sample["tx_total"]) if valid and final else None})
-    return results
+            peer=(int(r["peer"]),"B",int(r["group"]))
+            endpoint=int(r["prediction_end_ns"]); now=int(r["time_ns"])
+            valid=r["fresh"]=="1" and r["history_covered"]=="1" and r["reason"] not in ("cold","stale","history_missing","service_stopped")
+            actual=r5_endpoint(index,peer,endpoint) if endpoint<=stop_ns else None
+            sample=r5_endpoint(index,peer,int(r["state_sample_ns"]),int(r["state_ordinal"]))
+            orders,events=index.get(peer,([],[]))
+            lo=bisect.bisect_left(orders,(now,-1)); hi=bisect.bisect_right(orders,(endpoint,math.inf))
+            peak=max([r5_endpoint(index,peer,now)["queue_bytes"]]+[e["queue_bytes"] for e in events[lo:hi]]) if actual else None
+            result.append({**identity,"proposed_version":5,"node":int(r["node"]),"group":int(r["group"]),
+                "time_ns":now,"prediction_end_ns":endpoint,"endpoint_available":actual is not None,
+                "prediction_valid":valid,"predicted_queue_bytes":r["predicted_queue_bytes"],
+                "predicted_peak_bytes":r["predicted_peak_bytes"],"B_future_queue_bytes":actual["queue_bytes"] if actual else None,
+                "B_future_peak_bytes":peak,"prediction_error_bytes":float(r["predicted_queue_bytes"])-actual["queue_bytes"] if actual and valid else None,
+                "state_sample_matches_events":all(sample[k]==int(r[v]) for k,v in
+                    (("queue_bytes","state_queue_bytes"),("in_total","state_in_total"),("tx_total","state_tx_total"))) if int(r["state_seq"]) else None,
+                "forward_mapping_mismatches":mismatches[(int(r["node"]),int(r["group"]))],
+                "A_queue_bytes":r["queue_bytes"],"target_Bps":r["target_Bps"],"reason":r["reason"]})
+    return result
 
 
 def analyze_run(run_dir):
     runner=json.loads((run_dir/"runner-metadata.json").read_text())
     meta=json.loads((run_dir/"metadata.json").read_text())
     stop=meta["simulator_stop_time_s"]
-    identity={"algorithm":meta["algorithm"],"queue_mode":runner.get("queue_mode",runner.get("r3_queue_mode")),
+    identity={"algorithm":meta["algorithm"],"queue_mode":runner.get("queue_mode"),
               "proposed_version":runner.get("proposed_version"),"service_mode":runner.get("service_mode"),
               "scenario":runner.get("scenario",meta["scenario"]),"seed":meta["rng_seed"],"run":meta["rng_run"],"run_dir":str(run_dir)}
     summary_path=run_dir/"metadata.json.summary.json"
@@ -382,7 +341,7 @@ def analyze_run(run_dir):
          "admission_drop_packets":final["admission_drop_packets"],"remaining_switch_queue_bytes":final["remaining_switch_queue_bytes"],
          "scenario_relation_status":relation["status"],**convergence_summary(stages,"sender"),**convergence_summary(stages,"receiver")}
     version=runner.get("proposed_version",meta.get("proposed_parameters",{}).get("version"))
-    evidence=(r4_evidence(run_dir,identity,meta) if version==4 else r3_evidence(run_dir,identity)) if meta["algorithm"]=="proposed" else []
+    evidence=r5_evidence(run_dir,identity,meta) if meta["algorithm"]=="proposed" and version==5 else []
     return run,stages,flow_rows,directional,{**identity,**relation},evidence
 
 
@@ -401,7 +360,7 @@ def main():
     if not tables[0]:raise SystemExit("no stable successful runs found")
     for name,rows in (("run-summary.csv",tables[0]),(output.name,tables[1]),("flow-summary.csv",tables[2]),
                       ("direction-summary.csv",tables[3]),
-                      ("r4-evidence.csv",[r for r in tables[5] if r.get("proposed_version")==4])):
+                      ("r5-evidence.csv",tables[5])):
         write_csv(output.parent/name,rows)
     (output.parent/"scenario-validation.json").write_text(json.dumps(tables[4],indent=2)+"\n")
     print(f"analyzed {len(tables[0])} runs; outputs: {output.parent}")

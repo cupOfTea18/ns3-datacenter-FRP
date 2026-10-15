@@ -247,6 +247,8 @@ QbbNetDevice::GetTypeId(void)
 	                                     MakeTraceSourceAccessor (&QbbNetDevice::m_traceQpDequeue), "ns3::Packet::TracedCallback")
 	                    .AddTraceSource ("QbbPfc", "get a PFC packet. 0: resume, 1: pause",
 	                                     MakeTraceSourceAccessor (&QbbNetDevice::m_tracePfc), "ns3::Packet::TracedCallback")
+                        .AddTraceSource ("QbbPauseState", "PG pause state changes, including timer expiry.",
+                                         MakeTraceSourceAccessor (&QbbNetDevice::m_tracePauseState), "ns3::QbbNetDevice::PauseStateCallback")
 	                    ;
 
 	return tid;
@@ -328,62 +330,34 @@ QbbNetDevice::TransmitComplete(void)
 	DequeueAndTransmit();
 }
 
-void QbbNetDevice::UpdateShapeTokens(QueueShaper& shaper) {
-    const Time now=Simulator::Now();
-    shaper.tokens=std::min(double(shaper.burst),shaper.tokens+shaper.rate*(now-shaper.updated).GetSeconds());
-    shaper.updated=now;
-}
-void QbbNetDevice::ConfigureGroupShaper(uint32_t queue,uint32_t priority,double rate,uint32_t burst) {
-    NS_ABORT_MSG_IF(priority==0 || priority>=qCnt || burst==0 || m_shapers.count(queue),"invalid/repeated shaper");
-    m_queue->ConfigureLogicalQueue(queue,priority);
-    auto &s=m_shapers[queue]; s.priority=priority; s.burst=burst; s.tokens=burst; s.updated=Simulator::Now();
-    SetGroupShaperRate(queue,rate);
-}
-void QbbNetDevice::SetGroupShaperRate(uint32_t queue,double rate) {
-    NS_ABORT_MSG_IF(!m_shapers.count(queue) || !std::isfinite(rate) || rate<0,"invalid shaper rate");
-    auto &s=m_shapers.at(queue); UpdateShapeTokens(s); s.rate=rate;
-    if (rate==0) s.tokens=0;
-    Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
-}
-
-void QbbNetDevice::UpdateProbeTokens() {
+void QbbNetDevice::UpdateInjectionTokens(InjectionBucket& bucket) {
     auto now=Simulator::Now();
-    m_probeTokens=std::min(double(m_probeBurst),m_probeTokens+m_probeRate*(now-m_probeUpdated).GetSeconds());
-    m_probeUpdated=now;
+    bucket.tokens=std::min(double(bucket.burst),bucket.tokens+bucket.rate*(now-bucket.updated).GetSeconds());
+    bucket.updated=now;
 }
-double QbbNetDevice::GetProbeTokens() { UpdateProbeTokens(); return m_probeTokens; }
-void QbbNetDevice::ConfigureProbeBucket(double rate,uint64_t burst) {
-    NS_ABORT_MSG_IF(!std::isfinite(rate) || rate<=0 || !burst || m_probeBurst,"invalid/repeated probe bucket");
-    for (const auto& e:m_shapers)
-        NS_ABORT_MSG_IF(burst<e.second.burst,"probe bucket cannot hold maximum frame");
-    m_probeRate=rate; m_probeBurst=burst; m_probeTokens=burst; m_probeUpdated=Simulator::Now();
+void QbbNetDevice::ConfigureInjectionGroup(uint32_t group,uint32_t burst) {
+    NS_ABORT_MSG_IF(!burst || m_injectionGroups.count(group),"invalid/repeated injection group");
+    auto& b=m_injectionGroups[group]; b.burst=burst; b.updated=Simulator::Now();
 }
-QbbNetDevice::ProbeCounters QbbNetDevice::GetProbeCounters(uint32_t queue) const {
-    return m_shapers.at(queue).grant;
+void QbbNetDevice::BindInjectionQueue(uint32_t queue,uint32_t priority,uint32_t group) {
+    NS_ABORT_MSG_IF(!m_injectionGroups.count(group) || m_queueGroup.count(queue),"invalid injection queue");
+    auto& b=m_injectionGroups.at(group);
+    NS_ABORT_MSG_IF(!b.queues.empty() && b.priority!=priority,"injection group spans priority classes");
+    m_queue->ConfigureLogicalQueue(queue,priority); m_queueGroup[queue]=group;
+    b.priority=priority; b.queues.push_back(queue);
 }
-void QbbNetDevice::GrantProbeBytes(uint32_t queue,uint64_t epoch,uint64_t bytes) {
-    NS_ABORT_MSG_IF(!m_shapers.count(queue) || !epoch || !bytes || !m_probeBurst,"invalid probe grant");
-    auto& g=m_shapers.at(queue).grant;
-    if (epoch<=g.epoch) return; // Delayed/duplicate grants cannot refresh the allowance.
-    g.epoch=epoch; g.remaining=bytes;
-    Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
-}
-void QbbNetDevice::ApplyQueueControls(const std::vector<QueueControl>& controls) {
-    NS_ABORT_MSG_IF(controls.size()!=m_shapers.size(),"batch must include every registered queue");
-    std::set<uint32_t> seen;
-    double sum=0;
+void QbbNetDevice::ApplyInjectionControls(const std::vector<InjectionControl>& controls) {
+    NS_ABORT_MSG_IF(controls.size()!=m_injectionGroups.size(),"batch must include every injection group");
+    std::set<uint32_t> seen; double sum=0;
     for (const auto& c:controls) {
-        NS_ABORT_MSG_IF(!m_shapers.count(c.queue) || !seen.insert(c.queue).second ||
-            !std::isfinite(c.bytesPerSec) || c.bytesPerSec<0 || (c.probe && !m_probeBurst),
-            "invalid queue control batch");
+        NS_ABORT_MSG_IF(!m_injectionGroups.count(c.group) || !seen.insert(c.group).second ||
+            !std::isfinite(c.bytesPerSec) || c.bytesPerSec<0,"invalid injection control");
         sum+=c.bytesPerSec;
     }
-    NS_ABORT_MSG_IF(!std::isfinite(sum) || sum>GetDataRate().GetBitRate()/8.0+1e-6,"batch exceeds physical capacity");
-    UpdateProbeTokens();
+    NS_ABORT_MSG_IF(sum>GetDataRate().GetBitRate()/8.0+1e-6,"injection exceeds physical capacity");
     for (const auto& c:controls) {
-        auto& s=m_shapers.at(c.queue); UpdateShapeTokens(s);
-        s.rate=c.bytesPerSec; s.probe=c.probe;
-        if (!s.rate) s.tokens=0;
+        auto& b=m_injectionGroups.at(c.group); UpdateInjectionTokens(b); b.rate=c.bytesPerSec;
+        if (!b.rate) b.tokens=0;
     }
     Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
 }
@@ -456,40 +430,33 @@ QbbNetDevice::DequeueAndTransmit(void)
 	else {  //switch, doesn't care about qcn, just send
         std::set<uint32_t> blocked;
         Time wait=Simulator::GetMaximumSimulationTime();
-        UpdateProbeTokens();
-        for (auto &entry:m_shapers) {
-            auto &s=entry.second; UpdateShapeTokens(s);
-            auto head=m_queue->PeekQueue(entry.first);
-            if (!head) continue;
-            const auto bytes=head->GetSize();
-            NS_ABORT_MSG_IF(bytes>s.burst,"frame exceeds shaper burst");
-            const bool hardBlocked=m_paused[s.priority] || !s.rate ||
-                (s.probe && (s.grant.remaining<bytes || !m_probeRate));
-            double seconds= s.rate>0 ? std::max(0.0,(bytes-s.tokens)/s.rate) : 0;
-            if (s.probe && m_probeRate>0)
-                seconds=std::max(seconds,std::max(0.0,(bytes-m_probeTokens)/m_probeRate));
-            if (hardBlocked || seconds>1e-15) {
-                blocked.insert(entry.first);
-                if (!hardBlocked)
-                    wait=std::min(wait,std::max(NanoSeconds(1),NanoSeconds(int64_t(std::ceil(seconds*1e9)))));
+        for (auto& entry:m_injectionGroups) {
+            auto& b=entry.second; UpdateInjectionTokens(b);
+            blocked.insert(b.queues.begin(),b.queues.end());
+            if (m_paused[b.priority]) continue;
+            // Nominate one backlogged queue per group. Another group's dequeue
+            // must not advance this group's packet round robin position.
+            for (uint32_t offset=0;offset<b.queues.size();++offset) {
+                auto queue=b.queues[(b.next+offset)%b.queues.size()];
+                auto head=m_queue->PeekQueue(queue); if (!head) continue;
+                const auto bytes=head->GetSize();
+                NS_ABORT_MSG_IF(bytes>b.burst,"frame exceeds injection burst");
+                double seconds=b.rate>0 ? std::max(0.0,(bytes-b.tokens)/b.rate) : 0;
+                if (b.rate>0 && seconds<=1e-15) blocked.erase(queue);
+                else if (b.rate>0) wait=std::min(wait,std::max(NanoSeconds(1),NanoSeconds(int64_t(std::ceil(seconds*1e9)))));
+                break;
             }
         }
         if (wait<Simulator::GetMaximumSimulationTime() && m_shapeWake.IsExpired())
             m_shapeWake=Simulator::Schedule(wait,&QbbNetDevice::DequeueAndTransmit,this);
         p=m_queue->DequeueRR(m_paused,blocked);
-        if (p && m_shapers.count(m_queue->GetLastLogicalQueue())) {
-            auto &s=m_shapers.at(m_queue->GetLastLogicalQueue());
-            s.tokens=std::max(0.0,s.tokens-p->GetSize());
-            if (s.probe) {
-                NS_ABORT_MSG_IF(s.grant.remaining<p->GetSize() || m_probeTokens+1e-6<p->GetSize(),
-                                "probe dequeue exceeded grant/bucket");
-                s.grant.remaining-=p->GetSize();
-                NS_ABORT_MSG_IF(UINT64_MAX-s.grant.sent<p->GetSize() || UINT64_MAX-m_probeSent<p->GetSize(),
-                                "probe counter overflow");
-                s.grant.sent+=p->GetSize(); m_probeSent+=p->GetSize();
-                m_probeTokens=std::max(0.0,m_probeTokens-p->GetSize());
-            }
+        if (p && m_queueGroup.count(m_queue->GetLastLogicalQueue())) {
+            auto& b=m_injectionGroups.at(m_queueGroup.at(m_queue->GetLastLogicalQueue()));
+            NS_ABORT_MSG_IF(b.tokens+1e-6<p->GetSize(),"shared injection budget exceeded");
+            b.tokens=std::max(0.0,b.tokens-p->GetSize());
+            b.next=(std::find(b.queues.begin(),b.queues.end(),m_queue->GetLastLogicalQueue())-b.queues.begin()+1)%b.queues.size();
         }
+
 		if (p != 0) {
 			m_snifferTrace(p);
 			m_promiscSnifferTrace(p);
@@ -539,6 +506,7 @@ QbbNetDevice::Resume(unsigned qIndex)
 	Simulator::Cancel(m_pauseExpiry[qIndex]);
 	m_pauseTotal[qIndex] += Simulator::Now() - m_pauseStarted[qIndex];
 	m_paused[qIndex] = false;
+    m_tracePauseState(qIndex, false);
 	NS_LOG_INFO("Node " << m_node->GetId() << " dev " << m_ifIndex << " queue " << qIndex <<
 	            " resumed at " << Simulator::Now().GetSeconds());
 	DequeueAndTransmit();
@@ -648,8 +616,11 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 		Simulator::Cancel(m_pauseExpiry[qIndex]);
 		if (ch.pfc.time > 0) {
 			m_tracePfc(1);
-			if (!m_paused[qIndex]) m_pauseStarted[qIndex] = Simulator::Now();
-			m_paused[qIndex] = true;
+            if (!m_paused[qIndex]) {
+                m_pauseStarted[qIndex] = Simulator::Now();
+                m_paused[qIndex] = true;
+                m_tracePauseState(qIndex, true);
+            }
 			m_pauseExpiry[qIndex] = Simulator::Schedule(MicroSeconds(ch.pfc.time), &QbbNetDevice::Resume, this, qIndex);
 		} else {
 			m_tracePfc(0);

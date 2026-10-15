@@ -92,56 +92,5 @@
       11,
       12
     ]
-  },
-  "r3-mechanism": {
-    "windows": [
-      [
-        "before_competition",
-        0.01,
-        0.03
-      ],
-      [
-        "after_competition",
-        0.03,
-        0.08
-      ]
-    ],
-    "purpose": "transient",
-    "persistent_flows": [
-      1,
-      2
-    ],
-    "relation": "mechanism",
-    "competitor_flows": [
-      3
-    ],
-    "event_s": 0.03,
-    "affected_flow": 1,
-    "unaffected_flow": 2,
-    "b_gateway": 81,
-    "target_link": [
-      73,
-      41
-    ]
-  },
-  "r3-mechanism-control": {
-    "windows": [
-      [
-        "before_competition",
-        0.01,
-        0.03
-      ],
-      [
-        "after_competition",
-        0.03,
-        0.08
-      ]
-    ],
-    "purpose": "transient",
-    "persistent_flows": [
-      1,
-      2
-    ],
-    "relation": "control"
   }
 }

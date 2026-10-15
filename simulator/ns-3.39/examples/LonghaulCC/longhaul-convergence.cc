@@ -58,7 +58,7 @@ uint32_t dci_gateway_b_id = 81;
 std::string scenario_name = "UNKNOWN";
 
 // Compiled algorithm parameters for Longhaul experiments. Keep tuning in C++.
-// R4 parameters are defined in DciGatewayNode::Config.
+// R5 parameters are defined in DciGatewayNode::Config.
 const double alpha_resume_interval = 55, rp_timer = 900, ewma_gain = 1.0 / 16.0;
 const double timely_alpha = 0.875, timely_beta = 0.8;
 const uint64_t timely_tlow_ns = 10300000, timely_thigh_ns = 11000000, timely_min_rtt_ns = 10230000;
@@ -447,9 +447,6 @@ void RecordCompletionSamples(Ptr<RdmaQueuePair> q, FlowInput *fi) {
 	FlushRttSamples(q, fi, Simulator::Now().GetNanoSeconds(), true);
 	fi->finished = true;
     fi->completion_ns=Simulator::Now().GetNanoSeconds();
-	if (selected_cc == "proposed")
-		for (uint32_t id : {dci_gateway_a_id, dci_gateway_b_id})
-			DynamicCast<DciGatewayNode>(n.Get(id))->CompleteFlow(uint32_t(fi - flows.data()) + 1);
 }
 
 void qp_finish(Ptr<RdmaQueuePair> q) {
@@ -695,7 +692,8 @@ void SampleDciLink() {
 		Simulator::Schedule(MicroSeconds(rate_sample_interval_us), &SampleDciLink);
 }
 
-#include "longhaul-r4.h"
+#include "longhaul-routing.h"
+#include "longhaul-r5.h"
 #include "longhaul-measurements.h"
 
 void WriteMetadata(uint32_t node_num, uint32_t switch_num, uint32_t link_num) {
@@ -1249,6 +1247,7 @@ int main(int argc, char *argv[])
 	Simulator::Stop(Seconds(simulator_stop_time));
 	Simulator::Run();
 	LonghaulMeasurements::Finish();
+    Proposed::Finish();
 	Simulator::Destroy();
 	sender_rate_file.close();
 	receiver_goodput_file.close();
