@@ -17,6 +17,11 @@ namespace ns3 {
 
 class RdmaQueuePair : public Object {
 public:
+    uint32_t localQpn=0, destQpn=0;
+    uint64_t connectionGeneration=0;
+    bool connected=true;
+    unsigned connectAttempts=0;
+    EventId connectEvent;
 	Time startTime;
 	Ipv4Address sip, dip;
 	uint16_t sport, dport;
@@ -152,6 +157,8 @@ public:
 
 class RdmaRxQueuePair : public Object { // Rx side queue pair
 public:
+    uint32_t localQpn=0, peerQpn=0;
+    uint64_t connectionGeneration=0;
 	struct ECNAccount{
 		uint16_t qIndex;
 		uint8_t ecnbits;

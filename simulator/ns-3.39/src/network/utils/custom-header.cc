@@ -24,6 +24,7 @@
 #include "custom-header.h"
 
 namespace ns3 {
+bool CustomHeader::qpnEnabled = false;
 
 NS_LOG_COMPONENT_DEFINE ("CustomHeader");
 
@@ -97,7 +98,7 @@ uint32_t CustomHeader::GetSerializedSize (void) const{
 		else if (l3Prot == 0xFC || l3Prot == 0xFD)
 			len += GetAckSerializedSize();
 		else if (l3Prot == 0xFF)
-			len += 8;
+			len += 8 + QpnBytes();
 		else if (l3Prot == 0xFE)
 			len += 9;
 	}
@@ -161,6 +162,7 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  // SeqTsHeader
 		  i.WriteHtonU32 (udp.seq);
 		  i.WriteHtonU16 (udp.pg);
+          if (qpnEnabled) i.WriteHtonU32(0x01000000u | udp.destQpn);
 		  udp.ih.Serialize(i);
 	  }else if (l3Prot == 0xFF){ // CNP
 		  i.WriteU8(cnp.qIndex);
@@ -168,13 +170,15 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  i.WriteU8(cnp.ecnBits);
 		  i.WriteU16(cnp.qfb);
 		  i.WriteU16(cnp.total);
+          if (qpnEnabled) i.WriteHtonU32(0x01000000u | cnp.destQpn);
 	  }else if (l3Prot == 0xFC || l3Prot == 0xFD){ // ACK or NACK
 		  i.WriteU16(ack.sport);
 		  i.WriteU16(ack.dport);
 		  i.WriteU16(ack.flags);
 		  i.WriteU16(ack.pg);
 		  i.WriteU32(ack.seq);
-		  udp.ih.Serialize(i);
+          if (qpnEnabled) i.WriteHtonU32(0x01000000u | ack.destQpn);
+		  ack.ih.Serialize(i);
 	  }else if (l3Prot == 0xFE){ // PFC
 		  i.WriteU32 (pfc.time);
 		  i.WriteU32 (pfc.qlen);
@@ -281,6 +285,8 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  i = start;
 		  i.Next(l2Size + l3Size);
 		  // udp header
+          udp.destQpn=0;
+          if (i.GetRemainingSize()<GetUdpHeaderSize()) return 0;
 		  udp.sport = i.ReadNtohU16 ();
 		  udp.dport = i.ReadNtohU16 ();
 		  if (brief){
@@ -293,23 +299,33 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  // SeqTsHeader
 		  udp.seq = i.ReadNtohU32 ();
 		  udp.pg =  i.ReadNtohU16 ();
+          if (qpnEnabled) {
+              auto field=i.ReadNtohU32();
+              udp.destQpn=(field>>24)==1 ? field&0xffffff : 0;
+          }
 		  if (getInt)
 			  udp.ih.Deserialize(i);
 
 		  l4Size = GetUdpHeaderSize();
 	  }else if (l3Prot == 0xFF){
-		  cnp.qIndex = i.ReadU8();
+		  cnp.destQpn=0;
+          if (i.GetRemainingSize()<8+QpnBytes()) return 0;
+          cnp.qIndex = i.ReadU8();
 		  cnp.fid = i.ReadU16();
 		  cnp.ecnBits = i.ReadU8();
 		  cnp.qfb = i.ReadU16();
 		  cnp.total = i.ReadU16();
-		  l4Size = 8;
+          if (qpnEnabled) { auto field=i.ReadNtohU32(); cnp.destQpn=(field>>24)==1 ? field&0xffffff : 0; }
+          l4Size = 8 + QpnBytes();
 	  }else if (l3Prot == 0xFC || l3Prot == 0xFD){ // ACK or NACK
-		  ack.sport = i.ReadU16();
+		  ack.destQpn=0;
+          if (i.GetRemainingSize()<GetAckSerializedSize()) return 0;
+          ack.sport = i.ReadU16();
 		  ack.dport = i.ReadU16();
 		  ack.flags = i.ReadU16();
 		  ack.pg = i.ReadU16();
 		  ack.seq = i.ReadU32();
+          if (qpnEnabled) { auto field=i.ReadNtohU32(); ack.destQpn=(field>>24)==1 ? field&0xffffff : 0; }
 		  if (getInt)
 			  ack.ih.Deserialize(i);
 		  l4Size = GetAckSerializedSize();
@@ -329,11 +345,11 @@ uint8_t CustomHeader::GetIpv4EcnBits (void) const{
 }
 
 uint32_t CustomHeader::GetAckSerializedSize(void){
-	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) + sizeof(ack.seq) + IntHeader::GetStaticSize();
+	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) + sizeof(ack.seq) + QpnBytes() + IntHeader::GetStaticSize();
 }
 
 uint32_t CustomHeader::GetUdpHeaderSize(void){
-	return 8 + sizeof(udp.pg) + sizeof(udp.seq) + IntHeader::GetStaticSize();
+	return 8 + sizeof(udp.pg) + sizeof(udp.seq) + QpnBytes() + IntHeader::GetStaticSize();
 }
 
 uint32_t CustomHeader::GetStaticWholeHeaderSize(void){

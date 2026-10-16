@@ -302,15 +302,18 @@ QbbNetDevice::TransmitStart(Ptr<Packet> p)
 	NS_ASSERT_MSG(m_txMachineState == READY, "Must be READY to transmit");
 	m_txMachineState = BUSY;
 	m_currentPkt = p;
+    if (!m_beforeTransmit.IsNull()) m_beforeTransmit(p);
 	m_phyTxBeginTrace(m_currentPkt);
 
 	Time txTime = m_bps.CalculateBytesTxTime(p->GetSize());
 	Time txCompleteTime = txTime + m_tInterframeGap;
+    m_txAvailable=Simulator::Now()+txCompleteTime;
 
 	NS_LOG_LOGIC("Schedule TransmitCompleteEvent in " << txCompleteTime.GetSeconds() << "sec");
 	Simulator::Schedule(txCompleteTime, &QbbNetDevice::TransmitComplete, this);
 
 	bool result = m_channel->TransmitStart(p, this, txTime);
+    m_traceTransmitResult(p,result);
 	if (result == false)
 	{
 		m_phyTxDropTrace(p);
@@ -337,7 +340,7 @@ void QbbNetDevice::UpdateInjectionTokens(InjectionBucket& bucket) {
 }
 void QbbNetDevice::ConfigureInjectionGroup(uint32_t group,uint32_t burst) {
     NS_ABORT_MSG_IF(!burst || m_injectionGroups.count(group),"invalid/repeated injection group");
-    auto& b=m_injectionGroups[group]; b.burst=burst; b.updated=Simulator::Now();
+    auto& b=m_injectionGroups[group]; b.burst=burst; b.tokens=burst; b.updated=Simulator::Now();
 }
 void QbbNetDevice::BindInjectionQueue(uint32_t queue,uint32_t priority,uint32_t group) {
     NS_ABORT_MSG_IF(!m_injectionGroups.count(group) || m_queueGroup.count(queue),"invalid injection queue");
@@ -357,9 +360,21 @@ void QbbNetDevice::ApplyInjectionControls(const std::vector<InjectionControl>& c
     NS_ABORT_MSG_IF(sum>GetDataRate().GetBitRate()/8.0+1e-6,"injection exceeds physical capacity");
     for (const auto& c:controls) {
         auto& b=m_injectionGroups.at(c.group); UpdateInjectionTokens(b); b.rate=c.bytesPerSec;
-        if (!b.rate) b.tokens=0;
+        // Zero rate closes eligibility; saved tokens are neither cleared nor refilled.
     }
     Simulator::Cancel(m_shapeWake); DequeueAndTransmit();
+}
+
+QbbNetDevice::InjectionSnapshot QbbNetDevice::ReadInjectionSnapshot(uint32_t id) {
+    auto& b=m_injectionGroups.at(id); UpdateInjectionTokens(b);
+    return {b.rate,b.tokens,b.burst};
+}
+bool QbbNetDevice::DetachInjectionQueue(uint32_t queue) {
+    auto it=m_queueGroup.find(queue);
+    if (it==m_queueGroup.end() || m_queue->GetLogicalBytes(queue)) return false;
+    auto& b=m_injectionGroups.at(it->second); UpdateInjectionTokens(b);
+    b.queues.erase(std::remove(b.queues.begin(),b.queues.end(),queue),b.queues.end()); b.next=0;
+    m_queueGroup.erase(it); return true;
 }
 
 void
@@ -433,7 +448,7 @@ QbbNetDevice::DequeueAndTransmit(void)
         for (auto& entry:m_injectionGroups) {
             auto& b=entry.second; UpdateInjectionTokens(b);
             blocked.insert(b.queues.begin(),b.queues.end());
-            if (m_paused[b.priority]) continue;
+            if (m_paused[b.priority] || (!m_injectionEligible.IsNull() && !m_injectionEligible(entry.first))) continue;
             // Nominate one backlogged queue per group. Another group's dequeue
             // must not advance this group's packet round robin position.
             for (uint32_t offset=0;offset<b.queues.size();++offset) {
@@ -442,7 +457,9 @@ QbbNetDevice::DequeueAndTransmit(void)
                 const auto bytes=head->GetSize();
                 NS_ABORT_MSG_IF(bytes>b.burst,"frame exceeds injection burst");
                 double seconds=b.rate>0 ? std::max(0.0,(bytes-b.tokens)/b.rate) : 0;
-                if (b.rate>0 && seconds<=1e-15) blocked.erase(queue);
+                // Eligibility and debit must use the same byte tolerance. A
+                // time epsilon permits a larger byte deficit at high rates.
+                if (b.rate>0 && b.tokens+1e-6>=bytes) blocked.erase(queue);
                 else if (b.rate>0) wait=std::min(wait,std::max(NanoSeconds(1),NanoSeconds(int64_t(std::ceil(seconds*1e9)))));
                 break;
             }
@@ -600,9 +617,10 @@ QbbNetDevice::DoReceive(Ptr<Packet> packet)
 
 	m_macRxTrace(packet);
 
+    if (packet->GetSize()<PppHeader::GetStaticSize()+20) { m_phyRxDropTrace(packet); return; }
 	CustomHeader ch(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
 	ch.getInt = 1; // parse INT header
-	packet->PeekHeader(ch);
+	if (!packet->PeekHeader(ch)) { m_phyRxDropTrace(packet); return; }
 	
 	static uint32_t dbgPktCount = 0;
 	if (!g_longhaul_quiet && (dbgPktCount < 3 || ch.l3Prot == 0x01)) {
@@ -714,7 +732,7 @@ void QbbNetDevice::SendPfc(uint32_t qIndex, uint32_t type) {
 	p->AddHeader(pauseh);
 	Ipv4Header ipv4h;  // Prepare IPv4 header
 	ipv4h.SetProtocol(0xFE);
-	ipv4h.SetSource(m_node->GetObject<Ipv4>()->GetAddress(m_ifIndex, 0).GetLocal());
+	ipv4h.SetSource(m_node->GetObject<Ipv4>()->GetAddress(m_node->GetObject<Ipv4>()->GetInterfaceForDevice(this), 0).GetLocal());
 	ipv4h.SetDestination(Ipv4Address("255.255.255.255"));
 	ipv4h.SetPayloadSize(p->GetSize());
 	ipv4h.SetTtl(1);
@@ -735,7 +753,7 @@ void QbbNetDevice::SendPfcWithTime(uint32_t qIndex, uint32_t type, uint32_t cust
 	p->AddHeader(pauseh);
 	Ipv4Header ipv4h;
 	ipv4h.SetProtocol(0xFE);
-	ipv4h.SetSource(m_node->GetObject<Ipv4>()->GetAddress(m_ifIndex, 0).GetLocal());
+	ipv4h.SetSource(m_node->GetObject<Ipv4>()->GetAddress(m_node->GetObject<Ipv4>()->GetInterfaceForDevice(this), 0).GetLocal());
 	ipv4h.SetDestination(Ipv4Address("255.255.255.255"));
 	ipv4h.SetPayloadSize(p->GetSize());
 	ipv4h.SetTtl(1);

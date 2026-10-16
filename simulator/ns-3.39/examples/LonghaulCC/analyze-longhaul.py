@@ -213,7 +213,68 @@ def r5_endpoint(index,k,time_ns,ordinal=None):
     return events[pos] if pos>=0 else {"queue_bytes":0,"in_total":0,"tx_total":0}
 
 
+def r5_flow_packet_index(rows):
+    """Schema 3: dequeue leaves the queue; successful TX is a separate event."""
+    indexed=defaultdict(list)
+    for row in rows:
+        k=(int(row["node"]),row["role"],int(row["flow"]),int(row["generation"]))
+        event={name:int(row[name]) for name in ("time_ns","event_order","bytes","in_total","dequeued_total","tx_total","queue_bytes")}
+        event["event"]=row["event"]
+        indexed[k].append(event)
+    for events in indexed.values():
+        events.sort(key=lambda e:(e["time_ns"],e["event_order"]))
+        admitted=departed=sent=0
+        previous=(-1,-1)
+        for e in events:
+            order=(e["time_ns"],e["event_order"])
+            if order<=previous: raise ValueError("duplicate R5 flow event order")
+            previous=order
+            if e["event"]=="ADMIT": admitted+=e["bytes"]
+            elif e["event"]=="DEQUEUE": departed+=e["bytes"]
+            elif e["event"]=="TX": sent+=e["bytes"]
+            elif e["event"] not in ("DROP","TX_FAILED"): raise ValueError("unknown R5 flow packet event")
+            if (e["in_total"],e["dequeued_total"],e["tx_total"],e["queue_bytes"])!=(admitted,departed,sent,admitted-departed) or not 0<=sent<=departed<=admitted:
+                raise ValueError("R5 flow byte conservation mismatch")
+    return {k: ([(e["time_ns"],e["event_order"]) for e in events],events) for k,events in indexed.items()}
+
+
+def r5_flow_evidence(run_dir,identity,meta):
+    final=json.loads((run_dir/"r5.final.json").read_text())["proposed_parameters"]
+    packets=[]
+    for path in run_dir.glob("r5.gateway-*.packets.csv"): packets.extend(read_csv(path))
+    index=r5_flow_packet_index(packets)
+    local={(g["node"],f["id"]):(g,f) for g in final["gateways"] for f in g["flows"]}
+    remote={(g["node"],f["src_ip"],f["dst_ip"],f["dest_qpn"],f["generation"]):f
+            for g in final["gateways"] for f in g["flows"] if f["role"]=="B"}
+    stop_ns=round(meta["simulator_stop_time_s"]*1e9)
+    result=[]
+    for path in run_dir.glob("r5.gateway-*.predictions.csv"):
+        for row in read_csv(path):
+            if row["event"]!="FREEZE": continue
+            gateway,f=local[(int(row["node"]),int(row["flow"]))]
+            other=remote.get((gateway["peer"],f["src_ip"],f["dst_ip"],f["dest_qpn"],int(row["peer_generation"])))
+            endpoint=int(row["end_ns"]); now=int(row["time_ns"])
+            peer=(gateway["peer"],"B",other["id"],other["generation"]) if other else None
+            actual=r5_endpoint(index,peer,endpoint) if other and endpoint<=stop_ns else None
+            orders,events=index.get(peer,([],[]))
+            lo=bisect.bisect_left(orders,(now,-1)); hi=bisect.bisect_right(orders,(endpoint,math.inf))
+            peak=max([r5_endpoint(index,peer,now)["queue_bytes"]]+[e["queue_bytes"] for e in events[lo:hi]]) if actual else None
+            result.append({**identity,"proposed_version":5,"schema_version":3,"node":gateway["node"],
+                "flow":f["id"],"generation":f["generation"],"peer_generation":int(row["peer_generation"]),
+                "time_ns":now,"prediction_end_ns":endpoint,"endpoint_available":actual is not None,
+                "prediction_valid":row["reason"]=="conditional_fifo_mixture",
+                "predicted_queue_bytes":row["predicted_queue_bytes"],"predicted_peak_bytes":row["peak_bytes"],
+                "B_future_queue_bytes":actual["queue_bytes"] if actual else None,"B_future_peak_bytes":peak,
+                "prediction_error_bytes":float(row["predicted_queue_bytes"])-actual["queue_bytes"] if actual else None,
+                "state_sample_matches_events":None,"boundary_policy":"same-ns-arrivals-included-conservatively",
+                "planned_bytes":row["planned_bytes"],"reason":row["reason"]})
+    return result
+
+
 def r5_evidence(run_dir,identity,meta):
+    schema=meta["proposed_parameters"].get("schema_version",1)
+    if schema==3: return r5_flow_evidence(run_dir,identity,meta)
+    if schema not in (1,2): raise ValueError(f"unsupported R5 log schema: {schema}")
     packets=[]
     for path in run_dir.glob("r5.gateway-*.group-packets.csv"): packets.extend(read_csv(path))
     index=r5_packet_index(packets)
@@ -304,7 +365,7 @@ def analyze_run(run_dir):
                 row[f"{kind}_stage_mean_bps"]=mean(values) if values else math.nan
             stages.append(row)
     contract=runner.get("scenario_contract",{})
-    hold=max(.020,3*max(f["base_rtt_ns"] for f in flows)*1e-9)
+    hold=max(.020,3*max((f["base_rtt_ns"] for f in flows),default=0)*1e-9)
     relation=relation_check(contract,flows,states,stop,hold)
     windows=[("whole_run",0,stop)]+[(name,start,min(end,stop)) for name,start,end in contract.get("windows",[]) if start<stop]
     if relation.get("relation")=="exit" and relation.get("status")=="pass":

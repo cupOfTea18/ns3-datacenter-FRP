@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <iostream>
 #include "qbb-header.h"
+#include "ns3/custom-header.h"
 #include "ns3/buffer.h"
 #include "ns3/address-utils.h"
 #include "ns3/log.h"
@@ -100,7 +101,7 @@ namespace ns3 {
 	}
 	uint32_t qbbHeader::GetBaseSize() {
 		qbbHeader tmp;
-		return sizeof(tmp.sport) + sizeof(tmp.dport) + sizeof(tmp.flags) + sizeof(tmp.m_pg) + sizeof(tmp.m_seq);
+		return sizeof(tmp.sport) + sizeof(tmp.dport) + sizeof(tmp.flags) + sizeof(tmp.m_pg) + sizeof(tmp.m_seq) + CustomHeader::QpnBytes();
 	}
 	void qbbHeader::Serialize(Buffer::Iterator start)  const
 	{
@@ -110,6 +111,7 @@ namespace ns3 {
 		i.WriteU16(flags);
 		i.WriteU16(m_pg);
 		i.WriteU32(m_seq);
+        if (CustomHeader::qpnEnabled) i.WriteHtonU32(0x01000000u | destQpn);
 
 		// write IntHeader
 		ih.Serialize(i);
@@ -123,6 +125,8 @@ namespace ns3 {
 		flags = i.ReadU16();
 		m_pg = i.ReadU16();
 		m_seq = i.ReadU32();
+        destQpn=0;
+        if (CustomHeader::qpnEnabled) { auto field=i.ReadNtohU32(); destQpn=(field>>24)==1 ? field&0xffffff : 0; }
 
 		// read IntHeader
 		ih.Deserialize(i);

@@ -28,6 +28,7 @@
 #include <ns3/dci-gateway-node.h>
 #include <ns3/ppp-header.h>
 #include <ns3/sim-setting.h>
+#include "longhaul-addressing.h"
 
 using namespace ns3;
 using namespace std;
@@ -137,6 +138,7 @@ std::unordered_map<uint32_t, unordered_map<uint32_t, uint16_t> > nextPort;
 
 struct FlowInput {
 	uint64_t src, dst, pg, size_bytes, port, dport;
+	uint32_t src_qpn=0, dest_qpn=0;
 	double start_time;
 	uint64_t last_recv_bytes;
 	uint64_t last_tx_payload_bytes;
@@ -228,7 +230,9 @@ void LoadFlows(std::istream &input) {
 		uint16_t &next_port = nextPort[flow.src][flow.dst];
 		if (next_port == 0)
 			next_port = 10000;
-		flow.port = next_port++;
+        NS_ABORT_MSG_IF(next_port==UINT16_MAX, "source UDP port pool exhausted for host pair");
+        NS_ABORT_MSG_IF(flow.pg==0 || flow.pg>=8 || flow.dport>UINT16_MAX, "invalid RDMA PG or destination port");
+        flow.port = next_port++;
 		flows.push_back(flow);
 	}
 }
@@ -252,24 +256,32 @@ void StartFlow(uint32_t flow_index) {
 // 全局映射表：IP地址 -> 节点ID
 map<uint32_t, uint32_t> ipToNodeIdMap;  // key: IP (uint32_t), value: nodeId
 
-Ipv4Address NodeAddress(uint32_t node_id) {
-	NS_ABORT_MSG_IF(node_id >= 254, "longhaul supports at most 253 node IDs");
-	uint32_t dc_id = node_id <= std::min(dci_gateway_a_id, dci_gateway_b_id) ? 1 : 2;
-	std::string address = "11." + std::to_string(dc_id) + ".0." + std::to_string(node_id + 1);
-	return Ipv4Address(address.c_str());
-}
+LonghaulAddressing::Plan addressPlan;
 
-void AssignNodeAddresses() {
-	serverAddress.assign(n.GetN(), Ipv4Address("0.0.0.0"));
-	for (uint32_t node_id = 0; node_id < n.GetN(); ++node_id) {
-		Ipv4Address address = NodeAddress(node_id);
-		ipToNodeIdMap[address.Get()] = node_id;
-		Ptr<Node> node = n.Get(node_id);
-		if (node->GetNodeType() == 0)
-			serverAddress[node_id] = address;
-		else
-			DynamicCast<SwitchNode>(node)->SetSwitchRealIp(address);
-	}
+void RecordInterfaceAddresses() {
+    serverAddress.assign(n.GetN(), Ipv4Address::GetAny());
+    for (uint32_t id=0;id<n.GetN();++id) {
+        auto node=n.Get(id); auto ip=node->GetObject<Ipv4>();
+        uint32_t count=0, minimum=UINT32_MAX;
+        for (uint32_t i=1;i<ip->GetNInterfaces();++i) {
+            NS_ABORT_MSG_IF(ip->GetNAddresses(i)!=1, "interface must have exactly one address");
+            auto address=ip->GetAddress(i,0).GetLocal(); ++count;
+            NS_ABORT_MSG_IF(!ipToNodeIdMap.emplace(address.Get(),id).second, "duplicate IP");
+            minimum=std::min(minimum,address.Get());
+            if (!node->GetNodeType()) serverAddress[id]=address;
+        }
+        NS_ABORT_MSG_IF(!count || (!node->GetNodeType() && count!=1), "host must be single-homed");
+        if (node->GetNodeType()) DynamicCast<SwitchNode>(node)->SetSwitchRealIp(Ipv4Address(minimum));
+    }
+    std::ofstream addresses;
+    RequireOutput(addresses,summary_meta_file+".addresses.csv", "node,dc,leaf,peer,interface,ip,mask,address_plan");
+    for (uint32_t id=0;id<n.GetN();++id) for (const auto& e:nbr2if[n.Get(id)]) {
+        auto iface=e.second.idx;
+        auto a=n.Get(id)->GetObject<Ipv4>()->GetAddress(iface,0);
+        addresses<<id<<','<<addressPlan.dc[id]<<',';
+        if (addressPlan.leaf[id]!=UINT32_MAX) addresses<<addressPlan.leaf[id];
+        addresses<<','<<e.first->GetId()<<','<<iface<<','<<a.GetLocal()<<','<<a.GetMask()<<",leaf-v1\n";
+    }
 }
 
 /**
@@ -314,8 +326,7 @@ Ptr<RdmaRxQueuePair> FindRxQp(const FlowInput &fi) {
 	if (fi.dst >= serverAddress.size() || fi.src >= serverAddress.size()) return NULL;
 	Ptr<RdmaDriver> rdma = n.Get(fi.dst)->GetObject<RdmaDriver>();
 	if (rdma == NULL || rdma->m_rdma == NULL) return NULL;
-	return rdma->m_rdma->GetRxQp(serverAddress[fi.dst].Get(), serverAddress[fi.src].Get(),
-							fi.dport, (uint16_t)fi.port, (uint16_t)fi.pg, false);
+	return rdma->m_rdma->GetRxQpByQpn(fi.dest_qpn, serverAddress[fi.src].Get());
 }
 
 void FlushRttSamples(Ptr<RdmaQueuePair> q, FlowInput *fi, uint64_t end_ns, bool force) {
@@ -481,7 +492,7 @@ void qp_finish(Ptr<RdmaQueuePair> q) {
 	Ptr<Node> dstNode = n.Get(did);
 	Ptr<RdmaDriver> rdma = dstNode->GetObject<RdmaDriver> ();
 	if (rdma != NULL && rdma->m_rdma != NULL)
-		rdma->m_rdma->DeleteRxQp(q->sip.Get(), q->m_pg, q->sport);
+		rdma->m_rdma->DeleteRxQpByQpn(q->destQpn, q->sip.Get());
 }
 
 void get_pfc(std::ofstream *fout, Ptr<QbbNetDevice> dev, uint32_t type) {
@@ -608,7 +619,7 @@ void SampleFlowRates() {
 
 		Ptr<RdmaDriver> srcRdma = n.Get(fi.src)->GetObject<RdmaDriver>();
 		Ptr<RdmaQueuePair> txQp = srcRdma && srcRdma->m_rdma
-			? srcRdma->m_rdma->GetQp(serverAddress[fi.dst].Get(), (uint16_t)fi.port, (uint16_t)fi.pg)
+			? srcRdma->m_rdma->GetQpByQpn(fi.src_qpn, serverAddress[fi.dst].Get())
 			: NULL;
 		if (txQp != NULL) {
 			if (!fi.tx_initialized) {
@@ -932,6 +943,7 @@ int main(int argc, char *argv[])
 	// 设置全局网卡处理延迟
 	Config::SetDefault("ns3::QbbNetDevice::NicDelay", TimeValue(NanoSeconds(nic_delay_ns)));
 
+    CustomHeader::qpnEnabled=true; // identical transport format for every baseline and R5
 	// set int_multi
 	IntHop::multi = int_multi;
 	// IntHeader::mode
@@ -956,6 +968,14 @@ int main(int argc, char *argv[])
 		node_type[sid] = i < tor_count ? 1 : 2;
 	}
 
+    std::vector<LonghaulAddressing::Link> links;
+    for (uint32_t i=0;i<link_num;++i) {
+        LonghaulAddressing::Link link{};
+        NS_ABORT_MSG_IF(!(topof>>link.src>>link.dst>>link.rate>>link.delay>>link.error), "malformed topology link");
+        links.push_back(link);
+    }
+    addressPlan=LonghaulAddressing::Build(node_type,links,dci_gateway_a_id,dci_gateway_b_id);
+
 	for (uint32_t i = 0; i < node_num; ++i) {
 		if (node_type[i] == 0) {
 			n.Add(CreateObject<Node>());
@@ -973,7 +993,7 @@ int main(int argc, char *argv[])
 	Ipv4GlobalRoutingHelper globalRoutingHelper;
 	internet.SetRoutingHelper(globalRoutingHelper);
 	internet.Install(n);
-	AssignNodeAddresses();
+
 
 	//
 	// Explicitly create the channels required by the topology.
@@ -989,12 +1009,10 @@ int main(int argc, char *argv[])
 	Ipv4AddressHelper ipv4;
 	for (uint32_t i = 0; i < link_num; i++)
 	{
-		uint32_t src, dst;
-		std::string link_rate, link_delay;
-		double error_rate;
-		if (!(topof >> src >> dst >> link_rate >> link_delay >> error_rate) ||
-			src >= node_num || dst >= node_num || src == dst)
-			NS_FATAL_ERROR("longhaul: malformed link " << i << " in topology");
+        const auto& link=links[i];
+        uint32_t src=link.src, dst=link.dst;
+        const auto& link_rate=link.rate; const auto& link_delay=link.delay;
+        double error_rate=link.error;
 		Ptr<Node> snode = n.Get(src), dnode = n.Get(dst);
 
 		qbb.SetDeviceAttribute("DataRate", StringValue(link_rate));
@@ -1014,27 +1032,15 @@ int main(int argc, char *argv[])
 			qbb.SetDeviceAttribute("ReceiveErrorModel", PointerValue(rem));
 		}
 
-		// Install the node-wide address before assigning the per-link subnet address,
-		// so it remains the primary address used by RDMA and routing.
-		NetDeviceContainer d = qbb.Install(snode, dnode);
-		if (snode->GetNodeType() == 0) {
-			Ptr<Ipv4> ipv4 = snode->GetObject<Ipv4>();
-			ipv4->AddInterface(d.Get(0));
-			ipv4->AddAddress(1, Ipv4InterfaceAddress(serverAddress[src], Ipv4Mask(0xff000000)));
-		}
-		if (dnode->GetNodeType() == 0) {
-			Ptr<Ipv4> ipv4 = dnode->GetObject<Ipv4>();
-			ipv4->AddInterface(d.Get(1));
-			ipv4->AddAddress(1, Ipv4InterfaceAddress(serverAddress[dst], Ipv4Mask(0xff000000)));
-		}
-
-		// Per-link subnets only provide interface connectivity; node-wide addresses
-		// above are the addresses used by RDMA.
-		std::stringstream ipstring;
-		ipstring << "10." << i / 254 + 1 << "." << i % 254 + 1 << ".0";
-		// sprintf(ipstring, "10.%d.%d.0", i / 254 + 1, i % 254 + 1);
-		ipv4.SetBase(ipstring.str().c_str(), "255.255.255.0");
-		ipv4.Assign(d);
+        NetDeviceContainer d = qbb.Install(snode, dnode);
+        const Ipv4Mask mask((!snode->GetNodeType() || !dnode->GetNodeType()) ?
+                            "255.255.255.0" : "255.255.255.252");
+        for (uint32_t side=0;side<2;++side) {
+            auto address=addressPlan.interfaces.at(side ? std::make_pair(dst,src) : std::make_pair(src,dst));
+            auto base=address.CombineMask(mask);
+            ipv4.SetBase(base,mask,Ipv4Address(address.Get()-base.Get()));
+            ipv4.Assign(NetDeviceContainer(d.Get(side)));
+        }
 
 		// used to create a graph of the topology
 		Ptr<Ipv4> sIpv4 = snode->GetObject<Ipv4>();
@@ -1065,6 +1071,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
+    RecordInterfaceAddresses();
 	nic_rate = GetNicRate();
 	// config switch
 	// The switch mmu runs Dynamic Thresholds (DT) by default.
@@ -1162,7 +1169,7 @@ int main(int argc, char *argv[])
 	else
 		RdmaEgressQueue::ack_q_idx = 3;
 
-	// Node addresses are assigned before links; now install the static RDMA routes.
+	// Install exact host routes for the Qbb/RDMA forwarding path.
 	CalculateRoutes(n);
 	SetRoutingEntries();
 	//
@@ -1214,7 +1221,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+	// Independent Qbb access links share a Leaf prefix; use exact RDMA routes.
 
 	LoadFlows(flowf);
 	if (dci_left_device == NULL || dci_right_device == NULL)

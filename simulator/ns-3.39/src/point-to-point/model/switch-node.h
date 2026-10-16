@@ -108,6 +108,8 @@ private:
 	bool CheckHasWan(Ipv4Address srcIp);
 public:
 	uint64_t m_admissionDropPackets = 0; // structured experiment counter
+    // Called after routing, before any MMU charge. False is an explicit drop.
+    virtual bool PrepareDataAdmission(Ptr<Packet>, CustomHeader&, uint32_t, uint32_t, uint32_t) { return true; }
 	Ptr<SwitchMmu> m_mmu;
 	atcGateway m_atcGateway;
 

@@ -23,6 +23,7 @@ class qbbHeader : public Header
 {
 public:
  
+  uint32_t destQpn=0;
   enum {
 	  FLAG_CNP = 0
   };

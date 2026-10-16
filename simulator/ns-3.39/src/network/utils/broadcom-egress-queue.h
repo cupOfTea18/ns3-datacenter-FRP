@@ -47,6 +47,7 @@ namespace ns3 {
 
 		uint32_t GetLastQueue();
         uint32_t GetLastLogicalQueue() const { return m_qlast; }
+        uint32_t GetRoundRobinCursor() const { return m_rrlast; }
         void ConfigureLogicalQueue(uint32_t index, uint32_t priority);
         uint32_t GetLogicalBytes(uint32_t index) const { return m_bytesInQueue[index]; }
 

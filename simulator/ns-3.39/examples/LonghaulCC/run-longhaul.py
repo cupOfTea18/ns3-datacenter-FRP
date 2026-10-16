@@ -130,7 +130,6 @@ def main():
         parser.error("completion experiments require an explicit common --stop-times")
     if any(t is not None and t <= 0 for t in stop_times):
         parser.error("stop times must be positive")
-    scenarios = json.loads((here / "experiment-scenarios.json").read_text())
     config_topology = config_value(config_path, "TOPOLOGY_FILE")
     if not config_topology:
         parser.error(f"config has no TOPOLOGY_FILE: {config_path}")
@@ -256,7 +255,6 @@ def main():
             run_metadata = {
                 "purpose": args.purpose,
                 "stop_rule": "fixed common simulator stop time; no algorithm-specific early selection",
-                "scenario_contract": scenarios.get(label, {}),
                 "queue_mode": proposed_parameters.get("queue_mode"),
                 "service_mode": proposed_parameters.get("service_mode"),
                 **build_identity,
@@ -298,14 +296,25 @@ def main():
                 run_metadata["completion_valid"] = False
             if algorithm=="proposed" and run_metadata["proposed_version"]==5 and status=="ok":
                 final = json.loads((run_dir / "r5.final.json").read_text())["proposed_parameters"]
-                last = {(g["node"], f["role"], f["id"]): f
-                        for g in final["gateways"] for f in g["flows"]}
-                closed = bool(last)
-                for (node, role, fid), flow in last.items():
-                    closed &= flow["in_total"] > 0 and flow["in_total"] == flow["tx_total"]
-                    if role == "A":
-                        peer = last.get((flow["peer"], "B", fid), {})
-                        closed &= flow["tx_total"] == peer.get("in_total", -1)
+                if final.get("schema_version") == 3:
+                    receivers = {(g["node"], f["src_ip"], f["dst_ip"], f["dest_qpn"]): f
+                                 for g in final["gateways"] for f in g["flows"] if f["role"] == "B"}
+                    closed = True  # Empty/local-only workloads have no WAN data to settle.
+                    for gateway in final["gateways"]:
+                        for flow in gateway["flows"]:
+                            closed &= flow["in_total"] == flow["dequeued_total"] == flow["tx_total"] and not flow["tx_failed_bytes"]
+                            if flow["role"] == "A":
+                                peer = receivers.get((gateway["peer"], flow["src_ip"], flow["dst_ip"], flow["dest_qpn"]), {})
+                                closed &= flow["tx_total"] == peer.get("in_total", -1)
+                else:
+                    last = {(g["node"], f["role"], f["id"]): f
+                            for g in final["gateways"] for f in g["flows"]}
+                    closed = bool(last)
+                    for (node, role, fid), flow in last.items():
+                        closed &= flow["in_total"] > 0 and flow["in_total"] == flow["tx_total"]
+                        if role == "A":
+                            peer = last.get((flow["peer"], "B", fid), {})
+                            closed &= flow["tx_total"] == peer.get("in_total", -1)
                 run_metadata["r5_wire_closed"] = closed
                 run_metadata["completion_valid"] &= closed
             if args.purpose == "completion" and not run_metadata["completion_valid"]:

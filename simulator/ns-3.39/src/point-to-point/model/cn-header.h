@@ -39,6 +39,7 @@ namespace ns3 {
 class CnHeader : public Header 
 {
 public:
+  uint32_t destQpn=0;
   CnHeader (const uint16_t fid, uint8_t qIndex, uint8_t ecnbits, uint16_t qfb, uint16_t total);
   //CnHeader (const uint16_t fid, uint8_t qIndex, uint8_t qfb);
   CnHeader ();

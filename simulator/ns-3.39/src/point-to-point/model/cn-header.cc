@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <iostream>
 #include "cn-header.h"
+#include "ns3/custom-header.h"
 #include "ns3/buffer.h"
 #include "ns3/address-utils.h"
 #include "ns3/log.h"
@@ -131,7 +132,7 @@ void CnHeader::Print (std::ostream &os) const
 }
 uint32_t CnHeader::GetSerializedSize (void)  const
 {
-  return 8;
+  return 8 + CustomHeader::QpnBytes();
 }
 void CnHeader::Serialize (Buffer::Iterator start)  const
 {
@@ -146,6 +147,7 @@ void CnHeader::Serialize (Buffer::Iterator start)  const
   start.WriteU8(m_ecnBits);
   start.WriteU16(m_qfb);
   start.WriteU16(m_total);
+  if (CustomHeader::qpnEnabled) start.WriteHtonU32(0x01000000u | destQpn);
   //NS_LOG_LOGIC("CN Seriealized as " << std::hex << hibyte << "+" << lobyte << std::dec);
 }
 
@@ -166,6 +168,8 @@ uint32_t CnHeader::Deserialize (Buffer::Iterator start)
   m_ecnBits = start.ReadU8();
   m_qfb = start.ReadU16();
   m_total = start.ReadU16();
+  destQpn=0;
+  if (CustomHeader::qpnEnabled) { auto field=start.ReadNtohU32(); destQpn=(field>>24)==1 ? field&0xffffff : 0; }
 
   //m_qfb = static_cast<uint8_t>(lobyte>>24);
   //m_qIndex = lobyte & 0x00FFFFFFLLU;

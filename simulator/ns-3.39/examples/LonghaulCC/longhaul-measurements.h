@@ -67,8 +67,12 @@ void StartMeasurements() {
 }
 void Finish() {
     Sample(); // exact stop-time counters, including the final partial interval
-    uint64_t drops=0,queued=0,completed=0,mmuBytes=0,egressBytes=0;
+    uint64_t drops=0,queued=0,completed=0,mmuBytes=0,egressBytes=0,connectionRejected=0,invalidQpn=0;
     for (const auto& f:flows) completed+=f.finished;
+    for (uint32_t i=0;i<n.GetN();++i) if (auto rdma=n.Get(i)->GetObject<RdmaDriver>()) {
+        connectionRejected+=rdma->m_rdma->m_connectionRejected;
+        invalidQpn+=rdma->m_rdma->m_invalidQpnPackets;
+    }
     for (uint32_t i=0;i<n.GetN();++i) if (auto sw=DynamicCast<SwitchNode>(n.Get(i))) {
         drops+=sw->m_admissionDropPackets;
         mmuBytes+=sw->m_mmu->totalUsed;
@@ -80,10 +84,12 @@ void Finish() {
         std::ofstream out(path); NS_ABORT_MSG_IF(!out,"cannot open run summary");
         out << "{\"expected_flows\":" << flows.size() << ",\"completed_flows\":" << completed
             << ",\"admission_drop_packets\":" << drops << ",\"remaining_switch_queue_bytes\":" << queued
-            << ",\"remaining_mmu_bytes\":" << mmuBytes << ",\"remaining_mmu_egress_bytes\":" << egressBytes << ",\"flows\":[";
+            << ",\"remaining_mmu_bytes\":" << mmuBytes << ",\"remaining_mmu_egress_bytes\":" << egressBytes
+            << ",\"connection_rejections\":" << connectionRejected << ",\"invalid_qpn_packets\":" << invalidQpn << ",\"flows\":[";
         for (size_t i=0;i<flows.size();++i) {
             const auto& f=flows[i]; auto rx=FindRxQp(f);
             out << (i ? "," : "") << "{\"flow\":" << i+1 << ",\"size_bytes\":" << f.size_bytes
+                << ",\"source_qpn\":" << f.src_qpn << ",\"destination_qpn\":" << f.dest_qpn
                 << ",\"unique_sent_bytes\":" << f.unique_sent << ",\"tx_payload_bytes\":" << f.payload_sent
                 << ",\"rx_payload_bytes\":" << (rx ? rx->m_recv_bytes : f.observed_rx) << ",\"supply_end_ns\":" << f.supply_end_ns
                 << ",\"completion_ns\":" << f.completion_ns << '}';

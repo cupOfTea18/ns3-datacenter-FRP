@@ -253,12 +253,124 @@ uint64_t RdmaHw::GetQpKey(uint32_t dip, uint16_t sport, uint16_t pg) {
 	return ((uint64_t)dip << 32) | ((uint64_t)sport << 16) | (uint64_t)pg;
 }
 Ptr<RdmaQueuePair> RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg) {
+	if (CustomHeader::qpnEnabled) {
+		// Compatibility for feedback formats without a QPN: never pick an
+		// arbitrary connection if the old transport tuple is ambiguous.
+		Ptr<RdmaQueuePair> result;
+		for (const auto& item : m_txQpn) {
+			auto q = item.second;
+			if (q->dip.Get() == dip && q->sport == sport && q->m_pg == pg) {
+				if (result) return nullptr;
+				result = q;
+			}
+		}
+		return result;
+	}
 	uint64_t key = GetQpKey(dip, sport, pg);
 	auto it = m_qpMap.find(key);
 	if (it != m_qpMap.end())
 		return it->second;
 	return NULL;
 }
+namespace {
+// A small modeled connection exchange, not a complete RDMA CM implementation.
+class RdmaConnectionHeader : public Header {
+public:
+    uint32_t type=1, sourceQpn=0, destinationQpn=0;
+    uint64_t generation=0;
+    uint16_t sport=0, dport=0, pg=0;
+    static TypeId GetTypeId() {
+        static TypeId id=TypeId("ns3::RdmaConnectionHeader").SetParent<Header>().AddConstructor<RdmaConnectionHeader>();
+        return id;
+    }
+    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
+    uint32_t GetSerializedSize() const override { return 32; }
+    void Serialize(Buffer::Iterator i) const override {
+        i.WriteHtonU32(0x51434d01); i.WriteHtonU32(type);
+        i.WriteHtonU32(sourceQpn); i.WriteHtonU32(destinationQpn); i.WriteHtonU64(generation);
+        i.WriteHtonU16(sport); i.WriteHtonU16(dport); i.WriteHtonU16(pg); i.WriteHtonU16(0);
+    }
+    uint32_t Deserialize(Buffer::Iterator i) override {
+        if (i.GetRemainingSize()!=32 || i.ReadNtohU32()!=0x51434d01) return 0;
+        type=i.ReadNtohU32(); sourceQpn=i.ReadNtohU32(); destinationQpn=i.ReadNtohU32();
+        generation=i.ReadNtohU64(); sport=i.ReadNtohU16(); dport=i.ReadNtohU16(); pg=i.ReadNtohU16();
+        i.ReadNtohU16();
+        return type>=1 && type<=3 && sourceQpn && sourceQpn<=0xffffff && destinationQpn<=0xffffff && pg<8 ? 32 : 0;
+    }
+    void Print(std::ostream& out) const override { out<<"QP connection "<<sourceQpn<<" -> "<<destinationQpn; }
+};
+}
+uint32_t RdmaHw::AllocateQpn() {
+    if (m_nextQpn>0xffffff || m_txQpn.size()+m_rxQpn.size()>=m_maxQps) return 0;
+    return m_nextQpn++;
+}
+Ptr<RdmaQueuePair> RdmaHw::GetQpByQpn(uint32_t qpn,uint32_t peer) {
+    auto it=m_txQpn.find(qpn);
+    return it!=m_txQpn.end() && it->second->dip.Get()==peer ? it->second : nullptr;
+}
+Ptr<RdmaRxQueuePair> RdmaHw::GetRxQpByQpn(uint32_t qpn,uint32_t peer) {
+    auto it=m_rxQpn.find(qpn);
+    return it!=m_rxQpn.end() && it->second->dip==peer ? it->second : nullptr;
+}
+void RdmaHw::DeleteRxQpByQpn(uint32_t qpn,uint32_t peer) {
+    if (!GetRxQpByQpn(qpn,peer)) return;
+    m_rxQpn.erase(qpn); m_rxQpMap.erase(qpn);
+}
+void RdmaHw::SendControlPacket(Ptr<Packet> packet,Ipv4Address src,Ipv4Address dst,uint8_t protocol) {
+    auto route=m_rtTable.find(dst.Get());
+    NS_ABORT_MSG_IF(route==m_rtTable.end() || route->second.empty(), "missing RDMA control route");
+    Ipv4Header ip; ip.SetSource(src); ip.SetDestination(dst); ip.SetProtocol(protocol);
+    ip.SetTtl(64); ip.SetPayloadSize(packet->GetSize()); packet->AddHeader(ip); AddHeader(packet,0x800);
+    auto dev=m_nic.at(route->second.front()).dev;
+    dev->RdmaEnqueueHighPrioQ(packet); dev->TriggerTransmit();
+}
+void RdmaHw::Connect(Ptr<RdmaQueuePair> qp) {
+    if (qp->connected || !m_txQpn.count(qp->localQpn)) return;
+    if (qp->connectAttempts++>=8) { ++m_connectionRejected; return; }
+    RdmaConnectionHeader h; h.sourceQpn=qp->localQpn; h.generation=qp->connectionGeneration;
+    h.sport=qp->sport; h.dport=qp->dport; h.pg=qp->m_pg;
+    auto packet=Create<Packet>(); packet->AddHeader(h);
+    SendControlPacket(packet,qp->sip,qp->dip,0xfa);
+    qp->connectEvent=Simulator::Schedule(MilliSeconds(20),&RdmaHw::Connect,this,qp);
+}
+void RdmaHw::ReceiveConnection(Ptr<Packet> packet,const CustomHeader& ip) {
+    auto copy=packet->Copy(); copy->RemoveAtStart(ip.GetSerializedSize());
+    RdmaConnectionHeader h; if (!copy->RemoveHeader(h)) { ++m_connectionRejected; return; }
+    if (h.type==1) {
+        Ptr<RdmaRxQueuePair> rx;
+        for (const auto& item:m_rxQpn) {
+            auto q=item.second;
+            if (q->dip==ip.sip && q->peerQpn==h.sourceQpn) { rx=q; break; }
+        }
+        if (rx && (rx->connectionGeneration!=h.generation || rx->sport!=h.dport ||
+                   rx->dport!=h.sport || rx->sip!=ip.dip || rx->m_ecn_source.qIndex!=h.pg)) {
+            ++m_connectionRejected; h.type=3;
+        }
+        else if (!rx) {
+            auto qpn=AllocateQpn();
+            if (!qpn) { ++m_connectionRejected; h.type=3; }
+            else {
+                rx=CreateObject<RdmaRxQueuePair>();
+                rx->sip=ip.dip; rx->dip=ip.sip; rx->sport=h.dport; rx->dport=h.sport;
+                rx->m_ecn_source.qIndex=h.pg;
+                rx->localQpn=qpn; rx->peerQpn=h.sourceQpn; rx->connectionGeneration=h.generation;
+                m_rxQpn.emplace(qpn,rx); m_rxQpMap.emplace(qpn,rx);
+            }
+        }
+        if (h.type!=3) { h.type=2; h.destinationQpn=rx->localQpn; }
+        auto reply=Create<Packet>(); reply->AddHeader(h);
+        SendControlPacket(reply,Ipv4Address(ip.dip),Ipv4Address(ip.sip),0xfa);
+    } else {
+        auto qp=GetQpByQpn(h.sourceQpn,ip.sip);
+        if (!qp || qp->sip.Get()!=ip.dip || qp->connectionGeneration!=h.generation ||
+            qp->sport!=h.sport || qp->dport!=h.dport || qp->m_pg!=h.pg || qp->connected) return;
+        if (h.type==3 || !h.destinationQpn) { Simulator::Cancel(qp->connectEvent); ++m_connectionRejected; return; }
+        qp->destQpn=h.destinationQpn; qp->connected=true; Simulator::Cancel(qp->connectEvent);
+        if (!m_qpConnected.IsNull()) m_qpConnected(qp);
+        m_nic[GetNicIdxOfQp(qp)].dev->NewQp(qp);
+    }
+}
+
 void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish, Time stopTime) {
 	// create qp
 	Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
@@ -280,7 +392,15 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 	uint32_t nic_idx = GetNicIdxOfQp(qp);
 	m_nic[nic_idx].qpGrp->AddQp(qp);
 	uint64_t key = GetQpKey(dip.Get(), sport, pg);
-	m_qpMap[key] = qp;
+    if (CustomHeader::qpnEnabled) {
+        qp->localQpn=AllocateQpn();
+        NS_ABORT_MSG_IF(!qp->localQpn, "RNIC QPN/state pool exhausted");
+        qp->connectionGeneration=qp->localQpn; // monotonic, never reused in this RNIC lifetime
+        qp->connected=false; m_txQpn.emplace(qp->localQpn,qp);
+        key=qp->localQpn;
+    }
+    NS_ABORT_MSG_IF(m_qpMap.count(key), "duplicate sender transport association");
+    m_qpMap[key] = qp;
 
 
 	qp->powerEnabled = PowerTCPEnabled;
@@ -307,7 +427,8 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 	}
 
 	// Notify Nic
-	m_nic[nic_idx].dev->NewQp(qp);
+	if (CustomHeader::qpnEnabled) Connect(qp);
+    else m_nic[nic_idx].dev->NewQp(qp);
 	if (m_txRateSampleInterval > 0) {
 		qp->txRate.lastSeq = qp->snd_nxt;
 		qp->txRate.lastTime = Simulator::Now();
@@ -320,11 +441,24 @@ void RdmaHw::DeleteQueuePair(Ptr<RdmaQueuePair> qp) {
 	if (qp->frp.m_recoveryEvent.IsRunning())
 		qp->frp.m_recoveryEvent.Cancel();
 	// remove qp from the m_qpMap
-	uint64_t key = GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
+	uint64_t key = CustomHeader::qpnEnabled ? qp->localQpn : GetQpKey(qp->dip.Get(), qp->sport, qp->m_pg);
 	m_qpMap.erase(key);
+    Simulator::Cancel(qp->connectEvent); m_txQpn.erase(qp->localQpn);
 }
 
 Ptr<RdmaRxQueuePair> RdmaHw::GetRxQp(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg, bool create) {
+	if (CustomHeader::qpnEnabled) {
+		NS_ABORT_MSG_IF(create, "QPN receive state must be created by endpoint connection exchange");
+		Ptr<RdmaRxQueuePair> result;
+		for (const auto& item : m_rxQpn) {
+			auto q = item.second;
+			if (q->sip == sip && q->dip == dip && q->sport == sport && q->dport == dport && q->m_ecn_source.qIndex == pg) {
+				if (result) return nullptr;
+				result = q;
+			}
+		}
+		return result;
+	}
 	uint64_t key = ((uint64_t)dip << 32) | ((uint64_t)pg << 16) | (uint64_t)dport;
 	auto it = m_rxQpMap.find(key);
 	if (it != m_rxQpMap.end())
@@ -353,8 +487,22 @@ uint32_t RdmaHw::GetNicIdxOfRxQp(Ptr<RdmaRxQueuePair> q) {
 	}
 }
 void RdmaHw::DeleteRxQp(uint32_t dip, uint16_t pg, uint16_t dport) {
+	if (CustomHeader::qpnEnabled) {
+		Ptr<RdmaRxQueuePair> found;
+		for (const auto& item : m_rxQpn) {
+			auto q = item.second;
+			if (q->dip == dip && q->dport == dport && q->m_ecn_source.qIndex == pg) {
+				if (found) return;
+				found = q;
+			}
+		}
+		if (found) DeleteRxQpByQpn(found->localQpn, dip);
+		return;
+	}
 	uint64_t key = ((uint64_t)dip << 32) | ((uint64_t)pg << 16) | (uint64_t)dport;
-	m_rxQpMap.erase(key);
+    auto it=m_rxQpMap.find(key);
+    if (it!=m_rxQpMap.end()) m_rxQpn.erase(it->second->localQpn);
+    m_rxQpMap.erase(key);
 }
 
 int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
@@ -371,7 +519,13 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	}
 
 	// TODO find corresponding rx queue pair
-	Ptr<RdmaRxQueuePair> rxQp = GetRxQp(ch.dip, ch.sip, ch.udp.dport, ch.udp.sport, ch.udp.pg, true);
+	Ptr<RdmaRxQueuePair> rxQp;
+    if (CustomHeader::qpnEnabled) {
+        auto it=m_rxQpn.find(ch.udp.destQpn);
+        if (it==m_rxQpn.end() || it->second->sip!=ch.dip || it->second->dip!=ch.sip ||
+            it->second->m_ecn_source.qIndex!=ch.udp.pg) { ++m_invalidQpnPackets; return 0; }
+        rxQp=it->second;
+    } else rxQp=GetRxQp(ch.dip,ch.sip,ch.udp.dport,ch.udp.sport,ch.udp.pg,true);
 	if (ecnbits == CustomHeader::ECN_CE) {
 		rxQp->m_ecn_source.ecnbits |= ecnbits;
 		rxQp->m_ecn_source.qfb++;
@@ -389,6 +543,7 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
 	}
 	if (x == 1 || x == 2) { //generate ACK or NACK
 		qbbHeader seqh;
+        seqh.destQpn=rxQp->peerQpn;
 		seqh.SetSeq(rxQp->ReceiverNextExpectedSeq);
 		seqh.SetPG(ch.udp.pg);
 		seqh.SetSport(ch.udp.dport);
@@ -435,7 +590,7 @@ int RdmaHw::ReceiveCnp(Ptr<Packet> p, CustomHeader &ch) {
 
 	uint32_t i;
 	// get qp
-	Ptr<RdmaQueuePair> qp = GetQp(ch.sip, udpport, qIndex);
+	Ptr<RdmaQueuePair> qp = CustomHeader::qpnEnabled ? GetQpByQpn(ch.cnp.destQpn,ch.sip) : GetQp(ch.sip, udpport, qIndex);
 	if (qp == NULL)
 		return 0; // A delayed CNP may arrive after flow completion.
 	// get nic
@@ -479,7 +634,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 	}
 
 	int i;
-	Ptr<RdmaQueuePair> qp = GetQp(ch.sip, port, qIndex);
+	Ptr<RdmaQueuePair> qp = CustomHeader::qpnEnabled ? GetQpByQpn(ch.ack.destQpn,ch.sip) : GetQp(ch.sip, port, qIndex);
 	if (qp == NULL) {
 		// DCQCN debug: log QP lookup failure
 		if (m_node->GetId() == 6 && Simulator::Now().GetSeconds() * 1000.0 >= 12.0 && Simulator::Now().GetSeconds() * 1000.0 <= 15.0) {
@@ -541,7 +696,11 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 
 int RdmaHw::Receive(Ptr<Packet> p, CustomHeader &ch) {
 	//std::cout << "[RdmaHw::Receive] node=" << m_node->GetId() << " l3Prot=0x" << std::hex << (int)ch.l3Prot << std::dec << " pktSize=" << p->GetSize() << std::endl;
-	if (ch.l3Prot == 0x11) { // UDP
+    if (ch.l3Prot==0xfa && CustomHeader::qpnEnabled) {
+        ReceiveConnection(p,ch);
+    } else if (ch.l3Prot==0xf9 && !m_controlReceive.IsNull()) {
+        m_controlReceive(p,ch);
+    } else if (ch.l3Prot == 0x11) { // UDP
 		ReceiveUdp(p, ch);
 	} else if (ch.l3Prot == 0xFF) { // CNP
 		ReceiveCnp(p, ch);
@@ -672,6 +831,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
 	SeqTsHeader seqTs;
 	seqTs.SetSeq (qp->snd_nxt);
 	seqTs.SetPG (qp->m_pg);
+    seqTs.destQpn=qp->destQpn;
 	p->AddHeader (seqTs);
 	// add udp header
 	UdpHeader udpHeader;
@@ -1481,7 +1641,9 @@ void RdmaHw::HandleFrpFeedback(Ptr<RdmaQueuePair> qp, uint16_t fairRate, int16_t
 	//    IP格式：11.{dc_id}.*.*  ->  dc_id = (ip >> 16) & 0xFF
 	uint8_t srcDcId = (qp->sip.Get() >> 16) & 0xFF;
 	uint8_t dstDcId = (flowDstIp.Get() >> 16) & 0xFF;
-	bool isBackoffInternalFlow = (srcDcId == dstDcId);
+	auto hostDc=[](uint32_t ip) { return ((ip>>24)==10 || (ip>>24)==11) &&
+        (((ip>>16)&255)==1 || ((ip>>16)&255)==2); };
+    bool isBackoffInternalFlow = hostDc(qp->sip.Get()) && hostDc(flowDstIp.Get()) && (srcDcId == dstDcId);
 //  bool isBackoffInternalFlow = type && (srcDcId == dstDcId);
 	// 3. 计算新速率 r
 	double rBps;

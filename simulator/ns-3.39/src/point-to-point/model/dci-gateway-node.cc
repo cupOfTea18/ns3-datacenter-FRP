@@ -7,530 +7,1004 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <set>
 
 namespace ns3 {
 NS_OBJECT_ENSURE_REGISTERED(DciGatewayNode);
+NS_OBJECT_ENSURE_REGISTERED(R5Header);
 namespace {
+using H=R5Header;
 int64_t Ns(double s) { return Seconds(s).GetNanoSeconds(); }
-void Add(uint64_t& value,uint64_t n) {
-    NS_ABORT_MSG_IF(UINT64_MAX-value<n,"R5 counter overflow"); value+=n;
+int64_t NowNs() { return Simulator::Now().GetNanoSeconds(); }
+uint32_t ControlFrameBytes() { return H().GetSerializedSize()+Ipv4Header().GetSerializedSize()+PppHeader().GetSerializedSize(); }
+void Add(uint64_t& value,uint64_t bytes) {
+    NS_ABORT_MSG_IF(UINT64_MAX-value<bytes,"R5 counter overflow"); value+=bytes;
 }
-// One fixed-size group state per priority-zero packet; no demand messages.
-class R5Header : public Header {
-public:
-    std::array<uint64_t,17> state{};
-    static TypeId GetTypeId() {
-        static TypeId tid=TypeId("ns3::R5Header").SetParent<Header>().AddConstructor<R5Header>(); return tid;
-    }
-    TypeId GetInstanceTypeId() const override { return GetTypeId(); }
-    uint32_t GetSerializedSize() const override { return 144; }
-    void Serialize(Buffer::Iterator i) const override {
-        i.WriteHtonU32(5); i.WriteHtonU32(17);
-        for (auto v:state) i.WriteHtonU64(v);
-    }
-    uint32_t Deserialize(Buffer::Iterator i) override {
-        if (i.GetRemainingSize()!=GetSerializedSize() || i.ReadNtohU32()!=5 || i.ReadNtohU32()!=17) return 0;
-        for (auto& v:state) v=i.ReadNtohU64();
-        return GetSerializedSize();
-    }
-    void Print(std::ostream& out) const override { out << "R5 group=" << state[0]; }
-};
+CustomHeader Parse(Ptr<const Packet> p) {
+    CustomHeader h(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header);
+    p->PeekHeader(h); return h;
 }
+}
+TypeId R5Header::GetTypeId() {
+    static TypeId id=TypeId("ns3::R5Header").SetParent<Header>().AddConstructor<R5Header>(); return id;
+}
+TypeId R5Header::GetInstanceTypeId() const { return GetTypeId(); }
+void R5Header::Serialize(Buffer::Iterator i) const {
+    i.WriteHtonU32(0x52350007); i.WriteHtonU16(type); i.WriteHtonU16(FIELDS);
+    for (auto value:v) i.WriteHtonU64(value);
+}
+uint32_t R5Header::Deserialize(Buffer::Iterator i) {
+    if (i.GetRemainingSize()!=GetSerializedSize() || i.ReadNtohU32()!=0x52350007) return 0;
+    type=i.ReadNtohU16(); if (type<PROBE || type>REGISTER_CONFIRM || i.ReadNtohU16()!=FIELDS) return 0;
+    for (auto& value:v) value=i.ReadNtohU64();
+    return GetSerializedSize();
+}
+void R5Header::Print(std::ostream& out) const { out<<"R5/v7 type="<<type; }
 TypeId DciGatewayNode::GetTypeId() {
-    static TypeId tid=TypeId("ns3::DciGatewayNode").SetParent<SwitchNode>().AddConstructor<DciGatewayNode>(); return tid;
+    static TypeId id=TypeId("ns3::DciGatewayNode").SetParent<SwitchNode>().AddConstructor<DciGatewayNode>(); return id;
 }
-Ipv4Address DciGatewayNode::ControlAddress(uint32_t node) { return Ipv4Address(0xac1f0000u+node+1); }
+Ipv4Address DciGatewayNode::ControlAddress(uint32_t node) {
+    NS_ABORT_MSG_IF(node>=65534,"R5 control address pool exhausted"); return Ipv4Address(0xac1f0000u+node+1);
+}
 Ptr<QbbNetDevice> DciGatewayNode::Port(uint32_t port) const {
     NS_ABORT_MSG_IF(port>=GetNDevices(),"R5 invalid port");
-    auto d=DynamicCast<QbbNetDevice>(GetDevice(port)); NS_ABORT_MSG_IF(!d,"R5 requires Qbb port"); return d;
+    auto d=DynamicCast<QbbNetDevice>(GetDevice(port)); NS_ABORT_MSG_IF(!d,"R5 requires Qbb"); return d;
 }
 void DciGatewayNode::Configure(const Config& c,const std::string& output) {
-    NS_ABORT_MSG_IF(m_enabled || !std::isfinite(c.period+c.control+c.tau+c.timeout+c.coldFraction+
-        c.conservativeFraction+c.qref+c.margin+c.sourceHigh+c.sourceLow+c.localWait+c.cnpInterval+c.localWindow) ||
-        Ns(c.control)<=0 || c.period<c.control || Ns(c.period)%Ns(c.control) ||
-        c.localWindow<c.control || Ns(c.localWindow)%Ns(c.control) || c.tau<c.control ||
-        c.timeout<=c.period || c.coldFraction<=0 || c.coldFraction>c.conservativeFraction ||
-        c.conservativeFraction>1 || c.qref<0 || c.margin<=0 || c.sourceLow<0 ||
-        c.sourceHigh<=c.sourceLow || c.localWait<c.localWindow || c.cnpInterval<=0 ||
-        c.bufferBytes<=c.margin+c.qref,"invalid R5 configuration");
-    m_config=c; m_enabled=true;
+    NS_ABORT_MSG_IF(m_enabled || !std::isfinite(c.period+c.control+c.timeout+
+        c.conservativeFraction+c.qref+c.margin+c.sourceHigh+c.sourceLow+c.localWait+c.cnpInterval+
+        c.localWindow+c.initialDelay+c.probePeriod+c.queryRetry+c.controlFraction) || Ns(c.control)<=0 || Ns(c.period)<=0 ||
+        c.timeout<=c.period || c.initialDelay<=0 || c.probePeriod<=0 || c.queryRetry<=0 ||
+        c.controlFraction<=0 || c.controlFraction>1 || c.controlBurstBytes<ControlFrameBytes() ||
+        c.controlQueueBytes<ControlFrameBytes() || c.localWindow<=0 || c.localWait<=0 || c.cnpInterval<=0 ||
+        c.conservativeFraction<=0 || c.conservativeFraction>1 || c.qref<0 || c.margin<=0 ||
+        c.sourceLow<0 || c.sourceHigh<=c.sourceLow || c.bufferBytes<=c.margin+c.qref ||
+        !c.maxFlows || !c.maxHistory || !c.maxHistoryPerFlow || !c.maxForecasts || !c.maxFuturePackets ||
+        !c.maxReports || !c.maxRetries || !c.session || !c.peerSession,"invalid R5 configuration");
+    m_config=c; m_controlTokens=c.controlBurstBytes; m_enabled=true; m_forwardBase=m_reverseBase=Ns(c.initialDelay);
     auto prefix=output+".gateway-"+std::to_string(GetId());
-    m_log.open(prefix+".groups.csv"); m_events.open(prefix+".events.csv");
-    m_packets.open(prefix+".packets.csv"); m_groupPackets.open(prefix+".group-packets.csv");
-    NS_ABORT_MSG_IF(!m_log || !m_events || !m_packets || !m_groupPackets,"cannot open R5 logs");
-    m_events << "time_ns,node,event_order,event,id,value,reason\n";
-    m_packets << "time_ns,node,event_order,event,role,flow,group,bytes,in_total,tx_total,queue_bytes,arrival_ns\n";
-    m_groupPackets << "time_ns,node,event_order,event,role,group,bytes,in_total,tx_total,queue_bytes,drop_total,other_total\n";
-    m_log << "time_ns,node,event_order,role,group,peer,port,pg,queue_bytes,in_total,tx_total,drop_total,other_total,service_Bps,background_Bps,capacity_Bps,buffer_bytes,target_Bps,candidate_Bps,predicted_queue_bytes,predicted_peak_bytes,prediction_end_ns,fresh,history_covered,reason,state_seq,state_sample_ns,state_ordinal,state_queue_bytes,state_in_total,state_tx_total,pressure_bytes,growth_Bps,protecting,bad_residuals,state_flags,state_emptied,state_pause_ns,state_controlled_total,receiver_interval_ns,receiver_unpaused_service_Bps,receiver_available_fraction\n";
+    m_log.open(prefix+".flows.csv"); m_events.open(prefix+".events.csv");
+    m_packets.open(prefix+".packets.csv"); m_resourceLog.open(prefix+".resources.csv");
+    m_predictions.open(prefix+".predictions.csv");
+    NS_ABORT_MSG_IF(!m_log || !m_events || !m_packets || !m_resourceLog || !m_predictions,"cannot open R5 logs");
+    m_events<<"time_ns,node,event_order,event,id,value,reason\n";
+    m_packets<<"time_ns,node,event_order,event,role,flow,generation,src_ip,dst_ip,dest_qpn,bytes,in_total,dequeued_total,tx_total,queue_bytes,arrival_ns\n";
+    m_log<<"time_ns,node,decision,flow,generation,peer_generation,resource,port_resource,queue_bytes,candidate_Bps,target_Bps,tokens,burst_bytes,supply_Bps,service_Bps,state_sample_ns,state_queue_bytes,df_ns,db_ns,reason\n";
+    m_resourceLog<<"time_ns,node,resource,port,pg,queue_bytes,in_total,out_total,other_total,dropped_total,service_Bps,capacity_Bps,background_Bps,pause_ns,interval_ns,flags\n";
+    m_predictions<<"time_ns,node,decision,flow,generation,peer_generation,event,sample_ns,end_ns,initial_queue_bytes,service_Bps,predicted_queue_bytes,peak_bytes,planned_bytes,actual_queue_bytes,replayed_queue_bytes,reason\n";
 }
-void DciGatewayNode::RegisterFlow(const Registration& r) {
-    NS_ABORT_MSG_IF(!m_enabled || m_started || !r.id || m_flows.count(r.id) || !r.pg || r.pg>=8 ||
-        r.port>=256 || r.remotePort>=256 || r.peer>=2097152 || GetId()>=2097152 ||
-        r.propagation.IsNegative() || !r.frameBytes,"invalid R5 association");
-    DataKey key{r.sip,r.dip,r.sport,r.dport,r.pg};
-    NS_ABORT_MSG_IF(m_data.count(key),"reused R5 connection identity");
-    bool source=r.role==Role::Source;
-    uint32_t id=(source ? r.peer : GetId())*2048+(source ? r.remotePort : r.port)*8+r.pg;
-    auto inserted=m_groups.emplace(id,Group{}); auto& g=inserted.first->second;
-    if (inserted.second) {
-        g.id=id; g.peer=r.peer; g.port=r.port; g.pg=r.pg; g.role=r.role; g.frame=r.frameBytes;
-        g.propagation=r.propagation; g.localResponse=r.localResponse;
-        g.capacity=Port(r.port)->GetDataRate().GetBitRate()/8.0;
-        if (source) {
-            m_sourcePorts[r.port].push_back(id);
-            Port(r.port)->ConfigureInjectionGroup(id,r.frameBytes);
-        } else {
-            NS_ABORT_MSG_IF(m_receiverGroups.count({r.port,r.pg}),"multiple A gateways need explicit resource allocation");
-            m_receiverGroups[{r.port,r.pg}]=id;
-        }
-    } else {
-        NS_ABORT_MSG_IF(g.peer!=r.peer || g.port!=r.port || g.role!=r.role ||
-            g.propagation!=r.propagation || g.frame!=r.frameBytes,"inconsistent R5 managed path/group");
-        g.localResponse=std::max(g.localResponse,r.localResponse);
+void DciGatewayNode::SetPeer(uint32_t peer,uint32_t wan,uint32_t frame) {
+    NS_ABORT_MSG_IF(m_started || peer==GetId() || !frame || frame>UINT32_MAX/4,"invalid R5 peer/frame");
+    m_peer=peer; m_wan=wan; m_frame=frame; Port(wan);
+}
+void DciGatewayNode::SetDestinationBudget(uint32_t ip,double budget) {
+    NS_ABORT_MSG_IF(m_started || !std::isfinite(budget) || budget<=0,"invalid destination physical ceiling");
+    m_destinationBudgets[ip]=budget;
+}
+DciGatewayNode::Resource& DciGatewayNode::QueueResource(uint32_t port,uint32_t pg) {
+    auto result=m_resources.emplace(std::make_pair(port,pg),Resource{});
+    auto& r=result.first->second;
+    if (result.second) {
+        r.id=m_nextResource++; r.port=port; r.pg=pg; r.sample=NowNs();
+        r.pause=Port(port)->GetQueuePauseTime(pg).GetNanoSeconds();
     }
-    auto& f=m_flows[r.id]; f.reg=r; f.group=id; f.queue=r.pg;
-    if (source) {
-        uint32_t count=0;
-        for (const auto& e:m_flows) if (e.first!=r.id && e.second.reg.role==Role::Source && e.second.reg.port==r.port) ++count;
-        f.queue=QbbNetDevice::qCnt+count;
-        NS_ABORT_MSG_IF(f.queue>=BEgressQueue::fCnt,"R5 exceeds logical queues on source port");
-        Port(r.port)->BindInjectionQueue(f.queue,r.pg,id);
-    }
-    g.flows.push_back(r.id); m_data[key]=r.id;
+    return r;
 }
 void DciGatewayNode::Start() {
-    NS_ABORT_MSG_IF(!m_enabled || m_started || m_groups.empty(),"invalid R5 start");
-    for (auto& e:m_groups) {
-        auto& g=e.second;
-        NS_ABORT_MSG_IF(m_config.timeout<=g.propagation.GetSeconds()+3*m_config.period,
-                        "R5 timeout too short for feedback path");
-        NS_ABORT_MSG_IF(.8*m_config.bufferBytes/m_groups.size()<=m_config.margin+m_config.qref,
-                        "R5 group allowances do not fit shared buffer");
-        g.previousPause=Port(g.port)->GetQueuePauseTime(g.pg).GetNanoSeconds();
-    }
+    NS_ABORT_MSG_IF(!m_enabled || m_started || !m_frame || !CustomHeader::qpnEnabled,
+                    "R5 start requires peer, frame size and QPN wire format");
+    NS_ABORT_MSG_IF(GetNDevices()>256,"R5 port resource bound exceeded");
     for (uint32_t i=0;i<GetNDevices();++i) {
         auto d=DynamicCast<QbbNetDevice>(GetDevice(i)); if (!d) continue;
-        NS_ABORT_MSG_IF(d->GetMtu()<164,"R5 state exceeds MTU");
-        if (m_sourcePorts.count(i)) d->m_groupClassifier=MakeBoundCallback(&DciGatewayNode::Classify,this,i);
+        NS_ABORT_MSG_IF(d->GetMtu()<H().GetSerializedSize()+20,"R5 control packet exceeds MTU");
+        if (i==m_wan) {
+            d->m_groupClassifier=MakeBoundCallback(&DciGatewayNode::Classify,this,i);
+            d->m_injectionEligible=MakeCallback(&DciGatewayNode::Eligible,this);
+            d->m_beforeTransmit=MakeCallback(&DciGatewayNode::Stamp,this);
+        } else for (uint32_t pg=0;pg<8;++pg) QueueResource(i,pg);
         d->TraceConnectWithoutContext("QbbAdmitted",MakeBoundCallback(&DciGatewayNode::Admitted,this,i));
         d->TraceConnectWithoutContext("QbbDequeue",MakeBoundCallback(&DciGatewayNode::Dequeue,this,i));
         d->TraceConnectWithoutContext("QbbPauseState",MakeBoundCallback(&DciGatewayNode::PauseChanged,this,i));
+        d->m_traceTransmitResult.ConnectWithoutContext(MakeBoundCallback(&DciGatewayNode::Transmitted,this,i));
     }
-    m_started=true;
+    m_started=true; Event("START",0,0,"empty_flow_table");
     m_tick=Simulator::Schedule(Seconds(m_config.control),&DciGatewayNode::Tick,this);
+    m_report=Simulator::Schedule(Seconds(m_config.period),&DciGatewayNode::PeriodicReport,this);
+    Probe();
 }
 DciGatewayNode::Flow* DciGatewayNode::Match(Ptr<const Packet> p) {
-    CustomHeader h(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header); p->PeekHeader(h);
-    if (h.l3Prot!=0x11) return nullptr;
-    auto it=m_data.find({h.sip,h.dip,h.udp.sport,h.udp.dport,h.udp.pg});
+    auto h=Parse(p); if (h.l3Prot!=0x11) return nullptr;
+    auto it=m_data.find({h.sip,h.dip,h.udp.destQpn});
     return it==m_data.end() ? nullptr : &m_flows.at(it->second);
+}
+bool DciGatewayNode::BindQueue(Flow& f) {
+    if (f.queue>=8) return true;
+    std::set<uint32_t> used;
+    for (const auto& e:m_flows) if (e.second.source && e.second.queue>=8) used.insert(e.second.queue);
+    for (uint32_t queue=8;queue<BEgressQueue::fCnt;++queue) if (!used.count(queue)) {
+        f.queue=queue; Port(m_wan)->BindInjectionQueue(queue,f.pg,f.id); return true;
+    }
+    return false;
+}
+void DciGatewayNode::ReleaseEmptyQueues() {
+    for (auto& e:m_flows) {
+        auto& f=e.second;
+        if (f.source && !f.Queue() && !f.target && f.queue>=8) {
+            NS_ABORT_MSG_IF(!Port(m_wan)->DetachInjectionQueue(f.queue),"cannot release empty flow queue");
+            f.queue=0; Event("IDLE",f.id,f.generation,"state_and_tokens_retained");
+        }
+    }
+}
+bool DciGatewayNode::PrepareDataAdmission(Ptr<Packet> p,CustomHeader& h,uint32_t ingress,uint32_t egress,uint32_t pg) {
+    if (!m_started || h.l3Prot!=0x11 || (ingress!=m_wan && egress!=m_wan)) return true;
+    const bool source=egress==m_wan;
+    auto reject=[&](const char* reason) {
+        ++m_resourceDrops; Event("DATA_DROP",0,p->GetSize(),reason); return false;
+    };
+    if (!h.udp.destQpn || h.udp.destQpn>0xffffff || !pg || pg>=8 || p->GetSize()>m_frame)
+        return reject("invalid_qpn_pg_or_frame");
+    auto f=Match(p);
+    if (!f) {
+        ReleaseEmptyQueues();
+        if (m_flows.size()>=m_config.maxFlows) return reject("identity_full_no_pending_buffer");
+        if (source) {
+            size_t used=0; for (const auto& e:m_flows) if (e.second.source && e.second.queue>=8) ++used;
+            if (used>=BEgressQueue::fCnt-8) return reject("queue_full_no_pending_buffer");
+        }
+        NS_ABORT_MSG_IF(m_nextFlow==UINT32_MAX,"R5 generation exhausted");
+        Flow record; record.key={h.sip,h.dip,h.udp.destQpn}; record.id=m_nextFlow++;
+        record.generation=record.id; record.source=source; record.port=egress; record.pg=pg;
+        record.sport=h.udp.sport; record.dport=h.udp.dport; record.created=record.lastData=NowNs(); record.supplySample=NowNs();
+        if (!source) {
+            auto& r=QueueResource(egress,pg); record.resource=r.id; record.portResource=0x80000000u|egress;
+        }
+        m_data.emplace(record.key,record.id); f=&m_flows.emplace(record.id,std::move(record)).first->second;
+        if (source) {
+            Port(m_wan)->ConfigureInjectionGroup(f->id,4*m_frame);
+            NS_ABORT_MSG_IF(!BindQueue(*f),"queue reservation changed inside admission event");
+        }
+        Event("CREATE",f->id,f->generation,source ? "first_data_A" : "first_data_B");
+    }
+    if (f->source!=source || f->port!=egress || f->pg!=pg) return reject("unsupported_route_or_pg_migration");
+    if (source && !BindQueue(*f)) return reject("queue_full_existing_identity");
+    f->lastData=NowNs();
+    return true;
 }
 uint32_t DciGatewayNode::Classify(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t pg) {
     auto f=self->Match(p);
-    return f && f->reg.role==Role::Source && f->reg.port==port ? f->queue : pg;
-}
-void DciGatewayNode::Event(const char* event,uint32_t id,double value,const char* reason) {
-    m_events << Simulator::Now().GetNanoSeconds() << ',' << GetId() << ',' << ++m_ordinal << ','
-        << event << ',' << id << ',' << std::setprecision(17) << value << ',' << reason << '\n';
-}
-void DciGatewayNode::PacketEvent(Flow& f,const char* event,uint32_t bytes) {
-    auto now=Simulator::Now().GetNanoSeconds();
-    int64_t arrival=-1;
-    if (f.reg.role==Role::Source && std::string(event)=="TX")
-        arrival=now+f.reg.propagation.GetNanoSeconds()+Port(f.reg.port)->GetDataRate().CalculateBytesTxTime(bytes).GetNanoSeconds();
-    m_packets << now << ',' << GetId() << ',' << ++m_ordinal << ',' << event << ','
-        << (f.reg.role==Role::Source ? "A" : "B") << ',' << f.reg.id << ',' << f.group << ',' << bytes << ','
-        << f.in << ',' << f.tx << ',' << f.in-f.tx << ',' << arrival << '\n';
-}
-void DciGatewayNode::GroupEvent(Group& g,const char* event,uint32_t bytes) {
-    g.peak=std::max(g.peak,g.Queue());
-    m_groupPackets << Simulator::Now().GetNanoSeconds() << ',' << GetId() << ',' << ++m_ordinal << ',' << event << ','
-        << (g.IsSource() ? "A" : "B") << ',' << g.id << ',' << bytes << ',' << g.in << ',' << g.tx << ','
-        << g.Queue() << ',' << g.drops << ',' << g.other << '\n';
+    if (Parse(p).l3Prot==0x11) NS_ABORT_MSG_IF(!f || !f->source || f->port!=port || f->queue<8,"unadmitted WAN data");
+    return f && f->source ? f->queue : pg;
 }
 void DciGatewayNode::Admitted(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t,uint32_t pg) {
-    auto f=self->Match(p); Group* target=nullptr;
-    if (f) {
-        NS_ABORT_MSG_IF(f->reg.port!=port,"R5 route changed: invalidate and reconfigure managed path before forwarding");
-        Add(f->in,p->GetSize()); self->PacketEvent(*f,"ADMIT",p->GetSize());
-        if (f->reg.role==Role::Source) target=&self->m_groups.at(f->group);
-    }
-    auto it=self->m_receiverGroups.find({port,pg});
-    if (it!=self->m_receiverGroups.end()) {
-        target=&self->m_groups.at(it->second);
-        if (!f || f->group!=target->id) Add(target->other,p->GetSize());
-        else Add(target->controlled,p->GetSize());
-    }
-    if (target) {
-        bool activate=target->IsSource() && !target->Queue() && !target->target;
-        Add(target->in,p->GetSize()); self->GroupEvent(*target,"ADMIT",p->GetSize());
-        // Reallocate on the first arrival, after admission callbacks finish. Do not
-        // leave an idle group's new packets blocked until the periodic tick.
-        if (activate && self->m_activation.IsExpired())
-            self->m_activation=Simulator::ScheduleNow(&DciGatewayNode::ActivateSources,self);
-    }
-    for (auto& e:self->m_groups) if (!e.second.IsSource() && e.second.port==port && e.second.pg!=pg)
-        e.second.shared=true;
-}
-void DciGatewayNode::Dequeue(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t pg) {
-    CustomHeader h(CustomHeader::L2_Header|CustomHeader::L3_Header|CustomHeader::L4_Header); p->PeekHeader(h);
-    if (h.l3Prot==249) Add(self->m_controlTx,p->GetSize());
-    auto f=self->Match(p); Group* target=nullptr;
-    if (f && f->reg.port==port) {
-        Add(f->tx,p->GetSize()); NS_ABORT_MSG_IF(f->tx>f->in,"R5 flow byte conservation");
-        self->PacketEvent(*f,"TX",p->GetSize());
-        if (f->reg.role==Role::Source) {
-            target=&self->m_groups.at(f->group);
-            target->history.Add(Simulator::Now().GetNanoSeconds()+f->reg.propagation.GetNanoSeconds()+
-                self->Port(port)->GetDataRate().CalculateBytesTxTime(p->GetSize()).GetNanoSeconds(),p->GetSize());
+    auto f=self->Match(p);
+    if (f && f->port==port) {
+        Add(f->in,p->GetSize()); if (f->source) f->packets.push_back(p->GetSize());
+        self->PacketEvent(*f,"ADMIT",p->GetSize());
+        if (f->source && f->Queue()==p->GetSize()) self->RequestControl(ARRIVAL);
+        if (f->in==p->GetSize()) {
+            // One immediate allocation for new flows; normal arrivals keep the
+            // periodic control cadence. Coalesce simultaneous first packets.
+            if (f->source) {
+                if (self->m_startup.IsExpired()) self->m_startup=Simulator::ScheduleNow(
+                    &DciGatewayNode::ActivateSources,self);
+            } else {
+                // Sample after admission finishes updating physical counters.
+                Simulator::Cancel(self->m_serviceReport);
+                self->m_serviceReport=Simulator::ScheduleNow(&DciGatewayNode::SampleReceiver,self);
+            }
         }
     }
-    auto it=self->m_receiverGroups.find({port,pg});
-    if (it!=self->m_receiverGroups.end()) target=&self->m_groups.at(it->second);
-    if (target) {
-        Add(target->tx,p->GetSize()); NS_ABORT_MSG_IF(target->tx>target->in,"R5 group byte conservation");
-        if (!target->Queue()) target->emptied=true;
-        self->GroupEvent(*target,"TX",p->GetSize());
+    if (port!=self->m_wan) {
+        auto& r=self->QueueResource(port,pg); Add(r.in,p->GetSize());
+        if (!f || f->source || f->port!=port) Add(r.other,p->GetSize());
     }
-    for (auto& e:self->m_groups) if (!e.second.IsSource() && e.second.port==port && e.second.pg!=pg) {
-        e.second.shared=true;
+}
+void DciGatewayNode::Dequeue(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t pg) {
+    auto f=self->Match(p);
+    if (f && f->port==port) {
+        Add(f->dequeued,p->GetSize()); NS_ABORT_MSG_IF(f->dequeued>f->in,"R5 queue conservation");
+        if (f->source) {
+            NS_ABORT_MSG_IF(f->packets.empty() || f->packets.front()!=p->GetSize(),"R5 packet FIFO mismatch");
+            f->packets.pop_front();
+        }
+        self->PacketEvent(*f,"DEQUEUE",p->GetSize());
     }
+    if (port!=self->m_wan) {
+        auto& r=self->QueueResource(port,pg); Add(r.out,p->GetSize());
+        if (!self->Port(port)->GetQueue()->GetNBytes(pg)) r.emptied=true;
+    }
+}
+void DciGatewayNode::Transmitted(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,bool success) {
+    auto h=Parse(p);
+    if (h.l3Prot==0xf9 && success) Add(self->m_controlTx,p->GetSize());
+    auto f=self->Match(p); if (!f || f->port!=port) return;
+    int64_t arrival=-1;
+    if (success) {
+        Add(f->tx,p->GetSize());
+        if (f->source) {
+            NS_ABORT_MSG_IF(!self->Eligible(f->id),"history space must be reserved before dequeue");
+            arrival=NowNs()+self->m_forwardBase+self->Port(port)->GetDataRate().CalculateBytesTxTime(p->GetSize()).GetNanoSeconds();
+            f->history.Add(arrival,p->GetSize()); ++self->m_historyCount;
+            self->m_historyPeak=std::max(self->m_historyPeak,self->m_historyCount);
+            self->m_flowHistoryPeak=std::max(self->m_flowHistoryPeak,uint64_t(f->history.arrivals.size()));
+        }
+    } else Add(f->failures,p->GetSize());
+    self->PacketEvent(*f,success ? "TX" : "TX_FAILED",p->GetSize(),arrival);
+    if (f->source && !f->Queue()) self->RequestControl(EMPTY);
 }
 void DciGatewayNode::NotifyAdmissionDrop(uint32_t port,uint32_t pg,Ptr<const Packet> p) {
-    if (!m_enabled) return;
-    auto it=m_receiverGroups.find({port,pg});
-    if (it!=m_receiverGroups.end()) {
-        auto& g=m_groups.at(it->second); Add(g.drops,p->GetSize());
-        auto f=Match(p); if (f && f->group==g.id) Add(g.controlled,p->GetSize());
-        GroupEvent(g,"DROP",p->GetSize());
-    } else if (auto f=Match(p)) {
-        auto& g=m_groups.at(f->group); Add(g.drops,p->GetSize()); GroupEvent(g,"DROP",p->GetSize());
+    if (!m_started) return;
+    auto f=Match(p); if (f) { Add(f->drops,p->GetSize()); PacketEvent(*f,"DROP",p->GetSize()); }
+    if (port!=m_wan) Add(QueueResource(port,pg).dropped,p->GetSize());
+}
+bool DciGatewayNode::Eligible(uint32_t id) {
+    const auto& f=m_flows.at(id);
+    return f.history.arrivals.size()<m_config.maxHistoryPerFlow && m_historyCount<m_config.maxHistory;
+}
+void DciGatewayNode::PauseChanged(DciGatewayNode* self,uint32_t port,uint32_t,bool) {
+    if (port==self->m_wan) self->RequestControl(PAUSE);
+    else if (self->m_serviceReport.IsExpired()) self->m_serviceReport=Simulator::Schedule(
+        Seconds(self->m_config.control),&DciGatewayNode::SampleReceiver,self);
+}
+void DciGatewayNode::Event(const char* event,uint32_t id,double value,const char* reason) {
+    m_events<<NowNs()<<','<<GetId()<<','<<++m_ordinal<<','<<event<<','<<id<<','<<std::setprecision(17)<<value<<','<<reason<<'\n';
+}
+void DciGatewayNode::PacketEvent(Flow& f,const char* event,uint32_t bytes,int64_t arrival) {
+    m_packets<<NowNs()<<','<<GetId()<<','<<++m_ordinal<<','<<event<<','<<(f.source ? 'A' : 'B')<<','
+        <<f.id<<','<<f.generation<<','<<f.key.srcIp<<','<<f.key.dstIp<<','<<f.key.destQpn<<','<<bytes<<','
+        <<f.in<<','<<f.dequeued<<','<<f.tx<<','<<f.Queue()<<','<<arrival<<'\n';
+}
+Ptr<Packet> DciGatewayNode::ControlPacket(H h,Ipv4Address src,Ipv4Address dst) {
+    auto packet=Create<Packet>(); packet->AddHeader(h);
+    Ipv4Header ip; ip.SetSource(src); ip.SetDestination(dst); ip.SetProtocol(0xf9);
+    ip.SetTtl(64); ip.SetPayloadSize(packet->GetSize()); packet->AddHeader(ip);
+    PppHeader ppp; ppp.SetProtocol(0x0021); packet->AddHeader(ppp); return packet;
+}
+void DciGatewayNode::Send(H h,Ipv4Address destination) {
+    h.v[H::SESSION]=m_config.session;
+    auto packet=ControlPacket(h,ControlAddress(GetId()),destination);
+    auto header=Parse(packet); int egress=LookupOutputPort(packet,header);
+    NS_ABORT_MSG_IF(egress<0,"missing R5 control route");
+    const auto now=NowNs();
+    m_controlTokens=std::min(double(m_config.controlBurstBytes),m_controlTokens+
+        Port(m_wan)->GetDataRate().GetBitRate()/8.0*m_config.controlFraction*(now-m_controlUpdated)*1e-9);
+    m_controlUpdated=now;
+    if (m_controlTokens<packet->GetSize() || Port(egress)->GetQueue()->GetNBytes(0)+packet->GetSize()>m_config.controlQueueBytes) {
+        ++m_controlDropped; Event("CONTROL_DROP",h.type,packet->GetSize(),"control_budget"); return;
     }
+    m_controlTokens-=packet->GetSize(); SendNetworkControl(packet);
 }
-void DciGatewayNode::PauseChanged(DciGatewayNode* self,uint32_t port,uint32_t pg,bool) {
-    auto it=self->m_receiverGroups.find({port,pg});
-    if (it==self->m_receiverGroups.end()) return;
-    auto& g=self->m_groups.at(it->second);
-    // Coalesce transitions, not refresh frames. A short observation interval after
-    // resume measures usable service before publishing the recovery estimate.
-    if (g.serviceReport.IsExpired())
-        g.serviceReport=Simulator::Schedule(Seconds(self->m_config.control),
-            &DciGatewayNode::ReportServiceChange,self,g.id);
+void DciGatewayNode::Stamp(Ptr<Packet> p) {
+    auto ip=Parse(p); if (ip.l3Prot!=0xf9 || ip.sip!=ControlAddress(GetId()).Get()) return;
+    PppHeader ppp; Ipv4Header ipv4; H h;
+    p->RemoveHeader(ppp); p->RemoveHeader(ipv4);
+    NS_ABORT_MSG_IF(!p->RemoveHeader(h),"invalid locally generated R5 message");
+    h.v[H::SEND]=NowNs(); h.v[H::LINK_RATE]=Port(m_wan)->GetDataRate().GetBitRate();
+    p->AddHeader(h); p->AddHeader(ipv4); p->AddHeader(ppp);
 }
-void DciGatewayNode::ReportServiceChange(uint32_t group) {
-    SampleReceiver(m_groups.at(group));
+void DciGatewayNode::Probe() {
+    H h; h.type=H::PROBE; h.v[H::SEQ]=++m_probe; h.v[H::SAMPLE]=NowNs();
+    Send(h,ControlAddress(m_peer));
+    m_probeEvent=Simulator::Schedule(Seconds(m_config.probePeriod),&DciGatewayNode::Probe,this);
+}
+DciGatewayNode::Record DciGatewayNode::FlowRecord(Flow& f) {
+    Record v{}; v[H::SIP]=f.key.srcIp; v[H::DIP]=f.key.dstIp; v[H::QPN]=f.key.destQpn;
+    v[H::GEN]=f.generation; v[H::PEER_GEN]=f.remoteGeneration;
+    v[H::SEQ]=++f.seq; v[H::SAMPLE]=NowNs(); v[H::QUEUE]=f.Queue();
+    v[H::ARRIVED]=f.in; v[H::DEPARTED]=f.dequeued; v[H::DROPPED]=f.drops;
+    v[H::RESOURCE]=f.resource; v[H::PORT_RESOURCE]=f.portResource; v[H::ASSOCIATION]=1;
+    v[H::SERVICE]=uint64_t(f.service); v[H::BACKGROUND]=uint64_t(f.supply);
+    return v;
 }
 bool DciGatewayNode::SwitchReceiveFromDevice(Ptr<NetDevice> dev,Ptr<Packet> p,CustomHeader& h) {
-    if (m_enabled) {
-        if (h.l3Prot==249 && h.dip==ControlAddress(GetId()).Get()) { ReceiveReport(p,h); return true; }
-        // Observation only: native CNP and every existing CE bit pass through unchanged.
+    if (m_started) {
+        if (h.l3Prot==0xf9 && h.dip==ControlAddress(GetId()).Get()) { ReceiveControl(p,h); return true; }
         bool cnp=h.l3Prot==0xff && h.cnp.ecnBits;
         bool ack=(h.l3Prot==0xfc || h.l3Prot==0xfd) && (h.ack.flags&(1<<qbbHeader::FLAG_CNP));
-        if (cnp || ack) for (auto& e:m_flows) {
-            auto& f=e.second; const auto& r=f.reg;
-            if (h.sip==r.dip && h.dip==r.sip && (cnp ? h.cnp.fid : h.ack.dport)==r.sport &&
-                (cnp ? h.cnp.qIndex : h.ack.pg)==r.pg && (cnp || h.ack.sport==r.dport)) {
-                ++f.nativeCnps; Event("NATIVE_CNP",r.id,f.nativeCnps);
-                if (r.role==Role::Source) f.lastNativeCnp=Simulator::Now().GetNanoSeconds();
+        if (cnp || ack) for (auto& entry:m_flows) {
+            auto& f=entry.second;
+            auto reg=m_registrations.find(f.key);
+            if (f.source && reg!=m_registrations.end() && h.sip==f.key.dstIp && h.dip==f.key.srcIp &&
+                (cnp ? h.cnp.destQpn : h.ack.destQpn)==reg->second.sourceQpn) {
+                ++f.nativeCnps; f.lastNative=NowNs(); Event("NATIVE_CNP",f.id,f.nativeCnps);
             }
         }
     }
     return SwitchNode::SwitchReceiveFromDevice(dev,p,h);
 }
-void DciGatewayNode::History::Add(int64_t arrival,uint32_t bytes) {
-    NS_ABORT_MSG_IF(arrival<floor || (!arrivals.empty() && arrival<arrivals.back().time),"R5 reordered managed path");
-    ns3::Add(total,bytes); arrivals.push_back({arrival,bytes,total});
-}
-void DciGatewayNode::History::Prune(int64_t before) {
-    floor=std::max(floor,before);
-    while (!arrivals.empty() && arrivals.front().time<=floor) arrivals.pop_front();
-}
-DciGatewayNode::Prediction DciGatewayNode::History::Replay(int64_t sample,int64_t end,int64_t peakBegin,double q,double net,uint64_t sampledControlled) const {
-    NS_ABORT_MSG_IF(!Covers(sample) || sample>end || !std::isfinite(q+net) || q<0,"invalid R5 history replay");
-    Prediction result{q,0}; int64_t time=sample;
-    auto advance=[&](int64_t next) {
-        if (time<peakBegin && next>=peakBegin)
-            result.peak=std::max(result.peak,std::max(0.0,q-net*(peakBegin-time)*1e-9));
-        q=std::max(0.0,q-net*(next-time)*1e-9); time=next;
-        if (time>=peakBegin) result.peak=std::max(result.peak,q);
+void DciGatewayNode::ReceiveControl(Ptr<Packet> p,const CustomHeader& ip) {
+    Add(m_controlRx,p->GetSize()); auto copy=p->Copy(); copy->RemoveAtStart(ip.GetSerializedSize());
+    H h; auto reject=[&](const char* why) { ++m_rejected; Event("REJECT",0,m_rejected,why); };
+    if (!copy->RemoveHeader(h)) { reject("wire_format"); return; }
+    const auto& v=h.v;
+    if (v[H::SIP]>UINT32_MAX || v[H::DIP]>UINT32_MAX || v[H::QPN]>0xffffff ||
+        v[H::RESOURCE]>UINT32_MAX || v[H::PORT_RESOURCE]>UINT32_MAX) { reject("field_range"); return; }
+    FlowKey key{uint32_t(v[H::SIP]),uint32_t(v[H::DIP]),uint32_t(v[H::QPN])};
+    if (h.type==H::REGISTER || h.type==H::REGISTER_CONFIRM) {
+        if (ip.sip!=key.srcIp || !key.destQpn || !v[H::SRC_QPN] || v[H::SRC_QPN]>0xffffff ||
+            !v[H::CONNECTION] || !v[H::QUERY_ID]) { reject("source_registration"); return; }
+        auto it=m_registrations.find(key);
+        if (h.type==H::REGISTER) {
+            if (it==m_registrations.end() && m_registrations.size()>=m_config.maxFlows) { reject("registration_full"); return; }
+            if (it!=m_registrations.end() && (it->second.sourceQpn!=v[H::SRC_QPN] ||
+                it->second.connection!=v[H::CONNECTION] || v[H::QUERY_ID]<it->second.query)) { reject("registration_conflict"); return; }
+            auto& r=m_registrations[key]; r.sourceQpn=v[H::SRC_QPN]; r.connection=v[H::CONNECTION];
+            r.query=v[H::QUERY_ID]; r.ackSent=NowNs();
+            H reply=h; reply.type=H::REGISTER_ACK; reply.v[H::SAMPLE]=NowNs();
+            Send(reply,Ipv4Address(key.srcIp)); Event("REGISTER",0,r.sourceQpn,"no_data_state_created");
+        } else {
+            if (v[H::SESSION]!=m_config.session || it==m_registrations.end() || it->second.sourceQpn!=v[H::SRC_QPN] ||
+                it->second.connection!=v[H::CONNECTION] || it->second.query!=v[H::QUERY_ID] ||
+                v[H::SAMPLE]!=uint64_t(it->second.ackSent) || NowNs()<it->second.ackSent) { reject("registration_confirmation"); return; }
+            // ACK departure preparation -> source receives/echoes -> A receives.
+            // Includes local queue/serialization/processing; response timer is added separately.
+            it->second.localRtt=(NowNs()-it->second.ackSent)*1e-9;
+            // The source reports its configured RNIC reaction timer in the confirmation.
+            if (v[H::INTERVAL_NS]>uint64_t(Ns(m_config.timeout))) { reject("host_response_timer"); return; }
+            it->second.response=it->second.localRtt+v[H::INTERVAL_NS]*1e-9;
+            it->second.confirmed=true;
+            Event("REGISTER_CONFIRMED",0,it->second.response,"measured_local_round_trip");
+        }
+        return;
+    }
+    if (ip.sip!=ControlAddress(m_peer).Get() || v[H::SESSION]!=m_config.peerSession ||
+        v[H::SAMPLE]>uint64_t(NowNs()) || NowNs()-int64_t(v[H::SAMPLE])>Ns(m_config.timeout)) {
+        reject("peer_session_or_age"); return;
+    }
+    auto observeReverseDelay=[&]() {
+      if (v[H::LINK_RATE] && v[H::SEND]<=uint64_t(NowNs())) {
+        auto serialization=DataRate(v[H::LINK_RATE]).CalculateBytesTxTime(p->GetSize()).GetNanoSeconds();
+        auto base=NowNs()-int64_t(v[H::SEND])-serialization;
+        if (base>=0 && base<=Ns(m_config.timeout)) m_reverseBase=base;
+      }
     };
-    if (sample>=peakBegin) result.peak=q;
-    for (const auto& a:arrivals) {
-        // A sample may precede an arrival at the same ns. Its cumulative controlled
-        // arrivals (including admission drops) disambiguate that event boundary.
-        if (a.time<sample || (a.time==sample && a.cumulative<=sampledControlled)) continue;
-        if (a.time>end) break;
-        advance(a.time); q+=a.bytes;
-        if (time>=peakBegin) result.peak=std::max(result.peak,q);
+    if (h.type==H::PROBE) {
+        if (!v[H::SEQ] || !v[H::LINK_RATE]) { reject("probe"); return; }
+        observeReverseDelay();
+        H reply; reply.type=H::PROBE_REPLY; reply.v[H::SEQ]=v[H::SEQ]; reply.v[H::SAMPLE]=NowNs();
+        reply.v[H::BASE_DELAY_NS]=m_reverseBase; Send(reply,ControlAddress(m_peer)); return;
     }
-    advance(end); result.queue=q; return result;
-}
-double DciGatewayNode::BufferAllowance(const Group& g) const {
-    // Equal policy shares of the configured pool, reduced by all currently occupied queues.
-    // Headroom is deliberately not counted as reusable controller space.
-    uint64_t occupied=0;
-    for (uint32_t i=0;i<GetNDevices();++i) {
-        auto d=DynamicCast<QbbNetDevice>(GetDevice(i)); if (d) occupied+=d->GetQueue()->GetNBytesTotal();
+    if (h.type==H::PROBE_REPLY) {
+        if (v[H::SEQ]<=m_lastProbeReply || v[H::SEQ]>m_probe || v[H::BASE_DELAY_NS]>uint64_t(Ns(m_config.timeout))) {
+            reject("probe_order"); return;
+        }
+        observeReverseDelay(); m_lastProbeReply=v[H::SEQ]; m_forwardBase=v[H::BASE_DELAY_NS];
+        Event("DELAY",0,m_forwardBase,"measured_forward_base_ns"); return;
     }
-    double free=std::max(0.0,double(m_config.bufferBytes)-double(occupied));
-    return std::min(.8*m_config.bufferBytes/m_groups.size(),double(g.Queue())+free/m_groups.size());
-}
-void DciGatewayNode::SampleReceiver(Group& g) {
-    auto now=Simulator::Now().GetNanoSeconds();
-    Simulator::Cancel(g.serviceReport);
-    if (now<=g.lastSample) return; // periodic and transition reports may coincide
-    g.serviceInterval=now-g.lastSample;
-    double dt=g.serviceInterval*1e-9;
-    auto dev=Port(g.port); double capacity=dev->GetDataRate().GetBitRate()/8.0;
-    auto pause=dev->GetQueuePauseTime(g.pg).GetNanoSeconds();
-    auto pauseDelta=pause-g.previousPause;
-    NS_ABORT_MSG_IF(pauseDelta<0 || pauseDelta>g.serviceInterval,"R5 invalid pause accounting");
-    int64_t active=g.serviceInterval-pauseDelta;
-    g.availability=double(active)/g.serviceInterval;
-    bool paused=dev->IsQueuePaused(g.pg), changed=capacity!=g.capacity;
-    bool shared=g.shared || dev->GetQueue()->GetNBytesTotal()>g.Queue();
-    // Queue emptiness is tracked on every dequeue, not inferred from sample endpoints.
-    // Estimate service while unpaused separately from its observed availability.
-    if (changed) g.serviceValid=false;
-    if (!shared) { g.service=capacity; g.serviceValid=true; }
-    else if (!g.emptied && active>0 && !changed) {
-        g.service=std::min(capacity,(g.tx-g.previousTx)/(active*1e-9)); g.serviceValid=true;
+    if (h.type==H::RESOURCE_STATE) {
+        if (v[H::RESOURCE]==0) {
+            if (v[H::SEQ]<=m_pressureSequence) { reject("pressure_sequence"); return; }
+            m_pressureSequence=v[H::SEQ]; m_peerFull=v[H::FLAGS]&H::FULL;
+            m_lastPeerPressure=v[H::SAMPLE]; observeReverseDelay(); RequestControl(PRESSURE); return;
+        }
+        auto old=m_remoteResources.find(v[H::RESOURCE]);
+        if (!v[H::SEQ] || !v[H::CAPACITY] || v[H::SERVICE]>v[H::CAPACITY] || v[H::BUFFER]>m_config.bufferBytes ||
+            v[H::DEPARTED]>v[H::ARRIVED] || v[H::QUEUE]!=v[H::ARRIVED]-v[H::DEPARTED] ||
+            (old==m_remoteResources.end() && m_remoteResources.size()>=2305) ||
+            (old!=m_remoteResources.end() && (v[H::SEQ]<=old->second[H::SEQ] || v[H::SAMPLE]<old->second[H::SAMPLE]))) {
+            reject("resource_state"); return;
+        }
+        m_remoteResources[v[H::RESOURCE]]=v; observeReverseDelay();
+        if ((v[H::FLAGS]&H::PAUSED) || !v[H::SERVICE]) StopResource(v[H::RESOURCE]);
+        RequestControl(RESOURCE_FEEDBACK); return;
     }
-    // An idle shared queue retains its last valid estimate; unknown service starts conservatively.
-    g.service=std::min(g.service,capacity); g.capacity=capacity;
-    g.background=(g.other-g.previousOther)/dt; g.buffer=BufferAllowance(g);
-    Record r{}; r[GROUP]=g.id; r[SEQ]=++g.seq; r[SAMPLE]=now; r[QUEUE]=g.Queue();
-    r[ARRIVED]=g.in; r[DEPARTED]=g.tx; r[DROPPED]=g.drops; r[OTHER]=g.other;
-    double unpausedService=g.serviceValid ? g.service : capacity*m_config.coldFraction;
-    r[SERVICE]=paused ? 0 : uint64_t(unpausedService*g.availability);
-    r[BACKGROUND]=uint64_t(g.background); r[CAPACITY]=uint64_t(capacity); r[BUFFER]=uint64_t(g.buffer);
-    r[FLAGS]=VALID|(paused ? PAUSED : 0)|(shared ? SHARED : 0);
-    r[CONTROLLED]=g.controlled; r[EMPTY]=g.emptied; r[PAUSE_NS]=pauseDelta; r[ORDINAL]=m_ordinal;
-    g.state=r;
-    Event("SAMPLE",g.id,r[SERVICE],paused ? "paused" : (!shared ? "exclusive" : (g.emptied ? "retained" : "backlogged")));
-    g.previousTx=g.tx; g.previousOther=g.other; g.previousPause=pause; g.lastSample=now;
-    g.emptied=g.Queue()==0; g.shared=dev->GetQueue()->GetNBytesTotal()>g.Queue();
-    SendReport(g);
+    auto it=m_data.find(key);
+    if (it==m_data.end()) { reject("no_local_data_state"); return; }
+    auto& f=m_flows.at(it->second);
+    if (!f.source) { reject("flow_role"); return; }
+    // B pushes observations for its independently discovered flow. No query or
+    // echoed A generation is needed: identities are retained for this session.
+    if (h.type!=H::FLOW_STATE || !v[H::GEN] || !v[H::SEQ] || !v[H::RESOURCE] || !v[H::PORT_RESOURCE] ||
+        v[H::SAMPLE]<uint64_t(f.created) || v[H::DEPARTED]>v[H::ARRIVED] ||
+        v[H::QUEUE]!=v[H::ARRIVED]-v[H::DEPARTED] ||
+        (f.have && (v[H::GEN]!=f.remoteGeneration || v[H::SEQ]<=f.state[H::SEQ] ||
+          v[H::SAMPLE]<f.state[H::SAMPLE] || v[H::ARRIVED]<f.state[H::ARRIVED] ||
+          v[H::DEPARTED]<f.state[H::DEPARTED] || v[H::DROPPED]<f.state[H::DROPPED] ||
+          v[H::RESOURCE]!=f.resource || v[H::PORT_RESOURCE]!=f.portResource))) { reject("flow_generation_sequence_or_counters"); return; }
+    f.have=true; f.remoteGeneration=v[H::GEN]; f.resource=v[H::RESOURCE]; f.portResource=v[H::PORT_RESOURCE];
+    f.remoteInput=v[H::BACKGROUND];
+    ValidateForecasts(f,v);
+    observeReverseDelay(); f.state=v; Event("STATE",f.id,v[H::SEQ]); RequestControl(FLOW_FEEDBACK);
 }
-void DciGatewayNode::SendReport(Group& g) {
-    R5Header header; header.state=g.state;
-    auto p=Create<Packet>(); p->AddHeader(header);
-    Ipv4Header ip; ip.SetSource(ControlAddress(GetId())); ip.SetDestination(ControlAddress(g.peer));
-    ip.SetProtocol(249); ip.SetTtl(64); ip.SetPayloadSize(p->GetSize()); p->AddHeader(ip);
-    PppHeader ppp; ppp.SetProtocol(0x0021); p->AddHeader(ppp); SendNetworkControl(p);
-}
-bool DciGatewayNode::ApplyRecord(Group& g,const Record& r) {
-    auto now=Simulator::Now().GetNanoSeconds();
-    if (!g.IsSource() || r[GROUP]!=g.id || !r[SEQ] || r[SAMPLE]>uint64_t(now) ||
-        r[FLAGS]&~uint64_t(VALID|PAUSED|SHARED) || !(r[FLAGS]&VALID) ||
-        r[EMPTY]>1 || !r[CAPACITY] || r[SERVICE]>r[CAPACITY] ||
-        r[ARRIVED]<r[DEPARTED] || r[ARRIVED]-r[DEPARTED]!=r[QUEUE] || r[OTHER]>r[ARRIVED] || r[CONTROLLED]<r[ARRIVED]-r[OTHER] ||
-        r[CONTROLLED]-(r[ARRIVED]-r[OTHER])>r[DROPPED] || r[CONTROLLED]>g.tx ||
-        ((r[FLAGS]&PAUSED) && r[SERVICE]) ||
-        (g.have && (r[SEQ]<=g.state[SEQ] || r[SAMPLE]<=g.state[SAMPLE] ||
-          r[ARRIVED]<g.state[ARRIVED] || r[DEPARTED]<g.state[DEPARTED] ||
-          r[DROPPED]<g.state[DROPPED] || r[OTHER]<g.state[OTHER] || r[CONTROLLED]<g.state[CONTROLLED]))) return false;
-    auto forecast=g.forecasts.find(r[SAMPLE]);
-    if (forecast!=g.forecasts.end()) {
-        double residual=forecast->second-double(r[QUEUE]);
-        Event("RESIDUAL",g.id,residual,"frozen_before_sample");
-        g.badResiduals=std::abs(residual)>m_config.margin ? std::min(3u,g.badResiduals+1) : 0;
-    }
-    g.forecasts.erase(g.forecasts.begin(),g.forecasts.upper_bound(r[SAMPLE]));
-    g.state=r; g.have=true; Event("STATE",g.id,r[SEQ]); return true;
-}
-void DciGatewayNode::ReceiveReport(Ptr<Packet> p,const CustomHeader& h) {
-    Add(m_controlRx,p->GetSize()); auto copy=p->Copy(); PppHeader ppp; Ipv4Header ip; R5Header state;
-    copy->RemoveHeader(ppp); copy->RemoveHeader(ip);
-    if (!copy->RemoveHeader(state)) { ++m_rejected; Event("REJECT",0,m_rejected,"malformed"); return; }
-    auto it=m_groups.find(state.state[GROUP]);
-    if (it==m_groups.end() || h.sip!=ControlAddress(it->second.peer).Get() || !ApplyRecord(it->second,state.state)) {
-        ++m_rejected; Event("REJECT",state.state[GROUP],m_rejected,"identity_or_stale_state");
-    } else if (m_started && m_activation.IsExpired()) {
-        m_activation=Simulator::ScheduleNow(&DciGatewayNode::ActivateSources,this);
+void DciGatewayNode::ValidateForecasts(Flow& f,const Record& v) {
+    // Validate only exact sample times. Replayed actual input never overwrites a frozen plan.
+    std::vector<Arrival> actual;
+    bool loaded=false;
+    std::map<std::tuple<int64_t,int64_t,double,double>,double> replayed;
+    while (!f.forecasts.empty() && f.forecasts.front().end<=int64_t(v[H::SAMPLE])) {
+        auto prediction=f.forecasts.front(); f.forecasts.pop_front();
+        const char* reason=prediction.end!=int64_t(v[H::SAMPLE]) ? "missing_aligned_sample" :
+            !f.history.Covers(prediction.sample) ? "history_expired" :
+            prediction.remoteGeneration!=f.remoteGeneration ? "generation_changed" : "exact_time_conditional";
+        bool valid=prediction.end==int64_t(v[H::SAMPLE]) && f.history.Covers(prediction.sample) &&
+                   prediction.remoteGeneration==f.remoteGeneration;
+        if (valid) ++m_forecastValidated; else ++m_forecastUnavailable;
+        double replay=0;
+        if (valid) {
+            if (!loaded) { actual=Arrivals(f); loaded=true; }
+            auto key=std::make_tuple(prediction.sample,prediction.end,prediction.initial,prediction.service);
+            auto cached=replayed.find(key);
+            if (cached==replayed.end()) cached=replayed.emplace(key,
+                Replay(prediction.sample,prediction.end,prediction.decision,prediction.initial,prediction.service,actual).queue).first;
+            replay=cached->second;
+        }
+        m_predictions<<NowNs()<<','<<GetId()<<','<<prediction.id<<','<<f.id<<','<<f.generation<<','
+            <<f.remoteGeneration<<",VALIDATE,"<<prediction.sample<<','<<prediction.end<<','<<prediction.initial<<','
+            <<prediction.service<<','<<prediction.predicted<<",0,"<<prediction.planned<<','<<v[H::QUEUE]<<','
+            <<replay<<','<<reason<<'\n';
     }
 }
-void DciGatewayNode::UpdateSource(Group& g) {
-    auto now=Simulator::Now().GetNanoSeconds(); auto dev=Port(g.port);
-    const double previousCap=g.candidate;
-    g.capacity=dev->GetDataRate().GetBitRate()/8.0;
-    g.history.Prune(std::max(int64_t(0),now-Ns(m_config.timeout)));
-    g.fresh=g.have && now-int64_t(g.state[SAMPLE])<=Ns(m_config.timeout);
-    g.covered=g.have && g.history.Covers(g.state[SAMPLE]);
-    g.predictionEnd=now+g.propagation.GetNanoSeconds()+dev->GetDataRate().CalculateBytesTxTime(g.frame).GetNanoSeconds();
-    g.predicted={}; g.reason="cold"; g.candidate=g.capacity*m_config.coldFraction;
-    if (!g.have) return;
-    g.service=g.state[SERVICE]; g.background=g.state[BACKGROUND]; g.buffer=g.state[BUFFER];
-    if ((g.state[FLAGS]&PAUSED) || g.service==0) { g.candidate=0; g.reason="service_stopped"; return; }
-    if (!g.fresh || !g.covered) { g.candidate=0; g.reason=!g.fresh ? "stale" : "history_missing"; return; }
-    double net=g.service-g.background;
-    g.predicted=g.history.Replay(g.state[SAMPLE],g.predictionEnd,now,g.state[QUEUE],net,g.state[CONTROLLED]);
-    g.candidate=std::clamp(std::max(0.0,net)-(g.predicted.queue-m_config.qref)/m_config.tau,0.0,g.capacity);
-    g.reason="normal";
-    // Freeze a genuinely future prediction for the next periodic B sample. It is never rewritten.
-    auto next=(now/Ns(m_config.period)+1)*Ns(m_config.period);
-    if (next<=g.predictionEnd && !g.forecasts.count(next))
-        g.forecasts[next]=g.history.Replay(g.state[SAMPLE],next,now,g.state[QUEUE],net,g.state[CONTROLLED]).queue;
-    while (!g.forecasts.empty() && g.forecasts.begin()->first<now-Ns(m_config.timeout)) g.forecasts.erase(g.forecasts.begin());
-    double risk=g.predicted.peak+m_config.margin;
-    if (risk>=.9*g.buffer) { g.peakLimited=true; g.peakSeq=g.state[SEQ]; }
-    else if (g.peakLimited && g.state[SEQ]>g.peakSeq) g.peakLimited=false;
-    if (g.peakLimited || g.badResiduals>=3) {
-        g.candidate=std::min(g.candidate,g.capacity*m_config.conservativeFraction);
-        // Peak risk forbids increasing the controller cap. Port allocations can
-        // be zero merely because the group was idle and must never constrain it.
-        if (g.peakLimited) g.candidate=std::min(g.candidate,previousCap);
-        g.reason=g.peakLimited ? "peak_conservative" : "residual_conservative";
+bool DciGatewayNode::RecordForecast(Flow& f,const Forecast& prediction) {
+    if (f.forecasts.size()>=m_config.maxForecasts) {
+        ++m_forecastRejected;
+        Event("FORECAST_MISSING",f.id,prediction.id,"bounded_pool_new_record");
+        return false; // Never evict or overwrite an outstanding frozen prediction.
     }
-    if (risk>=g.buffer) { g.candidate=0; g.reason="peak_stop"; }
+    if (f.forecasts.empty() || f.forecasts.back().end<=prediction.end) f.forecasts.push_back(prediction);
+    else f.forecasts.insert(std::upper_bound(f.forecasts.begin(),f.forecasts.end(),prediction.end,
+        [](int64_t end,const Forecast& p) { return end<p.end; }),prediction);
+    ++m_forecastCreated; m_forecastPeak=std::max(m_forecastPeak,uint64_t(f.forecasts.size()));
+    return true;
 }
-bool DciGatewayNode::NeedCnp(Group& g,Flow& f,bool emergency,bool trigger,bool draining,int64_t now) {
-    double wait=std::max(m_config.localWait,g.localResponse.GetSeconds());
-    if (f.in==f.previousIn || (!emergency && (!trigger || draining))) return false;
-    auto interval=Ns(emergency ? m_config.cnpInterval : std::max(wait,m_config.cnpInterval));
-    auto last=emergency ? f.lastCnp : std::max(f.lastCnp,f.lastNativeCnp);
-    return last<0 || now-last>=interval;
+void DciGatewayNode::MaintainHistory(Flow& f,int64_t now) {
+    while (!f.forecasts.empty() && now-f.forecasts.front().end>Ns(m_config.timeout)) {
+        ++m_forecastExpired;
+        Event("FORECAST_MISSING",f.id,f.forecasts.front().id,"feedback_timeout"); f.forecasts.pop_front();
+    }
+    // Live control needs the freshness window; validation also needs the original
+    // sample until the aligned observation arrives or its deadline expires.
+    auto before=std::max(int64_t(0),now-Ns(m_config.timeout));
+    for (const auto& prediction:f.forecasts) before=std::min(before,prediction.sample);
+    m_historyCount-=f.history.Prune(before);
 }
-void DciGatewayNode::UpdateBackpressure(Group& g) {
-    auto now=Simulator::Now().GetNanoSeconds();
-    double dt=m_config.localWindow;
-    g.growth=(double(g.in-g.previousLocalIn)-double(g.tx-g.previousLocalTx))/dt;
-    double wait=std::max(m_config.localWait,g.localResponse.GetSeconds());
-    double available=BufferAllowance(g);
-    g.pressure=g.Queue()+std::max(0.0,g.growth)*wait+m_config.margin;
-    double high=std::min(m_config.sourceHigh,.5*available), low=std::min(m_config.sourceLow,.25*available);
-    bool emergency=g.pressure>=available;
-    // A change smaller than one maximum frame per observation window is packet noise.
-    double fallingThreshold=-double(g.frame)/dt;
-    bool trigger=(g.Queue()>=high && g.growth>=fallingThreshold) || (g.growth>0 && g.pressure>=high);
-    bool draining=g.growth<fallingThreshold && !emergency;
-    if (emergency || trigger) g.protecting=true;
-    else if (g.Queue()<=low && g.growth<=0) g.protecting=false;
-    int64_t lastLocalCnp=-1;
-    for (auto id:g.flows) lastLocalCnp=std::max(lastLocalCnp,m_flows.at(id).lastCnp);
-    bool waiting=lastLocalCnp>=0 && now-lastLocalCnp<Ns(wait);
-    Flow* selected=nullptr;
-    double largestGrowth=0;
-    uint64_t largestInput=0;
-    for (auto id:g.flows) {
-        auto& f=m_flows.at(id);
-        uint64_t input=f.in-f.previousIn;
-        double growth=double(input)-double(f.tx-f.previousTx);
-        if (emergency) {
-            if (NeedCnp(g,f,true,trigger,draining,now)) SendNearCnp(f,"emergency");
-        } else if (!waiting && input && (!selected || growth>largestGrowth ||
-            (growth==largestGrowth && (input>largestInput ||
-             (input==largestInput && f.lastCnp<selected->lastCnp))))) {
-            selected=&f; largestGrowth=growth; largestInput=input;
+void DciGatewayNode::SampleReceiver() {
+    Simulator::Cancel(m_serviceReport);
+    const auto now=NowNs(); uint64_t poolQueue=0;
+    // A PFC-triggered sample can coincide with the periodic sample. Publish
+    // one snapshot/pressure sequence per time instant, not two identical ones.
+    if (now<=m_lastReceiverSample) return;
+    m_lastReceiverSample=now;
+    for (uint32_t port=0;port<GetNDevices();++port) if (auto dev=DynamicCast<QbbNetDevice>(GetDevice(port)))
+        poolQueue+=dev->GetQueue()->GetNBytesTotal();
+    std::map<uint32_t,uint64_t> portOther;
+    for (auto& entry:m_resources) {
+        auto& r=entry.second; if (now<=r.sample) continue;
+        auto dev=Port(r.port); const auto elapsed=now-r.sample;
+        const auto pause=dev->GetQueuePauseTime(r.pg).GetNanoSeconds();
+        const auto paused=std::clamp(pause-r.pause,int64_t(0),elapsed);
+        const auto active=elapsed-paused; const double capacity=dev->GetDataRate().GetBitRate()/8.0;
+        bool shared=false;
+        for (const auto& other:m_resources) if (other.second.port==r.port && other.second.pg!=r.pg &&
+             (other.second.out>other.second.lastOut || dev->GetQueue()->GetNBytes(other.second.pg))) shared=true;
+        if (!shared) { r.service=capacity; r.valid=true; }
+        else if (!r.emptied && active>0) { r.service=std::min(capacity,(r.out-r.lastOut)/(active*1e-9)); r.valid=true; }
+        // An empty sample measures demand, not capacity. Cold shared service stays explicitly approximate.
+        if (!r.valid) {
+            unsigned contenders=1;
+            for (const auto& other:m_resources) if (other.second.port==r.port && other.second.pg &&
+                other.second.pg!=r.pg && !dev->IsQueuePaused(other.second.pg) &&
+                (other.second.in>other.second.lastOut || dev->GetQueue()->GetNBytes(other.second.pg))) ++contenders;
+            // Explicit scheduler-based cold estimate; VALID remains false until observed.
+            r.service=capacity/contenders;
+        }
+        Record v{}; v[H::RESOURCE]=r.id; v[H::PORT_RESOURCE]=0x80000000u|r.port;
+        v[H::SEQ]=++r.seq; v[H::SAMPLE]=now; v[H::QUEUE]=dev->GetQueue()->GetNBytes(r.pg);
+        v[H::ARRIVED]=r.in; v[H::DEPARTED]=r.out; v[H::DROPPED]=r.dropped; v[H::OTHER]=r.other;
+        NS_ABORT_MSG_IF(r.out>r.in || r.in-r.out!=v[H::QUEUE],"R5 physical queue conservation");
+        v[H::SERVICE]=dev->IsQueuePaused(r.pg) ? 0 : uint64_t(r.service);
+        v[H::BACKGROUND]=uint64_t((r.other-r.lastOther)/(elapsed*1e-9));
+        v[H::CAPACITY]=uint64_t(capacity); v[H::BUFFER]=m_config.bufferBytes; v[H::POOL_QUEUE]=poolQueue;
+        v[H::UNPAUSED]=uint64_t(r.service); v[H::PAUSE_NS]=paused; v[H::INTERVAL_NS]=elapsed;
+        v[H::FLAGS]=(r.valid ? H::VALID : 0)|(dev->IsQueuePaused(r.pg) ? H::PAUSED : 0)|
+                    (r.emptied ? H::EMPTIED : 0)|(shared ? H::APPROXIMATE : 0);
+        r.state=v; portOther[r.port]+=v[H::BACKGROUND];
+        if (r.pg && r.in) {
+            H h; h.type=H::RESOURCE_STATE; h.v=v; Send(h,ControlAddress(m_peer));
+            m_resourceLog<<now<<','<<GetId()<<','<<r.id<<','<<r.port<<','<<r.pg<<','<<v[H::QUEUE]<<','
+                <<r.in<<','<<r.out<<','<<r.other<<','<<r.dropped<<','<<v[H::SERVICE]<<','<<v[H::CAPACITY]<<','
+                <<v[H::BACKGROUND]<<','<<paused<<','<<elapsed<<','<<v[H::FLAGS]<<'\n';
         }
     }
-    // One ordinary action per group response round; observe its effect before
-    // reducing additional QPs. Emergency pressure still reaches every contributor.
-    // Select the main contributor before checking its response wait: a pending
-    // native CNP must not redirect ordinary pressure onto a smaller contributor.
-    if (selected && NeedCnp(g,*selected,false,trigger,draining,now)) SendNearCnp(*selected,"local_pressure");
-    for (auto id:g.flows) {
-        auto& f=m_flows.at(id); f.previousIn=f.in; f.previousTx=f.tx;
+    for (const auto& item:portOther) {
+        H h; h.type=H::RESOURCE_STATE; auto& v=h.v;
+        v[H::RESOURCE]=0x80000000u|item.first; v[H::SEQ]=uint64_t(now)+1; v[H::SAMPLE]=now;
+        v[H::CAPACITY]=Port(item.first)->GetDataRate().GetBitRate()/8;
+        v[H::SERVICE]=v[H::CAPACITY]; v[H::BACKGROUND]=item.second;
+        v[H::BUFFER]=m_config.bufferBytes; v[H::POOL_QUEUE]=poolQueue; v[H::FLAGS]=H::VALID|H::PORT;
+        Send(h,ControlAddress(m_peer));
     }
-    g.previousLocalIn=g.in; g.previousLocalTx=g.tx;
+    for (auto& item:m_resources) {
+        auto& r=item.second;
+        if (now<=r.sample) continue;
+        r.sample=now; r.lastOut=r.out; r.lastOther=r.other;
+        r.pause=Port(r.port)->GetQueuePauseTime(r.pg).GetNanoSeconds(); r.emptied=!Port(r.port)->GetQueue()->GetNBytes(r.pg);
+    }
+    std::vector<uint32_t> receivers;
+    for (auto& item:m_flows) if (!item.second.source) {
+        auto& f=item.second; receivers.push_back(f.id);
+        if (now>f.supplySample) {
+            const auto seconds=(now-f.supplySample)*1e-9;
+            f.supply=(f.in-f.supplyIn)/seconds; f.service=(f.dequeued-f.previousTx)/seconds;
+            f.supplyIn=f.in; f.previousTx=f.dequeued; f.supplySample=now;
+        }
+    }
+    for (uint32_t i=0;i<std::min<size_t>(m_config.maxReports,receivers.size());++i) {
+        auto& f=m_flows.at(receivers[(m_reportCursor+i)%receivers.size()]);
+        H h; h.type=H::FLOW_STATE; h.v=FlowRecord(f); Send(h,ControlAddress(m_peer));
+    }
+    if (!receivers.empty()) m_reportCursor=(m_reportCursor+m_config.maxReports)%receivers.size();
+    H pressure; pressure.type=H::RESOURCE_STATE; pressure.v[H::SAMPLE]=now; pressure.v[H::SEQ]=uint64_t(now)+1;
+    pressure.v[H::FLAGS]=m_flows.size()>=m_config.maxFlows ? H::FULL : 0; Send(pressure,ControlAddress(m_peer));
 }
-void DciGatewayNode::SendNearCnp(Flow& f,const char* reason) {
-    // The sender QP is (source IP, source UDP port, PG); never substitute the destination QP.
-    auto p=Create<Packet>(); p->AddHeader(CnHeader(f.reg.sport,f.reg.pg,3,1,1));
-    Ipv4Header ip; ip.SetSource(Ipv4Address(f.reg.dip)); ip.SetDestination(Ipv4Address(f.reg.sip));
-    ip.SetProtocol(0xff); ip.SetTtl(64); ip.SetPayloadSize(p->GetSize()); p->AddHeader(ip);
-    PppHeader ppp; ppp.SetProtocol(0x0021); p->AddHeader(ppp); SendNetworkControl(p);
-    f.lastCnp=Simulator::Now().GetNanoSeconds(); ++f.nearCnps; Event("NEAR_CNP",f.reg.id,f.nearCnps,reason);
+void DciGatewayNode::PeriodicReport() {
+    SampleReceiver();
+    m_report=Simulator::Schedule(Seconds(m_config.period),&DciGatewayNode::PeriodicReport,this);
+}
+void DciGatewayNode::History::Add(int64_t time,uint32_t bytes) {
+    // Runtime delay estimates may change; preserve the estimate attached at TX.
+    if (arrivals.empty() || arrivals.back().time<=time) arrivals.push_back({time,bytes});
+    else arrivals.insert(std::upper_bound(arrivals.begin(),arrivals.end(),time,
+        [](int64_t t,const Arrival& a) { return t<a.time; }),{time,bytes});
+}
+size_t DciGatewayNode::History::Prune(int64_t before) {
+    floor=std::max(floor,before); size_t count=0;
+    while (!arrivals.empty() && arrivals.front().time<before) { arrivals.pop_front(); ++count; }
+    return count;
+}
+DciGatewayNode::Prediction DciGatewayNode::Replay(int64_t sample,int64_t end,int64_t peakBegin,
+        double queue,double service,const std::vector<Arrival>& arrivals) {
+    NS_ABORT_MSG_IF(sample>end || queue<0 || !std::isfinite(queue+service),"invalid replay");
+    double q=queue, peak=sample>=peakBegin ? q : 0; auto time=sample;
+    auto advance=[&](int64_t next) {
+        if (time<peakBegin && next>=peakBegin) peak=std::max(peak,std::max(0.0,q-service*(peakBegin-time)*1e-9));
+        q=std::max(0.0,q-service*(next-time)*1e-9); time=next;
+        if (time>=peakBegin) peak=std::max(peak,q);
+    };
+    // D8 deferred: events exactly at sample time are conservatively included.
+    // No comparison of unrelated A/B cumulative origins is used.
+    auto first=std::lower_bound(arrivals.begin(),arrivals.end(),sample,
+        [](const Arrival& a,int64_t t) { return a.time<t; });
+    for (auto it=first;it!=arrivals.end() && it->time<=end;++it) {
+        advance(it->time); q+=it->bytes; if (time>=peakBegin) peak=std::max(peak,q);
+    }
+    advance(end); return {q,peak};
+}
+std::vector<DciGatewayNode::Arrival> DciGatewayNode::Arrivals(const Flow& f) {
+    ++m_historyCopies; m_historyCopiedRecords+=f.history.arrivals.size();
+    return {f.history.arrivals.begin(),f.history.arrivals.end()};
+}
+std::map<uint32_t,double> DciGatewayNode::Allocate(const std::vector<Allocation>& flows,
+        const std::map<uint64_t,double>& budgets) {
+    std::map<uint32_t,double> rates; std::set<uint32_t> open;
+    for (const auto& f:flows) {
+        NS_ABORT_MSG_IF(!std::isfinite(f.cap) || f.cap<0,"invalid allocation cap");
+        rates[f.id]=0; if (f.cap>0) open.insert(f.id);
+    }
+    for (size_t round=0;round<=flows.size() && !open.empty();++round) {
+        double step=std::numeric_limits<double>::max();
+        std::map<uint64_t,double> used; std::map<uint64_t,size_t> active;
+        for (const auto& f:flows) {
+            if (open.count(f.id)) step=std::min(step,std::max(0.0,f.cap-rates[f.id]));
+            for (auto resource:f.resources) {
+                used[resource]+=rates[f.id]; if (open.count(f.id)) ++active[resource];
+            }
+        }
+        for (const auto& a:active) step=std::min(step,std::max(0.0,budgets.at(a.first)-used[a.first])/a.second);
+        for (auto id:open) rates[id]+=step;
+        std::set<uint64_t> exhausted;
+        for (const auto& a:active) if (used[a.first]+a.second*step>=budgets.at(a.first)-1e-6) exhausted.insert(a.first);
+        size_t removed=0;
+        for (const auto& f:flows) if (open.count(f.id)) {
+            bool freeze=rates[f.id]>=f.cap-1e-6;
+            for (auto resource:f.resources) freeze=freeze || exhausted.count(resource);
+            if (freeze) { open.erase(f.id); ++removed; }
+        }
+        NS_ABORT_MSG_IF(!removed,"max-min allocator failed to make progress");
+    }
+    return rates;
+}
+bool DciGatewayNode::FutureDepartures(int64_t end,std::map<uint32_t,std::vector<Arrival>>& result) {
+    struct Model {
+        uint32_t id, queue, burst;
+        double tokens, rate, supply, generated=0;
+        int64_t updated;
+        const std::deque<uint32_t>* packets;
+        size_t next=0;
+        bool supplied=false;
+        bool Empty() const { return next==packets->size() && !supplied; }
+        uint32_t Head(uint32_t frame) const { return next<packets->size() ? (*packets)[next] : frame; }
+    };
+    ++m_futureModels;
+    std::vector<Model> flows; const auto now=NowNs(); auto dev=Port(m_wan);
+    const auto rate=dev->GetDataRate();
+    const auto frameTime=rate.CalculateBytesTxTime(m_frame).GetNanoSeconds();
+    const auto gap=dev->GetTransmitGap().GetNanoSeconds();
+    for (auto& item:m_flows) {
+        auto& f=item.second;
+        if (!f.source || f.target<=0 || f.queue<8 || dev->IsQueuePaused(f.pg) || !Eligible(f.id)) continue;
+        auto bucket=dev->ReadInjectionSnapshot(f.id);
+        flows.push_back({f.id,f.queue,bucket.burst,bucket.tokens,f.target,f.supply,0,now,&f.packets});
+    }
+    if (flows.empty()) return true;
+    std::sort(flows.begin(),flows.end(),[](const Model& a,const Model& b) { return a.queue<b.queue; });
+    uint32_t cursor=dev->GetQueue()->GetRoundRobinCursor();
+    int64_t time=std::max(now,dev->GetTransmitAvailable().GetNanoSeconds())+
+        dev->GetDataRate().CalculateBytesTxTime(dev->GetQueue()->GetNBytes(0)).GetNanoSeconds();
+    uint32_t count=0;
+    while (time<=end) {
+        int64_t wake=INT64_MAX; Model* selected=nullptr;
+        for (auto& model:flows) {
+            double dt=(time-model.updated)*1e-9;
+            model.tokens=std::min(double(model.burst),model.tokens+model.rate*dt);
+            model.generated+=model.supply*dt; model.updated=time;
+            if (model.Empty() && model.generated>=m_frame) {
+                // New supply arrives only after its modeled interarrival time.
+                model.supplied=true; model.generated-=m_frame;
+            }
+            uint32_t bytes=model.Head(m_frame);
+            double waiting=model.Empty() ? (model.supply>0 ? std::max(0.0,(bytes-model.generated)/model.supply) : INFINITY) : 0;
+            waiting=std::max(waiting,std::max(0.0,(bytes-model.tokens)/model.rate));
+            if (!model.Empty() && model.tokens+1e-6>=bytes) {
+                if (!selected || (model.queue>cursor && selected->queue<=cursor) ||
+                    ((model.queue>cursor)==(selected->queue>cursor) && model.queue<selected->queue)) selected=&model;
+            } else if (std::isfinite(waiting) && waiting<=(end-time)*1e-9)
+                wake=std::min(wake,time+std::max(int64_t(1),int64_t(std::ceil(waiting*1e9))));
+        }
+        if (!selected) { if (wake==INT64_MAX) break; time=wake; continue; }
+        if (++count>m_config.maxFuturePackets) return false;
+        auto bytes=selected->Head(m_frame);
+        if (selected->next<selected->packets->size()) ++selected->next; else selected->supplied=false;
+        ++m_futurePackets;
+        selected->tokens=std::max(0.0,selected->tokens-bytes); cursor=selected->queue;
+        result[selected->id].push_back({time,bytes});
+        time+=std::max(int64_t(1),(bytes==m_frame ? frameTime : rate.CalculateBytesTxTime(bytes).GetNanoSeconds())+gap);
+    }
+    return true;
+}
+void DciGatewayNode::RequestControl(Trigger trigger) {
+    ++m_triggers[trigger];
+    if (m_controlPending) ++m_coalesced;
+    m_controlPending=true;
+    // Packet arrival and transmit completion already wake the device scheduler.
+    // Keep the current allocation until the next control tick; never mint credit
+    // or rerun the full prediction from the packet path.
+}
+void DciGatewayNode::StopResource(uint32_t resource) {
+    bool changed=false;
+    std::vector<QbbNetDevice::InjectionControl> controls;
+    for (auto& item:m_flows) {
+        auto& f=item.second; if (!f.source) continue;
+        if (f.resource==resource && f.target>0) {
+            f.target=0; changed=true; ++m_safetyStops;
+            Event("CONTROL",f.id,0,"remote_service_stopped_immediate");
+        }
+        controls.push_back({f.id,f.target});
+    }
+    // Only decreases are allowed between decisions. Recovery and redistribution
+    // use the normal predictor/allocator on the next tick.
+    if (changed) Port(m_wan)->ApplyInjectionControls(controls);
 }
 void DciGatewayNode::ActivateSources() {
-    // Recheck safety constraints before reopening, including state freshness.
-    for (auto& e:m_groups) if (e.second.IsSource()) UpdateSource(e.second);
-    CommitControls();
-}
-void DciGatewayNode::CommitControls() {
-    for (const auto& p:m_sourcePorts) {
-        // Max-min group caps on one physical WAN port. Empty groups reserve no rate.
-        std::vector<uint32_t> pending; double remaining=Port(p.first)->GetDataRate().GetBitRate()/8.0;
-        for (auto id:p.second) { auto& g=m_groups.at(id); g.target=0; if (g.Queue()) pending.push_back(id); }
-        while (!pending.empty()) {
-            double share=remaining/pending.size(); bool removed=false;
-            for (auto it=pending.begin();it!=pending.end();) {
-                auto& g=m_groups.at(*it);
-                if (g.candidate<=share) { g.target=g.candidate; remaining=std::max(0.0,remaining-g.target); it=pending.erase(it); removed=true; }
-                else ++it;
+    const auto now=NowNs(); const auto dev=Port(m_wan); ++m_decision;
+    const double capacity=dev->GetDataRate().GetBitRate()/8.0;
+    const int64_t df=m_forwardBase+dev->GetDataRate().CalculateBytesTxTime(m_frame).GetNanoSeconds();
+    const int64_t db=m_reverseBase+dev->GetDataRate().CalculateBytesTxTime(ControlFrameBytes()).GetNanoSeconds();
+    const int64_t horizon=now+df+db, effective=now+df;
+    std::map<uint32_t,std::vector<uint32_t>> members;
+    std::map<uint32_t,std::vector<Arrival>> histories;
+    for (auto& item:m_flows) if (item.second.source) {
+        auto& f=item.second; f.target=0;
+        if (f.have) members[f.resource].push_back(f.id);
+        histories[f.id]=Arrivals(f);
+    }
+    // Each source history and each resource history is materialized once per
+    // decision, including idle flows whose packets are still in flight.
+    std::map<uint32_t,bool> covered;
+    std::map<uint32_t,Prediction> historyRisk;
+    auto byTime=[](const Arrival& a,const Arrival& b) { return a.time<b.time; };
+    for (const auto& item:members) {
+        auto r=m_remoteResources.find(item.first); if (r==m_remoteResources.end()) continue;
+        std::vector<Arrival> all; covered[item.first]=true;
+        for (auto id:item.second) {
+            covered[item.first]=covered[item.first] && m_flows.at(id).history.Covers(r->second[H::SAMPLE]);
+            const auto& events=histories.at(id); all.insert(all.end(),events.begin(),events.end());
+        }
+        std::stable_sort(all.begin(),all.end(),byTime);
+        if (covered[item.first]) historyRisk[item.first]=Replay(r->second[H::SAMPLE],horizon,now,
+            r->second[H::QUEUE],double(r->second[H::SERVICE])-r->second[H::BACKGROUND],all);
+    }
+    std::vector<Allocation> eligible;
+    // Resource namespaces in the allocator: A=0, B IDs in 32 bits, destination above 2^32.
+    std::map<uint64_t,double> budgets{{0,capacity}};
+    for (auto& item:m_flows) {
+        auto& f=item.second; if (!f.source) continue;
+        f.candidate=capacity; f.reason="startup"; f.service=0; f.qref=0;
+        if (!f.Queue()) { f.reason="idle"; continue; }
+        if (!Eligible(f.id)) { f.candidate=0; f.reason="history_full"; }
+        if (dev->IsQueuePaused(f.pg)) { f.candidate=0; f.reason="local_pfc"; }
+        Allocation entry{f.id,f.candidate,{0}};
+        if (!f.have && m_peerFull && now-m_lastPeerPressure<=Ns(m_config.timeout)) {
+            f.candidate=0; f.reason="peer_identity_full";
+        }
+        if (f.have) {
+            auto resource=m_remoteResources.find(f.resource), port=m_remoteResources.find(f.portResource);
+            bool fresh=now-int64_t(f.state[H::SAMPLE])<=Ns(m_config.timeout) && resource!=m_remoteResources.end() &&
+                port!=m_remoteResources.end() && now-int64_t(resource->second[H::SAMPLE])<=Ns(m_config.timeout) &&
+                now-int64_t(port->second[H::SAMPLE])<=Ns(m_config.timeout);
+            if (!fresh || !f.history.Covers(f.state[H::SAMPLE])) {
+                f.candidate=0; f.reason=fresh ? "history_missing" : "stale_state";
+            } else {
+                const auto& r=resource->second; const auto& p=port->second;
+                auto net=std::max(0.0,double(r[H::SERVICE])-double(r[H::BACKGROUND]));
+                double totalWeight=0; unsigned activeMembers=0;
+                for (auto id:members[f.resource]) {
+                    const auto& other=m_flows.at(id);
+                    if (other.Queue() || other.state[H::QUEUE] || other.remoteInput>0) {
+                        totalWeight+=std::max(double(m_frame),double(other.state[H::QUEUE])+other.remoteInput*m_config.period);
+                        ++activeMembers;
+                    }
+                }
+                // Recent FIFO mixture is an approximation, not a B fair-service promise.
+                double weight=std::max(double(m_frame),double(f.state[H::QUEUE])+f.remoteInput*m_config.period);
+                f.service=net*weight/totalWeight;
+                f.qref=m_config.qref/std::max(1u,activeMembers);
+                auto atEffective=Replay(f.state[H::SAMPLE],effective,now,f.state[H::QUEUE],f.service,histories[f.id]);
+                f.candidate=db>0 ? std::clamp(f.service+(f.qref-atEffective.queue)/(db*1e-9),0.0,capacity) : 0;
+                f.reason=db>0 ? "normal" : "uncontrollable_horizon";
+                if (!(r[H::FLAGS]&H::VALID)) {
+                    f.candidate=std::min(f.candidate,capacity*m_config.conservativeFraction); f.reason="service_approximation";
+                }
+                if ((r[H::FLAGS]&H::PAUSED) || !r[H::SERVICE]) { f.candidate=0; f.reason="remote_service_stopped"; }
+                budgets[f.resource]=net;
+                budgets[f.portResource]=std::max(0.0,double(p[H::CAPACITY])-double(p[H::BACKGROUND]));
+                entry.resources.push_back(f.resource); entry.resources.push_back(f.portResource);
+                // Preserve existing protection of history-only, unavoidable risk.
+                const auto risk=historyRisk[f.resource];
+                double available=std::max(0.0,double(r[H::BUFFER])-double(r[H::POOL_QUEUE])+double(r[H::QUEUE]));
+                if (!covered[f.resource] || risk.peak+m_config.margin>=available) {
+                    f.candidate=0; f.reason=covered[f.resource] ? "unavoidable_peak" : "resource_history_missing";
+                }
             }
-            if (!removed) { for (auto id:pending) m_groups.at(id).target=share; break; }
         }
-        std::vector<QbbNetDevice::InjectionControl> controls;
-        for (auto id:p.second) {
-            const auto& g=m_groups.at(id); controls.push_back({id,g.target});
-            Event("CONTROL",id,g.target,g.reason);
+        if (!Eligible(f.id)) { f.candidate=0; f.reason="history_full"; }
+        if (dev->IsQueuePaused(f.pg)) { f.candidate=0; f.reason="local_pfc"; }
+        auto dest=m_destinationBudgets.find(f.key.dstIp);
+        if (dest!=m_destinationBudgets.end()) {
+            uint64_t resource=(uint64_t(1)<<32)|f.key.dstIp;
+            budgets[resource]=dest->second; entry.resources.push_back(resource);
         }
-        Port(p.first)->ApplyInjectionControls(controls);
+        entry.cap=f.candidate; eligible.push_back(entry);
     }
+    auto rates=Allocate(eligible,budgets);
+    for (auto& item:m_flows) if (item.second.source && rates.count(item.first)) item.second.target=rates[item.first];
+    std::map<uint32_t,std::vector<Arrival>> future;
+    bool futureValid=FutureDepartures(now+db,future);
+    if (!futureValid) {
+        for (auto& item:m_flows) if (item.second.source) { item.second.target=0; item.second.reason="future_model_bound"; }
+        future.clear(); Event("MODEL_LIMIT",0,m_config.maxFuturePackets);
+    }
+    // Map future departures to arrivals once, then merge with sorted history.
+    // The fixed propagation base and serialized non-overlapping transmissions
+    // make future arrivals ordered, including short tail packets.
+    std::map<uint32_t,std::vector<Arrival>> plannedFlows,resourcePlans;
+    const auto linkRate=dev->GetDataRate();
+    const auto frameTime=linkRate.CalculateBytesTxTime(m_frame).GetNanoSeconds();
+    for (const auto& item:histories) {
+        auto& all=plannedFlows[item.first]; all=item.second;
+        const auto split=all.size();
+        for (auto event:future[item.first]) {
+            event.time+=m_forwardBase+(event.bytes==m_frame ? frameTime : linkRate.CalculateBytesTxTime(event.bytes).GetNanoSeconds());
+            all.push_back(event);
+        }
+        std::inplace_merge(all.begin(),all.begin()+split,all.end(),byTime);
+    }
+    for (const auto& item:members) {
+        auto& all=resourcePlans[item.first];
+        for (auto id:item.second) {
+            const auto& events=plannedFlows.at(id); all.insert(all.end(),events.begin(),events.end());
+        }
+        std::stable_sort(all.begin(),all.end(),byTime);
+    }
+    // D4: observe the final plan's peak, without introducing an extra iterative
+    // limiter or a new shared startup/recovery permission mechanism.
+    for (const auto& item:members) {
+        auto resource=m_remoteResources.find(item.first); if (resource==m_remoteResources.end()) continue;
+        const auto& r=resource->second;
+        if (now-int64_t(r[H::SAMPLE])>Ns(m_config.timeout)) continue;
+        const auto& all=resourcePlans.at(item.first);
+        auto prediction=Replay(r[H::SAMPLE],horizon,now,r[H::QUEUE],double(r[H::SERVICE])-r[H::BACKGROUND],all);
+        Event("RESOURCE_PLAN_PEAK",item.first,prediction.peak,"model_only_no_joint_burst_guarantee");
+    }
+    // Pool peak at common times, not a sum of independently attained queue peaks.
+    struct PoolQueue { double queue, net; };
+    struct PoolArrival { int64_t time; uint32_t resource, bytes; };
+    std::map<uint32_t,PoolQueue> pool;
+    std::vector<PoolArrival> poolArrivals;
+    int64_t poolSample=-1; double sampledQueues=0, poolTotal=0; bool poolValid=!members.empty();
+    for (const auto& item:members) {
+        auto resource=m_remoteResources.find(item.first);
+        if (resource==m_remoteResources.end()) { poolValid=false; break; }
+        const auto& r=resource->second;
+        if (poolSample<0) { poolSample=r[H::SAMPLE]; poolTotal=r[H::POOL_QUEUE]; }
+        if (int64_t(r[H::SAMPLE])!=poolSample || now-poolSample>Ns(m_config.timeout)) { poolValid=false; break; }
+        const auto& all=resourcePlans.at(item.first);
+        for (auto id:item.second) if (!m_flows.at(id).history.Covers(poolSample)) poolValid=false;
+        double net=double(r[H::SERVICE])-r[H::BACKGROUND];
+        pool[item.first]={Replay(poolSample,now,now,r[H::QUEUE],net,all).queue,net};
+        sampledQueues+=r[H::QUEUE];
+        for (auto event:all) if (event.time>now && event.time<=horizon) poolArrivals.push_back({event.time,item.first,event.bytes});
+    }
+    if (poolValid) {
+        std::stable_sort(poolArrivals.begin(),poolArrivals.end(),[](const PoolArrival& a,const PoolArrival& b){ return a.time<b.time; });
+        double outside=std::max(0.0,poolTotal-sampledQueues), peak=outside; int64_t time=now;
+        for (const auto& q:pool) peak+=q.second.queue;
+        auto advance=[&](int64_t next) {
+            for (auto& q:pool) q.second.queue=std::max(0.0,q.second.queue-q.second.net*(next-time)*1e-9);
+            time=next;
+        };
+        for (const auto& event:poolArrivals) {
+            advance(event.time); pool[event.resource].queue+=event.bytes;
+            double total=outside; for (const auto& q:pool) total+=q.second.queue;
+            peak=std::max(peak,total);
+        }
+        advance(horizon); double total=outside; for (const auto& q:pool) total+=q.second.queue;
+        Event("POOL_PLAN_PEAK",0,std::max(peak,total),"unmodelled_occupancy_held_constant");
+    } else if (!members.empty()) Event("POOL_PLAN_UNKNOWN",0,0,"unaligned_resource_samples_or_history");
+    std::vector<QbbNetDevice::InjectionControl> controls;
+    for (auto& item:m_flows) {
+        auto& f=item.second; if (!f.source) continue;
+        auto bucket=dev->ReadInjectionSnapshot(f.id);
+        if (f.have && f.Queue() && f.history.Covers(f.state[H::SAMPLE]) && now-int64_t(f.state[H::SAMPLE])<=Ns(m_config.timeout)) {
+            const auto& all=plannedFlows.at(f.id);
+            auto prediction=Replay(f.state[H::SAMPLE],horizon,now,f.state[H::QUEUE],f.service,all);
+            double planned=0; for (auto a:future[f.id]) planned+=a.bytes;
+            m_predictions<<std::setprecision(17)<<now<<','<<GetId()<<','<<m_decision<<','<<f.id<<','<<f.generation<<','
+                <<f.remoteGeneration<<",FREEZE,"<<f.state[H::SAMPLE]<<','<<horizon<<','<<f.state[H::QUEUE]<<','
+                <<f.service<<','<<prediction.queue<<','<<prediction.peak<<','<<planned<<",,,conditional_fifo_mixture\n";
+            // A checkpoint on the advertised periodic grid can be checked by a
+            // later FLOW_STATE. F itself remains frozen above, never replaced.
+            auto checkTime=(horizon/Ns(m_config.period))*Ns(m_config.period);
+            if (checkTime>now) {
+                auto check=Replay(f.state[H::SAMPLE],checkTime,now,f.state[H::QUEUE],f.service,all);
+                bool stored=RecordForecast(f,{m_decision,now,int64_t(f.state[H::SAMPLE]),checkTime,
+                    double(f.state[H::QUEUE]),f.service,check.queue,planned,f.remoteGeneration});
+                if (stored) m_predictions<<now<<','<<GetId()<<','<<m_decision<<','<<f.id<<','<<f.generation<<','
+                    <<f.remoteGeneration<<",CHECKPOINT,"<<f.state[H::SAMPLE]<<','<<checkTime<<','<<f.state[H::QUEUE]<<','
+                    <<f.service<<','<<check.queue<<','<<check.peak<<','<<planned<<",,,periodic_sample_grid\n";
+            }
+        }
+        m_log<<std::setprecision(17)<<now<<','<<GetId()<<','<<m_decision<<','<<f.id<<','<<f.generation<<','
+            <<f.remoteGeneration<<','<<f.resource<<','<<f.portResource<<','<<f.Queue()<<','<<f.candidate<<','<<f.target<<','
+            <<bucket.tokens<<','<<bucket.burst<<','<<f.supply<<','<<f.service<<','<<f.state[H::SAMPLE]<<','
+            <<f.state[H::QUEUE]<<','<<df<<','<<db<<','<<f.reason<<'\n';
+        controls.push_back({f.id,f.target}); Event("CONTROL",f.id,f.target,f.reason);
+    }
+    dev->ApplyInjectionControls(controls);
+    ReleaseEmptyQueues();
 }
-void DciGatewayNode::WriteSamples() {
-    auto now=Simulator::Now().GetNanoSeconds();
-    for (const auto& e:m_groups) {
-        const auto& g=e.second; const auto& r=g.state;
-        m_log << std::setprecision(17) << now << ',' << GetId() << ',' << ++m_ordinal << ',' << (g.IsSource() ? "A" : "B")
-            << ',' << g.id << ',' << g.peer << ',' << g.port << ',' << g.pg << ',' << g.Queue() << ',' << g.in << ',' << g.tx
-            << ',' << g.drops << ',' << g.other << ',' << (g.IsSource() ? g.service : double(r[SERVICE])) << ',' << g.background << ',' << g.capacity << ',' << g.buffer
-            << ',' << g.target << ',' << g.candidate << ',' << g.predicted.queue << ',' << g.predicted.peak << ',' << g.predictionEnd
-            << ',' << g.fresh << ',' << g.covered << ',' << g.reason << ',' << r[SEQ] << ',' << r[SAMPLE] << ',' << r[ORDINAL]
-            << ',' << r[QUEUE] << ',' << r[ARRIVED] << ',' << r[DEPARTED] << ',' << g.pressure << ',' << g.growth << ',' << g.protecting
-            << ',' << g.badResiduals << ',' << r[FLAGS] << ',' << r[EMPTY] << ',' << r[PAUSE_NS] << ',' << r[CONTROLLED]
-            << ',' << g.serviceInterval << ',' << (g.IsSource() ? 0 : g.service) << ',' << (g.IsSource() ? 0 : g.availability) << '\n';
+void DciGatewayNode::SendNearCnp(Flow& f,const char* reason) {
+    auto it=m_registrations.find(f.key);
+    if (it==m_registrations.end() || !it->second.confirmed) return;
+    CnHeader header(f.sport,f.pg,3,1,1); header.destQpn=it->second.sourceQpn;
+    auto packet=Create<Packet>(); packet->AddHeader(header);
+    Ipv4Header ip; ip.SetSource(Ipv4Address(f.key.dstIp)); ip.SetDestination(Ipv4Address(f.key.srcIp));
+    ip.SetProtocol(0xff); ip.SetTtl(64); ip.SetPayloadSize(packet->GetSize()); packet->AddHeader(ip);
+    PppHeader ppp; ppp.SetProtocol(0x0021); packet->AddHeader(ppp); SendNetworkControl(packet);
+    f.responsePending=true; f.responseBaseline=f.supply;
+    f.lastCnp=NowNs(); m_lastLocalCnp=NowNs(); ++f.nearCnps; Event("NEAR_CNP",f.id,f.nearCnps,reason);
+}
+void DciGatewayNode::UpdateBackpressure() {
+    auto now=NowNs(); if (now<=m_lastBackpressure) return;
+    double dt=(now-m_lastBackpressure)*1e-9, growth=0, queue=0, occupied=0, wait=m_config.localWait;
+    for (uint32_t i=0;i<GetNDevices();++i) if (auto d=DynamicCast<QbbNetDevice>(GetDevice(i))) occupied+=d->GetQueue()->GetNBytesTotal();
+    for (const auto& item:m_flows) if (item.second.source) {
+        const auto& f=item.second; queue+=f.Queue(); growth+=(double(f.in-f.previousIn)-double(f.dequeued-f.previousTx))/dt;
+        auto reg=m_registrations.find(f.key);
+        if (reg!=m_registrations.end()) wait=std::max(wait,reg->second.response);
     }
+    double available=std::max(0.0,double(m_config.bufferBytes)-occupied+queue);
+    double pressure=queue+std::max(0.0,growth)*wait+m_config.margin;
+    double high=std::min(m_config.sourceHigh,.5*available), low=std::min(m_config.sourceLow,.25*available);
+    bool emergency=pressure>=available;
+    double falling=-double(m_frame)/dt;
+    bool trigger=(queue>=high && growth>=falling) || (growth>0 && pressure>=high);
+    bool draining=growth<falling && !emergency;
+    const bool wasActive=m_backpressureActive;
+    if (!emergency && queue<low && pressure<high) m_backpressureActive=false;
+    else if (trigger || emergency) m_backpressureActive=true;
+    if (wasActive!=m_backpressureActive)
+        Event(m_backpressureActive ? "BACKPRESSURE_ENTER" : "BACKPRESSURE_EXIT",0,queue);
+    Event("PRESSURE",0,pressure,emergency ? "emergency" : (draining ? "draining" : (queue<low ? "below_low" : "observe")));
+    Flow* selected=nullptr; double largest=-INFINITY;
+    for (auto& item:m_flows) {
+        auto& f=item.second; if (!f.source || f.in==f.previousIn) continue;
+        double contribution=double(f.in-f.previousIn)-double(f.dequeued-f.previousTx);
+        if (emergency) {
+            if (f.lastCnp<0 || now-f.lastCnp>=Ns(m_config.cnpInterval)) SendNearCnp(f,"emergency");
+        } else if (!selected || contribution>largest) { selected=&f; largest=contribution; }
+    }
+    if (selected && !emergency && m_backpressureActive && !draining &&
+        (m_lastLocalCnp<0 || now-m_lastLocalCnp>=Ns(wait))) {
+        auto last=std::max(selected->lastCnp,selected->lastNative);
+        if (last<0 || now-last>=Ns(std::max(wait,m_config.cnpInterval))) SendNearCnp(*selected,"local_pressure");
+    }
+    for (auto& item:m_flows) if (item.second.source) {
+        auto& f=item.second; f.previousIn=f.in; f.previousTx=f.dequeued;
+    }
+    m_lastBackpressure=now;
 }
 void DciGatewayNode::Tick() {
-    auto now=Simulator::Now().GetNanoSeconds();
-    for (auto& e:m_groups) {
-        auto& g=e.second;
-        if (!g.IsSource()) {
-            NS_ABORT_MSG_IF(g.Queue()!=Port(g.port)->GetQueue()->GetNBytes(g.pg),"R5 entire PG accounting mismatch");
-            if (now%Ns(m_config.period)==0) SampleReceiver(g);
-        } else {
-            UpdateSource(g);
-            if (now%Ns(m_config.localWindow)==0) UpdateBackpressure(g);
+    auto now=NowNs(); ++m_ticks; bool sources=false;
+    for (auto& item:m_flows) {
+        auto& f=item.second; if (!f.source) continue;
+        sources=true;
+        MaintainHistory(f,now);
+        if (now-f.supplySample>=Ns(m_config.localWindow)) {
+            double observed=(f.in-f.supplyIn)/((now-f.supplySample)*1e-9);
+            auto reg=m_registrations.find(f.key);
+            if (f.responsePending && reg!=m_registrations.end() && f.responseBaseline>0 &&
+                f.supplySample>=f.lastCnp+Ns(reg->second.localRtt) && observed<.9*f.responseBaseline) {
+                reg->second.response=std::max(reg->second.localRtt,(now-f.lastCnp)*1e-9);
+                f.responsePending=false;
+                Event("LOCAL_RESPONSE",f.id,reg->second.response,"observed_input_decline_not_causal_proof");
+            }
+            f.supply=std::min(Port(m_wan)->GetDataRate().GetBitRate()/8.0,observed);
+            f.supplyIn=f.in; f.supplySample=now;
         }
     }
-    // Controls become effective at this event; already dequeued frames are in history.
-    CommitControls(); WriteSamples();
+    if (now-m_lastBackpressure>=Ns(m_config.localWindow)) UpdateBackpressure();
+    m_controlPending=false;
+    if (sources) ActivateSources();
     m_tick=Simulator::Schedule(Seconds(m_config.control),&DciGatewayNode::Tick,this);
 }
 void DciGatewayNode::WriteMetadata(std::ostream& out) const {
-    out << "{\"node\":" << GetId() << ",\"groups\":["; bool comma=false;
-    for (const auto& e:m_groups) {
-        const auto& g=e.second;
-        out << (comma ? "," : "") << "{\"id\":" << g.id << ",\"role\":\"" << (g.IsSource() ? "A" : "B")
-            << "\",\"peer\":" << g.peer << ",\"port\":" << g.port << ",\"pg\":" << g.pg << ",\"frame_bytes\":" << g.frame
-            << ",\"policy_buffer_share_bytes\":" << .8*m_config.bufferBytes/m_groups.size()
-            << ",\"propagation_ns\":" << g.propagation.GetNanoSeconds() << ",\"local_response_ns\":" << g.localResponse.GetNanoSeconds()
-            << ",\"in_total\":" << g.in << ",\"tx_total\":" << g.tx << ",\"drop_bytes\":" << g.drops << ",\"peak_bytes\":" << g.peak << '}'; comma=true;
+    out<<"{\"node\":"<<GetId()<<",\"session\":"<<m_config.session<<",\"peer\":"<<m_peer<<",\"wan_port\":"<<m_wan
+       <<",\"frame_bytes\":"<<m_frame<<",\"burst_bytes\":"<<4*m_frame<<",\"flows\":[";
+    bool comma=false;
+    for (const auto& item:m_flows) {
+        const auto& f=item.second;
+        out<<(comma ? "," : "")<<"{\"id\":"<<f.id<<",\"role\":\""<<(f.source ? 'A' : 'B')
+           <<"\",\"generation\":"<<f.generation<<",\"peer_generation\":"<<f.remoteGeneration
+           <<",\"src_ip\":"<<f.key.srcIp<<",\"dst_ip\":"<<f.key.dstIp<<",\"dest_qpn\":"<<f.key.destQpn
+           <<",\"port\":"<<f.port<<",\"pg\":"<<f.pg<<",\"resource\":"<<f.resource<<",\"port_resource\":"<<f.portResource
+           <<",\"in_total\":"<<f.in<<",\"dequeued_total\":"<<f.dequeued<<",\"tx_total\":"<<f.tx
+           <<",\"queue_bytes\":"<<f.Queue()<<",\"drops\":"<<f.drops<<",\"tx_failed_bytes\":"<<f.failures
+           <<",\"near_cnps\":"<<f.nearCnps<<",\"native_cnps\":"<<f.nativeCnps<<",\"history_records\":"<<f.history.arrivals.size()<<'}';
+        comma=true;
     }
-    out << "],\"flows\":["; comma=false;
-    for (const auto& e:m_flows) {
-        const auto& f=e.second; const auto& r=f.reg;
-        out << (comma ? "," : "") << "{\"id\":" << r.id << ",\"role\":\"" << (r.role==Role::Source ? "A" : "B")
-            << "\",\"group\":" << f.group << ",\"peer\":" << r.peer << ",\"port\":" << r.port << ",\"pg\":" << r.pg
-            << ",\"in_total\":" << f.in << ",\"tx_total\":" << f.tx << ",\"near_cnps\":" << f.nearCnps << ",\"native_cnps\":" << f.nativeCnps << '}'; comma=true;
-    }
-    out << "],\"control_tx_bytes\":" << m_controlTx << ",\"control_rx_bytes\":" << m_controlRx << ",\"rejected\":" << m_rejected << '}';
+    out<<"],\"control_tx_bytes\":"<<m_controlTx<<",\"control_rx_bytes\":"<<m_controlRx
+       <<",\"control_budget_drops\":"<<m_controlDropped<<",\"rejected\":"<<m_rejected<<",\"resource_drops\":"<<m_resourceDrops
+       <<",\"history_records\":"<<m_historyCount<<",\"registrations\":"<<m_registrations.size()
+       <<",\"performance\":{\"decisions\":"<<m_decision<<",\"ticks\":"<<m_ticks
+       <<",\"arrival_triggers\":"<<m_triggers[ARRIVAL]<<",\"empty_triggers\":"<<m_triggers[EMPTY]
+       <<",\"flow_feedback_triggers\":"<<m_triggers[FLOW_FEEDBACK]
+       <<",\"resource_feedback_triggers\":"<<m_triggers[RESOURCE_FEEDBACK]
+       <<",\"pressure_triggers\":"<<m_triggers[PRESSURE]<<",\"pause_triggers\":"<<m_triggers[PAUSE]
+       <<",\"coalesced_triggers\":"<<m_coalesced<<",\"immediate_stops\":"<<m_safetyStops
+       <<",\"history_copies\":"<<m_historyCopies<<",\"history_copied_records\":"<<m_historyCopiedRecords
+       <<",\"future_models\":"<<m_futureModels<<",\"future_packets\":"<<m_futurePackets
+       <<",\"forecast_created\":"<<m_forecastCreated<<",\"forecast_validated\":"<<m_forecastValidated
+       <<",\"forecast_unavailable\":"<<m_forecastUnavailable<<",\"forecast_expired\":"<<m_forecastExpired
+       <<",\"forecast_rejected\":"<<m_forecastRejected<<",\"forecast_peak_per_flow\":"<<m_forecastPeak
+       <<",\"history_peak\":"<<m_historyPeak<<",\"history_peak_per_flow\":"<<m_flowHistoryPeak<<'}'
+       <<",\"forward_base_ns\":"<<m_forwardBase<<",\"reverse_base_ns\":"<<m_reverseBase<<'}';
 }
 void DciGatewayNode::DoDispose() {
-    Simulator::Cancel(m_tick);
-    Simulator::Cancel(m_activation);
-    for (auto& e:m_groups) Simulator::Cancel(e.second.serviceReport);
+    for (auto event:{m_tick,m_report,m_probeEvent,m_serviceReport,m_startup}) Simulator::Cancel(event);
     if (m_started) for (uint32_t i=0;i<GetNDevices();++i) {
         auto d=DynamicCast<QbbNetDevice>(GetDevice(i)); if (!d) continue;
-        if (m_sourcePorts.count(i)) d->m_groupClassifier=Callback<uint32_t,Ptr<const Packet>,uint32_t>();
+        if (i==m_wan) {
+            d->m_groupClassifier=Callback<uint32_t,Ptr<const Packet>,uint32_t>();
+            d->m_injectionEligible=Callback<bool,uint32_t>(); d->m_beforeTransmit=Callback<void,Ptr<Packet>>();
+        }
         d->TraceDisconnectWithoutContext("QbbAdmitted",MakeBoundCallback(&DciGatewayNode::Admitted,this,i));
         d->TraceDisconnectWithoutContext("QbbDequeue",MakeBoundCallback(&DciGatewayNode::Dequeue,this,i));
         d->TraceDisconnectWithoutContext("QbbPauseState",MakeBoundCallback(&DciGatewayNode::PauseChanged,this,i));
+        d->m_traceTransmitResult.DisconnectWithoutContext(MakeBoundCallback(&DciGatewayNode::Transmitted,this,i));
     }
-    m_groups.clear(); m_flows.clear(); m_data.clear(); m_receiverGroups.clear(); m_sourcePorts.clear();
-    m_log.close(); m_events.close(); m_packets.close(); m_groupPackets.close(); SwitchNode::DoDispose();
+    m_flows.clear(); m_data.clear(); m_resources.clear(); m_remoteResources.clear(); m_registrations.clear();
+    m_log.close(); m_events.close(); m_packets.close(); m_resourceLog.close(); m_predictions.close();
+    SwitchNode::DoDispose();
 }
 }

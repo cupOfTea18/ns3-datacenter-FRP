@@ -23,6 +23,7 @@
 #include "ns3/header.h"
 #include "ns3/simulator.h"
 #include "seq-ts-header.h"
+#include "custom-header.h"
 
 NS_LOG_COMPONENT_DEFINE ("SeqTsHeader");
 
@@ -95,7 +96,7 @@ SeqTsHeader::GetSerializedSize (void) const
   return GetHeaderSize();
 }
 uint32_t SeqTsHeader::GetHeaderSize(void){
-  return 6 + IntHeader::GetStaticSize();
+  return 6 + CustomHeader::QpnBytes() + IntHeader::GetStaticSize();
 }
 
 void
@@ -104,6 +105,7 @@ SeqTsHeader::Serialize (Buffer::Iterator start) const
   Buffer::Iterator i = start;
   i.WriteHtonU32 (m_seq);
   i.WriteHtonU16 (m_pg);
+  if (CustomHeader::qpnEnabled) i.WriteHtonU32(0x01000000u | destQpn);
 
   // write IntHeader
   ih.Serialize(i);
@@ -114,6 +116,8 @@ SeqTsHeader::Deserialize (Buffer::Iterator start)
   Buffer::Iterator i = start;
   m_seq = i.ReadNtohU32 ();
   m_pg =  i.ReadNtohU16 ();
+  destQpn=0;
+  if (CustomHeader::qpnEnabled) { auto field=i.ReadNtohU32(); destQpn=(field>>24)==1 ? field&0xffffff : 0; }
 
   // read IntHeader
   ih.Deserialize(i);

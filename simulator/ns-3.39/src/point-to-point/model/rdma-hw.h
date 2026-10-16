@@ -45,6 +45,21 @@ public:
 	// qp complete callback
 	typedef Callback<void, Ptr<RdmaQueuePair> > QpCompleteCallback;
 	QpCompleteCallback m_qpCompleteCallback;
+    // Optional modeled RC connection management. QPNs are never reused during
+    // one RNIC lifetime; exhausted resources fail explicitly, not by wrapping.
+    QpCompleteCallback m_qpConnected;
+    Callback<void, Ptr<Packet>, const CustomHeader&> m_controlReceive;
+    uint32_t m_maxQps=4096, m_nextQpn=1;
+    uint64_t m_connectionRejected=0, m_invalidQpnPackets=0;
+    std::unordered_map<uint32_t, Ptr<RdmaQueuePair>> m_txQpn;
+    std::unordered_map<uint32_t, Ptr<RdmaRxQueuePair>> m_rxQpn;
+    uint32_t AllocateQpn();
+    Ptr<RdmaQueuePair> GetQpByQpn(uint32_t qpn, uint32_t peer);
+    Ptr<RdmaRxQueuePair> GetRxQpByQpn(uint32_t qpn, uint32_t peer);
+    void DeleteRxQpByQpn(uint32_t qpn, uint32_t peer);
+    void Connect(Ptr<RdmaQueuePair> qp);
+    void ReceiveConnection(Ptr<Packet>, const CustomHeader&);
+    void SendControlPacket(Ptr<Packet>, Ipv4Address src, Ipv4Address dst, uint8_t protocol);
 
 	void SetNode(Ptr<Node> node);
 	void Setup(QpCompleteCallback cb); // setup shared data and callbacks with the QbbNetDevice

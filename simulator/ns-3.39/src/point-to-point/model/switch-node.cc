@@ -226,7 +226,7 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 			unsched = tag.GetValue();
 		}
 
-		if (ch.l3Prot == 0xF9 || ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || (m_ackHighPrio && (ch.l3Prot == 0xFD || ch.l3Prot == 0xFC))) { //QCN or PFC or NACK, go highest priority
+		if (ch.l3Prot == 0xFA || ch.l3Prot == 0xF9 || ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || (m_ackHighPrio && (ch.l3Prot == 0xFD || ch.l3Prot == 0xFC))) { //QCN or PFC or NACK, go highest priority
 			qIndex = 0;
 		}
 		else if (found) {
@@ -241,6 +241,11 @@ void SwitchNode::SendToDev(Ptr<Packet>p, CustomHeader &ch) {
 		InterfaceTag t;
 		bool hasIngressTag = p->PeekPacketTag(t);
 		uint32_t inDev = hasIngressTag ? t.GetPortId() : idx;
+
+        if (!PrepareDataAdmission(p,ch,inDev,idx,qIndex)) {
+            ++m_admissionDropPackets;
+            return;
+        }
 			
         if (m_bifrostEnabled && inDev == m_bifrostIngress && qIndex == m_bifrostPriority)
             m_bifrostReceived += p->GetSize();
@@ -391,7 +396,7 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 	if (1) {
 		uint8_t* buf = p->GetBuffer();
 		if (buf[PppHeader::GetStaticSize() + 9] == 0x11) { // udp packet
-			IntHeader *ih = (IntHeader*)&buf[PppHeader::GetStaticSize() + 20 + 8 + 6]; // ppp, ip, udp, SeqTs, INT
+			IntHeader *ih = (IntHeader*)&buf[PppHeader::GetStaticSize() + 20 + 8 + 6 + CustomHeader::QpnBytes()]; // ppp, ip, udp, SeqTs, INT
 			Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
 			if (m_ccMode == 3) { // HPCC or PowerTCP-INT
 				if (!PowerEnabled)
@@ -579,7 +584,8 @@ void SwitchNode::TrackActiveFlow(Ptr<Packet> p, uint32_t outPort) {
         // 提取源IP的DC-ID（IP第2段：11.{dc_id}.*.*）
         uint32_t srcIpValue = srcIp.Get();
         uint8_t srcDcId = (srcIpValue >> 16) & 0xFF;
-        m_activeSrcDcIds[outPort].insert(srcDcId);
+        if (((srcIpValue>>24)==10 || (srcIpValue>>24)==11) && (srcDcId==1 || srcDcId==2))
+            m_activeSrcDcIds[outPort].insert(srcDcId);
 
         // 调试：如果该端口有多个DC的流，输出提示
         if (m_activeSrcDcIds[outPort].size() > 1) {

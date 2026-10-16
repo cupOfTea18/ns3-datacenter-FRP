@@ -120,6 +120,14 @@ public:
   void BindInjectionQueue(uint32_t queue, uint32_t priority, uint32_t group);
   struct InjectionControl { uint32_t group; double bytesPerSec; };
   void ApplyInjectionControls(const std::vector<InjectionControl>& controls);
+  struct InjectionSnapshot { double rate, tokens; uint32_t burst; };
+  InjectionSnapshot ReadInjectionSnapshot(uint32_t id);
+  bool DetachInjectionQueue(uint32_t queue);
+  Callback<bool, uint32_t> m_injectionEligible;
+  Callback<void, Ptr<Packet>> m_beforeTransmit;
+  TracedCallback<Ptr<const Packet>, bool> m_traceTransmitResult;
+  Time GetTransmitAvailable() const { return m_txAvailable; }
+  Time GetTransmitGap() const { return m_tInterframeGap; }
   Callback<uint32_t, Ptr<const Packet>, uint32_t> m_groupClassifier;
   Time GetReceiveDelay() const { return m_nicDelay; }
   bool IsQueuePaused(uint32_t queue) const { return m_paused[queue]; }
@@ -236,6 +244,7 @@ protected:
   std::map<uint32_t, uint32_t> m_queueGroup;
   Time m_pauseTotal[qCnt], m_pauseStarted[qCnt];
   EventId m_shapeWake;
+  Time m_txAvailable;
   void UpdateInjectionTokens(InjectionBucket& bucket);
 
 

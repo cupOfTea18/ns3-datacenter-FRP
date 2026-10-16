@@ -61,6 +61,10 @@ public:
   virtual void Serialize (Buffer::Iterator start) const;
   virtual uint32_t Deserialize (Buffer::Iterator start);
 
+  // Explicit Longhaul transport format: a version byte and a 24-bit modeled
+  // BTH.DestQP. Disabled for legacy examples; all Longhaul algorithms enable it.
+  static bool qpnEnabled;
+  static uint32_t QpnBytes() { return qpnEnabled ? 4 : 0; }
   uint32_t brief, headerType, getInt;
   enum HeaderType{
 	L2_Header = 1,
@@ -107,6 +111,7 @@ public:
 		  // SeqTsHeader
 		  uint16_t pg;
 		  uint32_t seq;
+		  uint32_t destQpn;
 		  IntHeader ih;
 	  } udp;
 	  // CnHeader
@@ -116,6 +121,7 @@ public:
 		  uint16_t qfb;
 		  uint8_t ecnBits;
 		  uint16_t total;
+		  uint32_t destQpn;
 	  } cnp;
 	  // qbbHeader
 	  struct {
@@ -123,6 +129,7 @@ public:
 		  uint16_t flags;
 		  uint16_t pg;
 		  uint32_t seq; // the qbb sequence number.
+		  uint32_t destQpn;
 		  IntHeader ih;
 	  } ack;
 	  // PauseHeader

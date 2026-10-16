@@ -121,6 +121,22 @@ def main():
         if run.get("proposed_version")!="5": continue
         path=Path(run["run_dir"])
         fig,axes=plt.subplots(2,1,figsize=(11,7),sharex=True)
+        schema=json.loads((path/"metadata.json").read_text())["proposed_parameters"].get("schema_version",1)
+        if schema==3:
+            for source in sorted(path.glob("r5.gateway-*.flows.csv")):
+                grouped=defaultdict(list)
+                for row in read(source): grouped[(row["node"],row["flow"],row["generation"])].append(row)
+                for key,rows in grouped.items():
+                    label="/".join(key); t=[int(r["time_ns"])*1e-6 for r in rows]
+                    axes[0].plot(t,[float(r["queue_bytes"])/1e3 for r in rows],label=label+" A queue")
+                    axes[1].plot(t,[float(r["target_Bps"])*8/1e9 for r in rows],label=label+" injection target")
+                    axes[1].plot(t,[float(r["service_Bps"])*8/1e9 for r in rows],ls=":",label=label+" approximate B service")
+            axes[0].set_ylabel("wire queue (kB)"); axes[1].set_ylabel("Gbps"); axes[1].set_xlabel("simulation time (ms)")
+            for ax in axes: ax.legend(fontsize=6); ax.grid(alpha=.2)
+            fig.suptitle("R5 per-flow injection: targets and estimates, not actual throughput")
+            fig.tight_layout(); fig.savefig(path/"r5-control.png",dpi=140); plt.close(fig)
+            continue
+        if schema not in (1,2): raise ValueError(f"unsupported R5 schema: {schema}")
         for source in sorted(path.glob("r5.gateway-*.groups.csv")):
             grouped=defaultdict(list)
             for row in read(source): grouped[(row["node"],row["role"],row["group"])].append(row)

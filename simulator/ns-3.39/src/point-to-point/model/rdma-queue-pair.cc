@@ -102,7 +102,7 @@ void RdmaQueuePair::SetAppNotifyCallback(Callback<void> notifyAppFinish) {
 }
 
 uint64_t RdmaQueuePair::GetBytesLeft() {
-	return m_size >= snd_nxt ? m_size - snd_nxt : 0;
+	return connected && m_size >= snd_nxt ? m_size - snd_nxt : 0;
 }
 
 uint32_t RdmaQueuePair::GetHash(void) {
