@@ -12,7 +12,8 @@ namespace ns3 {
 class R5Header : public Header {
 public:
     enum Type { PROBE=1, PROBE_REPLY, FLOW_STATE,
-                RESOURCE_STATE, REGISTER, REGISTER_ACK, REGISTER_CONFIRM };
+                RESOURCE_STATE, REGISTER, REGISTER_ACK, REGISTER_CONFIRM,
+                COMPLETE, COMPLETE_ACK, RETIRE, RETIRE_ACK };
     enum Field { SESSION, GEN, PEER_GEN, QUERY_ID, SEQ, SAMPLE, SEND,
         SIP, DIP, QPN, SRC_QPN, CONNECTION, RESOURCE, PORT_RESOURCE,
         QUEUE, ARRIVED, DEPARTED, DROPPED, OTHER, SERVICE, BACKGROUND,
@@ -39,7 +40,7 @@ public:
         }
     };
     struct Config {
-        double period=.0002, control=.00005, timeout=.02;
+        double period=.00001, control=.00001, timeout=.02;
         double conservativeFraction=.05;
         double qref=50000, margin=65536;
         double sourceHigh=1000000, sourceLow=250000, localWait=.0003, cnpInterval=.00005;
@@ -47,7 +48,7 @@ public:
         double controlFraction=.01;
         uint32_t controlBurstBytes=65536, controlQueueBytes=65536;
         uint64_t bufferBytes=50*1024*1024;
-        uint32_t maxFlows=4096, maxHistoryPerFlow=131072, maxHistory=1048576;
+        uint32_t maxFlows=4096;
         uint32_t maxForecasts=1024, maxFuturePackets=262144, maxReports=64, maxRetries=8;
         uint64_t session=1, peerSession=1;
     };
@@ -65,12 +66,20 @@ protected:
     void NotifyAdmissionDrop(uint32_t,uint32_t,Ptr<const Packet>) override;
 private:
     using Record=R5Header::Record;
-    struct Arrival { int64_t time; uint32_t bytes; };
+    // begin < 0 denotes a modeled future packet; otherwise bytes are uniform
+    // over [begin,time). Actual TX history is never expanded into packets.
+    struct Arrival { int64_t time; uint64_t bytes; int64_t begin=-1; };
+    struct TxSnapshot {
+        int64_t timeNs;
+        uint64_t cumulativeBytes;
+        int64_t delayNs=0; // Frozen mapping for the interval ending here.
+    };
+    struct ArrivalChange { int64_t time; double rate=0, bytes=0; };
     struct Prediction { double queue=0, peak=0; };
     struct History {
-        std::deque<Arrival> arrivals;
+        std::deque<TxSnapshot> txSnapshots;
         int64_t floor=0;
-        void Add(int64_t,uint32_t);
+        void Add(int64_t,uint64_t,int64_t);
         size_t Prune(int64_t);
         bool Covers(int64_t t) const { return t>=floor; }
     };
@@ -78,25 +87,25 @@ private:
         uint64_t id;
         int64_t decision, sample, end;
         double initial, service, predicted, planned;
-        uint64_t remoteGeneration;
     };
     struct Flow {
         FlowKey key;
         uint32_t id=0, port=0, pg=0, queue=0, resource=0, portResource=0;
         uint16_t sport=0,dport=0;
-        bool source=false, have=false;
+        bool source=false, have=false, completed=false, retireAck=false;
+        uint64_t finalWireBytes=0;
+        int64_t lastMappedArrival=0, retireSent=-1;
         uint64_t generation=0, remoteGeneration=0, seq=0;
         uint64_t in=0, dequeued=0, tx=0, drops=0, failures=0, previousIn=0, previousTx=0;
         uint64_t supplyIn=0, nearCnps=0, nativeCnps=0;
         int64_t created=0, lastData=0, lastCnp=-1, lastNative=-1, supplySample=0;
-        double supply=0, candidate=0, target=0, service=0, qref=0, remoteInput=0;
+        double supply=0, candidate=0, target=0, service=0;
         double responseBaseline=0;
         bool responsePending=false;
         const char* reason="startup";
         History history;
         Record state{};
         std::deque<uint32_t> packets;
-        std::deque<Forecast> forecasts;
         uint64_t Queue() const { return in-dequeued; }
     };
     struct Resource {
@@ -114,11 +123,24 @@ private:
         double response=0, localRtt=0;
         bool confirmed=false;
     };
+    struct ResourceControl {
+        double net=0, budget=0;
+        Prediction effective, risk;
+        bool covered=true;
+        int64_t sample=0;
+        const char* reason="resource_budget";
+    };
+    std::map<uint32_t,ResourceControl> m_resourceControls;
+    std::map<uint32_t,int64_t> m_retiredHistoryFloor;
+    uint64_t m_reallocations=0, m_retiredCount=0;
+    bool m_modelBlocked=false;
+    std::string m_retiredPath;
+    std::ofstream m_retired;
     struct Allocation { uint32_t id; double cap; std::vector<uint64_t> resources; };
     Config m_config;
     uint32_t m_peer=0,m_wan=0,m_frame=0,m_nextFlow=1,m_nextResource=1,m_reportCursor=0;
     bool m_enabled=false,m_started=false,m_peerFull=false,m_backpressureActive=false;
-    int64_t m_forwardBase=0,m_reverseBase=0,m_lastBackpressure=0,m_lastLocalCnp=-1;
+    int64_t m_forwardBase=0,m_reverseBase=0,m_lastBackpressure=0;
     int64_t m_lastPeerPressure=0, m_controlUpdated=0;
     int64_t m_lastReceiverSample=-1;
     uint64_t m_pressureSequence=0,m_controlDropped=0;
@@ -136,26 +158,31 @@ private:
     std::map<FlowKey,uint32_t> m_data;
     std::map<std::pair<uint32_t,uint32_t>,Resource> m_resources;
     std::map<uint32_t,Record> m_remoteResources;
+    std::map<uint32_t,std::deque<Forecast>> m_resourceForecasts;
+    std::deque<std::pair<uint32_t,Record>> m_validationSamples;
     std::map<FlowKey,SourceRegistration> m_registrations;
     std::map<uint32_t,double> m_destinationBudgets;
-    std::ofstream m_log,m_events,m_packets,m_resourceLog,m_predictions;
-    EventId m_tick,m_report,m_probeEvent,m_serviceReport,m_startup;
+    std::ofstream m_log,m_events,m_packets,m_resourceLog,m_predictions,m_budgetLog;
+    EventId m_tick,m_report,m_probeEvent,m_serviceReport,m_reallocate;
     static uint32_t Classify(DciGatewayNode*,uint32_t,Ptr<const Packet>,uint32_t);
     static void Admitted(DciGatewayNode*,uint32_t,Ptr<const Packet>,uint32_t,uint32_t);
     static void Dequeue(DciGatewayNode*,uint32_t,Ptr<const Packet>,uint32_t);
     static void Transmitted(DciGatewayNode*,uint32_t,Ptr<const Packet>,bool);
     static void PauseChanged(DciGatewayNode*,uint32_t,uint32_t,bool);
     void Stamp(Ptr<Packet>);
-    bool Eligible(uint32_t);
     Flow* Match(Ptr<const Packet>);
     Ptr<QbbNetDevice> Port(uint32_t) const;
     Resource& QueueResource(uint32_t,uint32_t);
     bool BindQueue(Flow&);
     void ReleaseEmptyQueues();
+    bool CanRetire(const Flow&) const;
+    void ReclaimFlows();
+    void EraseFlow(uint32_t);
+    void WriteFlowMetadata(std::ostream&,const Flow&,bool retired=false) const;
     void Send(R5Header,Ipv4Address destination);
     void ReceiveControl(Ptr<Packet>,const CustomHeader&);
-    bool RecordForecast(Flow&,const Forecast&);
-    void ValidateForecasts(Flow&,const Record&);
+    bool RecordForecast(uint32_t,const Forecast&);
+    void ValidateForecasts(uint32_t,const Record&);
     void MaintainHistory(Flow&,int64_t now);
     Record FlowRecord(Flow&);
     void Probe();
@@ -164,11 +191,15 @@ private:
     void RequestControl(Trigger);
     void StopResource(uint32_t);
     void ActivateSources();
+    void AllocateSources();
+    void ReallocateSources();
     void UpdateBackpressure();
+    double LocalCnpWait(const Flow&) const;
     void SendNearCnp(Flow&,const char*);
     void Tick();
     static Prediction Replay(int64_t sample,int64_t end,int64_t peakBegin,double queue,double service,
                              const std::vector<Arrival>& arrivals);
+    static std::vector<ArrivalChange> ArrivalChanges(int64_t,int64_t,const std::vector<Arrival>&);
     static std::map<uint32_t,double> Allocate(const std::vector<Allocation>&,
                                              const std::map<uint64_t,double>& budgets);
     bool FutureDepartures(int64_t end,std::map<uint32_t,std::vector<Arrival>>&);

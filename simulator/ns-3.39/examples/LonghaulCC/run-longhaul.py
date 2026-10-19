@@ -296,7 +296,7 @@ def main():
                 run_metadata["completion_valid"] = False
             if algorithm=="proposed" and run_metadata["proposed_version"]==5 and status=="ok":
                 final = json.loads((run_dir / "r5.final.json").read_text())["proposed_parameters"]
-                if final.get("schema_version") == 3:
+                if final.get("schema_version") in (3, 4):
                     receivers = {(g["node"], f["src_ip"], f["dst_ip"], f["dest_qpn"]): f
                                  for g in final["gateways"] for f in g["flows"] if f["role"] == "B"}
                     closed = True  # Empty/local-only workloads have no WAN data to settle.

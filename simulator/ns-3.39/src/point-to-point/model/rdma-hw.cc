@@ -761,6 +761,7 @@ void RdmaHw::RecoverQueue(Ptr<RdmaQueuePair> qp) {
 }
 
 void RdmaHw::QpComplete(Ptr<RdmaQueuePair> qp) {
+    if (!m_qpFinished.IsNull()) m_qpFinished(qp);
 	NS_ASSERT(!m_qpCompleteCallback.IsNull());
 	if (m_cc_mode == 1) {
 		Simulator::Cancel(qp->mlx.m_eventUpdateAlpha);

@@ -271,8 +271,36 @@ def r5_flow_evidence(run_dir,identity,meta):
     return result
 
 
+def r5_resource_evidence(run_dir,identity,meta):
+    """Schema 4 predicts physical FIFO totals; compare only exact resource samples."""
+    peers={g["node"]:g["peer"] for g in meta["proposed_parameters"]["gateways"]}
+    samples={}
+    for path in run_dir.glob("r5.gateway-*.resources.csv"):
+        for row in read_csv(path):
+            samples[(int(row["node"]),int(row["resource"]),int(row["time_ns"]))]=int(row["queue_bytes"])
+    result=[]
+    for path in run_dir.glob("r5.gateway-*.predictions.csv"):
+        for row in read_csv(path):
+            if row["event"] not in ("FREEZE","CHECKPOINT"): continue
+            node=int(row["node"]);resource=int(row["resource"]);end=int(row["end_ns"])
+            actual=samples.get((peers[node],resource,end))
+            initial=samples.get((peers[node],resource,int(row["sample_ns"])))
+            result.append({**identity,"proposed_version":5,"schema_version":4,"node":node,
+                "resource":resource,"prediction_scope":"shared-physical-queue","prediction_event":row["event"],
+                "time_ns":int(row["time_ns"]),"prediction_end_ns":end,"endpoint_available":actual is not None,
+                "prediction_valid":row["reason"] in ("conditional_shared_resource","periodic_resource_sample_grid"),
+                "predicted_queue_bytes":row["predicted_queue_bytes"],"predicted_peak_bytes":row["peak_bytes"],
+                "B_future_queue_bytes":actual,"B_future_peak_bytes":None,
+                "prediction_error_bytes":float(row["predicted_queue_bytes"])-actual if actual is not None else None,
+                "state_sample_matches_events":initial==int(row["initial_queue_bytes"]) if initial is not None else None,
+                "boundary_policy":"exact-resource-sample-only; same-ns-arrivals-included-conservatively",
+                "planned_bytes":row["planned_bytes"],"reason":row["reason"]})
+    return result
+
+
 def r5_evidence(run_dir,identity,meta):
     schema=meta["proposed_parameters"].get("schema_version",1)
+    if schema==4: return r5_resource_evidence(run_dir,identity,meta)
     if schema==3: return r5_flow_evidence(run_dir,identity,meta)
     if schema not in (1,2): raise ValueError(f"unsupported R5 log schema: {schema}")
     packets=[]

@@ -377,6 +377,13 @@ bool QbbNetDevice::DetachInjectionQueue(uint32_t queue) {
     m_queueGroup.erase(it); return true;
 }
 
+void QbbNetDevice::RemoveInjectionGroup(uint32_t group) {
+    auto it=m_injectionGroups.find(group);
+    NS_ABORT_MSG_IF(it==m_injectionGroups.end() || !it->second.queues.empty(),
+                    "cannot remove an attached injection group");
+    m_injectionGroups.erase(it);
+}
+
 void
 QbbNetDevice::DequeueAndTransmit(void)
 {
@@ -432,11 +439,13 @@ QbbNetDevice::DequeueAndTransmit(void)
 			Time t = Simulator::GetMaximumSimulationTime();
 			for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++) {
 				Ptr<RdmaQueuePair> qp = m_rdmaEQ->GetQp(i);
-				if (qp->GetBytesLeft() == 0)
+				if (qp->GetBytesLeft() == 0 || m_paused[qp->m_pg] || qp->IsWinBound())
 					continue;
 				t = Min(qp->m_nextAvail, t);
 			}
-			if (m_nextSend.IsExpired() && t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now()) {
+			if (t < Simulator::GetMaximumSimulationTime() && t > Simulator::Now() &&
+                (m_nextSend.IsExpired() || t < Time(m_nextSend.GetTs()))) {
+                Simulator::Cancel(m_nextSend);
 				m_nextSend = Simulator::Schedule(t - Simulator::Now(), &QbbNetDevice::DequeueAndTransmit, this);
 			}
 		}
@@ -464,8 +473,11 @@ QbbNetDevice::DequeueAndTransmit(void)
                 break;
             }
         }
-        if (wait<Simulator::GetMaximumSimulationTime() && m_shapeWake.IsExpired())
+        if (wait<Simulator::GetMaximumSimulationTime() &&
+            (m_shapeWake.IsExpired() || Simulator::Now()+wait<Time(m_shapeWake.GetTs()))) {
+            Simulator::Cancel(m_shapeWake);
             m_shapeWake=Simulator::Schedule(wait,&QbbNetDevice::DequeueAndTransmit,this);
+        }
         p=m_queue->DequeueRR(m_paused,blocked);
         if (p && m_queueGroup.count(m_queue->GetLastLogicalQueue())) {
             auto& b=m_injectionGroups.at(m_queueGroup.at(m_queue->GetLastLogicalQueue()));

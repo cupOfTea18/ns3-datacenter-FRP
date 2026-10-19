@@ -48,6 +48,7 @@ public:
     // Optional modeled RC connection management. QPNs are never reused during
     // one RNIC lifetime; exhausted resources fail explicitly, not by wrapping.
     QpCompleteCallback m_qpConnected;
+    QpCompleteCallback m_qpFinished; // Actual final ACK; optional network lifecycle notification.
     Callback<void, Ptr<Packet>, const CustomHeader&> m_controlReceive;
     uint32_t m_maxQps=4096, m_nextQpn=1;
     uint64_t m_connectionRejected=0, m_invalidQpnPackets=0;

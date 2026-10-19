@@ -2,6 +2,7 @@
 #define SWITCH_NODE_H
 
 #include <unordered_map>
+#include <set>
 #include <ns3/node.h>
 #include "qbb-net-device.h"
 #include "switch-mmu.h"
@@ -33,6 +34,7 @@ protected:
 	void DoDispose() override;
 	virtual void NotifyAdmissionDrop(uint32_t, uint32_t, Ptr<const Packet>) {}
 	bool m_ecnEnabled;
+    std::set<uint32_t> m_ecnDisabledPorts;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
 
@@ -118,6 +120,8 @@ public:
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
 	void ClearTable();
+    // Suppress new CE on UDP data at this egress; preserve existing CE and control marking.
+    void DisableEcnMarking(uint32_t port) { m_ecnDisabledPorts.insert(port); }
     // Read the same ECMP decision used by forwarding; does not change routes.
     int LookupOutputPort(Ptr<const Packet> packet, CustomHeader &header);
     // Locally originated network control is routed normally in priority zero.

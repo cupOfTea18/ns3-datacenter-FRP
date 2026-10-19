@@ -123,6 +123,7 @@ public:
   struct InjectionSnapshot { double rate, tokens; uint32_t burst; };
   InjectionSnapshot ReadInjectionSnapshot(uint32_t id);
   bool DetachInjectionQueue(uint32_t queue);
+  void RemoveInjectionGroup(uint32_t group);
   Callback<bool, uint32_t> m_injectionEligible;
   Callback<void, Ptr<Packet>> m_beforeTransmit;
   TracedCallback<Ptr<const Packet>, bool> m_traceTransmitResult;

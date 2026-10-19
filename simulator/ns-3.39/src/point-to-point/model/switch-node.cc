@@ -365,7 +365,9 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize(), found);
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize(), found);
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
-        if (m_ecnEnabled)
+        const bool suppressDataCe=m_ecnDisabledPorts.count(ifIndex) &&
+            p->GetBuffer()[PppHeader::GetStaticSize()+9]==0x11;
+        if (m_ecnEnabled && !suppressDataCe)
         {
             bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
             if (egressCongested)

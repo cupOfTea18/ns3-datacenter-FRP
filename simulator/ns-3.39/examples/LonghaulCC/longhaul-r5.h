@@ -8,6 +8,7 @@ struct PendingRegistration {
     Ptr<RdmaQueuePair> qp;
     uint32_t gateway=0, attempts=0;
     uint64_t query=0;
+    bool completed=false;
     EventId event;
 };
 std::map<std::pair<uint32_t,uint32_t>,PendingRegistration> registrations;
@@ -16,17 +17,19 @@ void Register(std::pair<uint32_t,uint32_t> key) {
     auto it=registrations.find(key); if (it==registrations.end()) return;
     auto& r=it->second;
     if (r.attempts++>=config.maxRetries) { registrations.erase(it); return; }
-    R5Header h; h.type=R5Header::REGISTER;
+    R5Header h; h.type=r.completed ? R5Header::COMPLETE : R5Header::REGISTER;
     auto& v=h.v; v[R5Header::SIP]=r.qp->sip.Get(); v[R5Header::DIP]=r.qp->dip.Get();
     v[R5Header::QPN]=r.qp->destQpn; v[R5Header::SRC_QPN]=r.qp->localQpn;
     v[R5Header::CONNECTION]=r.qp->connectionGeneration; v[R5Header::QUERY_ID]=++r.query;
+    v[R5Header::SESSION]=config.session; v[R5Header::SAMPLE]=Simulator::Now().GetNanoSeconds();
+    if (r.completed) v[R5Header::ARRIVED]=r.qp->tx_wire_bytes;
     auto packet=Create<Packet>(); packet->AddHeader(h);
     r.hw->SendControlPacket(packet,r.qp->sip,ControlAddress(r.gateway),0xf9);
     r.event=Simulator::Schedule(Seconds(config.queryRetry),&Register,key);
 }
 void ReceiveRegistration(Ptr<Packet> packet,const CustomHeader& ip) {
     auto copy=packet->Copy(); copy->RemoveAtStart(ip.GetSerializedSize());
-    R5Header h; if (!copy->RemoveHeader(h) || h.type!=R5Header::REGISTER_ACK) return;
+    R5Header h; if (!copy->RemoveHeader(h) || (h.type!=R5Header::REGISTER_ACK && h.type!=R5Header::COMPLETE_ACK)) return;
     auto it=registrations.find({ip.dip,uint32_t(h.v[R5Header::SRC_QPN])});
     if (it==registrations.end()) return;
     auto& r=it->second;
@@ -34,6 +37,13 @@ void ReceiveRegistration(Ptr<Packet> packet,const CustomHeader& ip) {
         h.v[R5Header::QUERY_ID]!=r.query || h.v[R5Header::SIP]!=r.qp->sip.Get() ||
         h.v[R5Header::DIP]!=r.qp->dip.Get() || h.v[R5Header::QPN]!=r.qp->destQpn ||
         h.v[R5Header::CONNECTION]!=r.qp->connectionGeneration) return;
+    if (r.completed) {
+        if (h.type==R5Header::COMPLETE_ACK && h.v[R5Header::ARRIVED]==r.qp->tx_wire_bytes) {
+            Simulator::Cancel(r.event); registrations.erase(it);
+        }
+        return;
+    }
+    if (h.type!=R5Header::REGISTER_ACK) return;
     h.type=R5Header::REGISTER_CONFIRM;
     h.v[R5Header::INTERVAL_NS]=MicroSeconds(r.hw->m_rateDecreaseInterval).GetNanoSeconds();
     auto confirmation=Create<Packet>(); confirmation->AddHeader(h);
@@ -56,13 +66,28 @@ void Connected(Ptr<RdmaQueuePair> qp) {
     pending.gateway=addressPlan.dc[source]==1 ? dci_gateway_a_id : dci_gateway_b_id;
     registrations.emplace(key,pending); Register(key);
 }
+void Completed(Ptr<RdmaQueuePair> qp) {
+    auto source=ip_to_node_id(qp->sip), destination=ip_to_node_id(qp->dip);
+    if (addressPlan.dc[source]==addressPlan.dc[destination]) return;
+    auto key=std::make_pair(qp->sip.Get(),qp->localQpn);
+    auto found=registrations.find(key);
+    if (found!=registrations.end()) { Simulator::Cancel(found->second.event); registrations.erase(found); }
+    NS_ABORT_MSG_IF(registrations.size()>=config.maxFlows,"completion notification pool exhausted");
+    PendingRegistration pending; pending.hw=n.Get(source)->GetObject<RdmaDriver>()->m_rdma;
+    pending.qp=qp; pending.completed=true;
+    pending.gateway=addressPlan.dc[source]==1 ? dci_gateway_a_id : dci_gateway_b_id;
+    registrations.emplace(key,pending); Register(key);
+}
 void Setup() {
     RequireOutput(endpoints,summary_meta_file+".endpoints.csv",
         "ready_ns,src,dst,src_ip,dst_ip,sport,dport,pg,src_qpn,dest_qpn,connection_generation");
     for (uint32_t node=0;node<n.GetN();++node) if (!n.Get(node)->GetNodeType()) {
         auto hw=n.Get(node)->GetObject<RdmaDriver>()->m_rdma;
         hw->m_qpConnected=MakeCallback(&Connected);
-        if (selected_cc=="proposed") hw->m_controlReceive=MakeCallback(&ReceiveRegistration);
+        if (selected_cc=="proposed") {
+            hw->m_controlReceive=MakeCallback(&ReceiveRegistration);
+            hw->m_qpFinished=MakeCallback(&Completed);
+        }
     }
     if (selected_cc!="proposed") return;
     config.bufferBytes=uint64_t(buffer_size)*1024*1024;
@@ -72,6 +97,9 @@ void Setup() {
         auto peer=target==dci_gateway_a_id ? dci_gateway_b_id : dci_gateway_a_id;
         gateway->SetPeer(peer,nbr2if[n.Get(target)].at(n.Get(peer)).idx,
                          packet_payload_size+CustomHeader::GetStaticWholeHeaderSize());
+        // Only A's WAN egress stops adding CE; other ports and existing CE are unchanged.
+        if (target==dci_gateway_a_id)
+            gateway->DisableEcnMarking(nbr2if[n.Get(target)].at(n.Get(peer)).idx);
         CalculateRoute(n.Get(target)); auto address=ControlAddress(target);
         for (uint32_t node=0;node<n.GetN();++node) if (node!=target) {
             for (auto hop:nextHop[n.Get(node)][n.Get(target)]) {
@@ -90,7 +118,7 @@ void Setup() {
         DynamicCast<DciGatewayNode>(n.Get(target))->Start();
 }
 void WriteMetadata(std::ostream& out) {
-    out<<"  \"proposed_parameters\": {\"version\":5,\"schema_version\":3,\"wire_version\":7,\"enabled\":"
+    out<<"  \"proposed_parameters\": {\"version\":5,\"schema_version\":4,\"wire_version\":8,\"enabled\":"
        <<(selected_cc=="proposed" ? "true" : "false")
        <<",\"flow_key\":\"src-ip,dst-ip,dest-qpn\",\"discovery\":\"first-data-independent\""
        <<",\"queue_mode\":\"per-flow-full-rtt\""
@@ -99,20 +127,25 @@ void WriteMetadata(std::ostream& out) {
        <<",\"endpoint_qpn_reuse\":\"never-during-rnic-lifetime\""
        <<",\"delay_source\":\"runtime-wire-probes-and-registration-echo\""
        <<",\"prediction_horizon\":\"decision-time-plus-forward-plus-reverse\""
-       <<",\"control_dispatch\":\"immediate-new-flow-otherwise-periodic-coalesced\""
-       <<",\"inter_tick_policy\":\"new-flow-allocation-retain-otherwise-immediate-safety-stop\""
-       <<",\"history_retention\":\"freshness-window-and-pending-validation-samples-bounded\""
+       <<",\"control_dispatch\":\"periodic-prediction-immediate-light-reallocation\""
+       <<",\"inter_tick_policy\":\"cached-resource-budgets-immediate-reentry-and-safety-stop\""
+       <<",\"history_mode\":\"cumulative-tx-snapshots-interval-average\""
+       <<",\"history_delay_mapping\":\"interval-end-probe-base-plus-max-frame-serialization-frozen\""
+       <<",\"history_retention\":\"timeout-plus-max-initial-or-admissible-delay-plus-frame-plus-control-predecessor\""
+       <<",\"forecast_validation_dispatch\":\"next-control-tick-preserve-sample-time\""
        <<",\"forecast_policy\":\"immutable-until-validation-or-deadline-reject-new-on-full\""
-       <<",\"service_mode\":\"queue-service-and-approximate-fifo-mixture\""
+       <<",\"service_mode\":\"shared-resource-budget-max-min-injection\""
+       <<",\"prediction_scope\":\"shared-physical-queue\""
        <<",\"future_supply\":\"recent-admission-window-packetized\""
-       <<",\"near_cnp_policy\":\"local-pool-hysteresis-main-contributor-response-wait\""
+       <<",\"near_cnp_policy\":\"local-pool-hysteresis-per-qp-contributor-response-wait\""
        <<",\"native_cnp_policy\":\"account-and-forward-unchanged\""
-       <<",\"sample_boundary_policy\":\"include-same-ns-arrivals-conservatively\""
+       <<",\"a_wan_ecn_policy\":\"suppress-new-data-ce-preserve-existing-ce\""
+       <<",\"sample_boundary_policy\":\"clip-average-intervals-future-packets-same-ns-conservative\""
        <<",\"destination_budget_source\":\"management-nic-physical-ceiling-not-available-share\""
        <<",\"bucket_frames\":4,\"initial_bucket\":\"full\",\"zero_rate_tokens\":\"preserve\""
        <<",\"shared_startup_permission\":false,\"risk_iteration\":false"
-       <<",\"deferred\":[\"D7-pending-buffer\",\"D8-cross-generation-settlement\",\"D9-full-aging-policy\"]"
-       <<",\"lifecycle_policy\":\"retain-identities-reuse-empty-queues-reject-on-exhaustion\""
+       <<",\"deferred\":[\"D7-pending-buffer\",\"D8-cross-generation-settlement\",\"D9-idle-connection-aging\"]"
+       <<",\"lifecycle_policy\":\"source-completion-wire-settlement-peer-retire-ack\""
        <<",\"report_period_s\":"<<config.period<<",\"control_period_s\":"<<config.control
        <<",\"state_timeout_s\":"<<config.timeout<<",\"initial_delay_s\":"<<config.initialDelay
        <<",\"probe_period_s\":"<<config.probePeriod<<",\"query_retry_s\":"<<config.queryRetry
@@ -121,8 +154,7 @@ void WriteMetadata(std::ostream& out) {
        <<",\"source_high_bytes\":"<<config.sourceHigh<<",\"source_low_bytes\":"<<config.sourceLow
        <<",\"local_wait_s\":"<<config.localWait<<",\"cnp_interval_s\":"<<config.cnpInterval
        <<",\"local_window_s\":"<<config.localWindow<<",\"buffer_bytes\":"<<config.bufferBytes
-       <<",\"max_flows\":"<<config.maxFlows<<",\"max_history_per_flow\":"<<config.maxHistoryPerFlow
-       <<",\"max_history_records\":"<<config.maxHistory<<",\"max_forecasts_per_flow\":"<<config.maxForecasts
+       <<",\"max_flows\":"<<config.maxFlows<<",\"max_forecasts_per_resource\":"<<config.maxForecasts
        <<",\"max_future_packets\":"<<config.maxFuturePackets<<",\"max_flow_reports_per_sample\":"<<config.maxReports
        <<",\"control_rate_fraction\":"<<config.controlFraction<<",\"control_burst_bytes\":"<<config.controlBurstBytes
        <<",\"control_queue_bytes\":"<<config.controlQueueBytes<<",\"max_control_retries\":"<<config.maxRetries<<",\"gateways\":[";
