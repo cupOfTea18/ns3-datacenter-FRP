@@ -56,6 +56,10 @@ public:
     std::unordered_map<uint32_t, Ptr<RdmaRxQueuePair>> m_rxQpn;
     uint32_t AllocateQpn();
     Ptr<RdmaQueuePair> GetQpByQpn(uint32_t qpn, uint32_t peer);
+    // The control-plane receiver authenticates the gateway before calling this.
+    bool ReceiveFastCnp(uint32_t peer, uint32_t destinationQpn, uint64_t connection);
+    bool m_fastCnpSupported=false;
+    uint64_t m_fastCnpReceived=0, m_fastCnpRejected=0;
     Ptr<RdmaRxQueuePair> GetRxQpByQpn(uint32_t qpn, uint32_t peer);
     void DeleteRxQpByQpn(uint32_t qpn, uint32_t peer);
     void Connect(Ptr<RdmaQueuePair> qp);

@@ -83,7 +83,7 @@ def main():
             flow_axes[1].set_xlim(0,meta["simulator_stop_time_s"]*1000)
             fig_flows.suptitle(f"{scenario}: {label} — per-flow payload rates")
             suffix="-".join(str(v) for v in (r["algorithm"],r.get("queue_mode"),r.get("service_mode")) if v)
-            filename=f'{scenario.lower()}-{suffix}-seed{r["seed"]}-run{r["run"]}-flow-rates.png'
+            filename=f'{scenario.lower()}-{suffix}-flow-rates.png'
             fig_flows.tight_layout();fig_flows.savefig(out/filename,dpi=140);plt.close(fig_flows)
             rtts=defaultdict(list)
             for point in read(path/"measured-rtt.csv"):rtts[int(point["time_ns"])].append(float(point["rtt_p50_ns"]))

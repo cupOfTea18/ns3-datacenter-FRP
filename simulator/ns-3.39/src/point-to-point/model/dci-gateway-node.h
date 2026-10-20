@@ -13,13 +13,13 @@ class R5Header : public Header {
 public:
     enum Type { PROBE=1, PROBE_REPLY, FLOW_STATE,
                 RESOURCE_STATE, REGISTER, REGISTER_ACK, REGISTER_CONFIRM,
-                COMPLETE, COMPLETE_ACK, RETIRE, RETIRE_ACK };
+                COMPLETE, COMPLETE_ACK, RETIRE, RETIRE_ACK, FAST_CNP };
     enum Field { SESSION, GEN, PEER_GEN, QUERY_ID, SEQ, SAMPLE, SEND,
         SIP, DIP, QPN, SRC_QPN, CONNECTION, RESOURCE, PORT_RESOURCE,
         QUEUE, ARRIVED, DEPARTED, DROPPED, OTHER, SERVICE, BACKGROUND,
         CAPACITY, BUFFER, FLAGS, PAUSE_NS, INTERVAL_NS, UNPAUSED,
         BASE_DELAY_NS, LINK_RATE, POOL_QUEUE, ASSOCIATION, FIELDS };
-    enum Flag : uint64_t { VALID=1, PAUSED=2, EMPTIED=4, PORT=8, POOL=16, FULL=32, APPROXIMATE=64 };
+    enum Flag : uint64_t { VALID=1, PAUSED=2, EMPTIED=4, PORT=8, POOL=16, FULL=32, APPROXIMATE=64, FAST_CNP_CAPABLE=128 };
     using Record=std::array<uint64_t,FIELDS>;
     uint32_t type=PROBE;
     Record v{};
@@ -54,11 +54,13 @@ public:
     };
     void Configure(const Config&,const std::string& output);
     void SetPeer(uint32_t peer,uint32_t wanPort,uint32_t frameBytes);
+    // After SetPeer and before Start; Fast CNP applies only to this flow's LAN->WAN source role.
     void SetDestinationBudget(uint32_t destinationIp,double bytesPerSecond);
     void Start();
     void WriteMetadata(std::ostream&) const;
     bool SwitchReceiveFromDevice(Ptr<NetDevice>,Ptr<Packet>,CustomHeader&) override;
     bool PrepareDataAdmission(Ptr<Packet>,CustomHeader&,uint32_t,uint32_t,uint32_t) override;
+    bool HandleLocalCongestion(uint32_t,uint32_t,Ptr<Packet>,CustomHeader&) override;
     static Ipv4Address ControlAddress(uint32_t node);
     static Ptr<Packet> ControlPacket(R5Header,Ipv4Address src,Ipv4Address dst);
 protected:
@@ -121,7 +123,7 @@ private:
         uint64_t connection=0, query=0;
         int64_t ackSent=0;
         double response=0, localRtt=0;
-        bool confirmed=false;
+        bool confirmed=false, fastCnp=false;
     };
     struct ResourceControl {
         double net=0, budget=0;
@@ -140,6 +142,11 @@ private:
     Config m_config;
     uint32_t m_peer=0,m_wan=0,m_frame=0,m_nextFlow=1,m_nextResource=1,m_reportCursor=0;
     bool m_enabled=false,m_started=false,m_peerFull=false,m_backpressureActive=false;
+    uint64_t m_sourceIngressCe=0,m_sourceClearedCe=0;
+    uint64_t m_fastCnpCandidates=0,m_fastCnpSubmitted=0,m_fastCnpTx=0,m_fastCnpTxFailed=0;
+    uint64_t m_fastCnpLimited=0,m_fastCnpUnconfirmed=0,m_fastCnpSubmitFailed=0,m_fastCnpReplaced=0;
+    uint64_t m_fastCnpCoalesced=0;
+    uint64_t m_fastCnpIngressHandled=0,m_fastCnpIngressCoalesced=0;
     int64_t m_forwardBase=0,m_reverseBase=0,m_lastBackpressure=0;
     int64_t m_lastPeerPressure=0, m_controlUpdated=0;
     int64_t m_lastReceiverSample=-1;
@@ -179,7 +186,7 @@ private:
     void ReclaimFlows();
     void EraseFlow(uint32_t);
     void WriteFlowMetadata(std::ostream&,const Flow&,bool retired=false) const;
-    void Send(R5Header,Ipv4Address destination);
+    bool Send(R5Header,Ipv4Address destination);
     void ReceiveControl(Ptr<Packet>,const CustomHeader&);
     bool RecordForecast(uint32_t,const Forecast&);
     void ValidateForecasts(uint32_t,const Record&);
@@ -195,7 +202,8 @@ private:
     void ReallocateSources();
     void UpdateBackpressure();
     double LocalCnpWait(const Flow&) const;
-    void SendNearCnp(Flow&,const char*);
+    bool SendNearCnp(Flow&,const char*);
+    bool HandleFastCnp(Flow&,Ptr<Packet>,CustomHeader&,bool upstreamCe);
     void Tick();
     static Prediction Replay(int64_t sample,int64_t end,int64_t peakBegin,double queue,double service,
                              const std::vector<Arrival>& arrivals);

@@ -308,6 +308,18 @@ Ptr<RdmaQueuePair> RdmaHw::GetQpByQpn(uint32_t qpn,uint32_t peer) {
     auto it=m_txQpn.find(qpn);
     return it!=m_txQpn.end() && it->second->dip.Get()==peer ? it->second : nullptr;
 }
+bool RdmaHw::ReceiveFastCnp(uint32_t peer,uint32_t destinationQpn,uint64_t connection) {
+    if (m_fastCnpSupported && m_cc_mode==1 && destinationQpn && destinationQpn<=0xffffff) {
+        for (const auto& item:m_txQpn) {
+            auto qp=item.second;
+            if (qp->connected && qp->dip.Get()==peer && qp->destQpn==destinationQpn &&
+                qp->connectionGeneration==connection) {
+                cnp_received_mlx(qp); ++m_fastCnpReceived; return true;
+            }
+        }
+    }
+    ++m_fastCnpRejected; return false;
+}
 Ptr<RdmaRxQueuePair> RdmaHw::GetRxQpByQpn(uint32_t qpn,uint32_t peer) {
     auto it=m_rxQpn.find(qpn);
     return it!=m_rxQpn.end() && it->second->dip==peer ? it->second : nullptr;

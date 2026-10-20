@@ -137,11 +137,12 @@ def main():
     if not topology_source.is_file():
         parser.error("topology file not found: " + str(topology_source))
     algorithm = args.algorithm
+    algorithm_dir = "proposed-fast-cnp" if algorithm == "proposed" else algorithm
     planned_dirs = set()
     for flow_path in flow_paths:
         for run in range(1, args.runs + 1):
             seed_label = str(args.seed) if args.seed is not None else "config"
-            run_dir = args.output_root / flow_label(flow_path) / algorithm / f"seed{seed_label}-run{run}"
+            run_dir = args.output_root / flow_label(flow_path) / algorithm_dir / f"seed{seed_label}-run{run}"
             if run_dir in planned_dirs:
                 parser.error(f"multiple runs would use the same directory: {run_dir}")
             planned_dirs.add(run_dir)
@@ -183,7 +184,7 @@ def main():
         label = flow_label(flow_path)
         for run in range(1, args.runs + 1):
             seed_label = str(args.seed) if args.seed is not None else "config"
-            run_dir = args.output_root / label / algorithm / f"seed{seed_label}-run{run}"
+            run_dir = args.output_root / label / algorithm_dir / f"seed{seed_label}-run{run}"
             run_dir.mkdir(parents=True, exist_ok=True)
             inputs=run_dir/"inputs"; inputs.mkdir()
             flow_copy=inputs/flow_path.name
@@ -202,6 +203,10 @@ def main():
                 "RTT_OUTPUT_FILE": run_dir / "measured-rtt.csv",
                 "SUMMARY_META_FILE": run_dir / "metadata.json",
                 "PROPOSED_OUTPUT": run_dir / "r5",
+                "SIMULATOR_STOP_TIME": stop_time if stop_time is not None else config_value(config_path, "SIMULATOR_STOP_TIME"),
+                "RNG_SEED": args.seed if args.seed is not None else config_value(config_path, "RNG_SEED") or 1,
+                "RNG_RUN": run,
+                "CC": algorithm,
             })
             effective_config_path.write_text(effective_config_text)
             effective_config_hash = hashlib.sha256(effective_config_text.encode()).hexdigest()
@@ -257,6 +262,17 @@ def main():
                 "stop_rule": "fixed common simulator stop time; no algorithm-specific early selection",
                 "queue_mode": proposed_parameters.get("queue_mode"),
                 "service_mode": proposed_parameters.get("service_mode"),
+                "r5_ecn_mode": proposed_parameters.get("ecn_mode"),
+                "near_cnp_policy": proposed_parameters.get("near_cnp_policy"),
+                "pressure_cnp_deadband_bytes": proposed_parameters.get("pressure_cnp_deadband_bytes"),
+                "fast_cnp_format": proposed_parameters.get("fast_cnp_format"),
+                "fast_cnp_policy": proposed_parameters.get("fast_cnp_policy"),
+                "fast_cnp_policy_version": proposed_parameters.get("fast_cnp_policy_version"),
+                "fast_cnp_role_policy": proposed_parameters.get("fast_cnp_role_policy"),
+                "source_gateway_ecn_policy": proposed_parameters.get("source_gateway_ecn_policy"),
+                "fast_cnp_window_ns": proposed_parameters.get("fast_cnp_window_ns"),
+                "fast_cnp_capability": proposed_parameters.get("fast_cnp_capability"),
+                "fast_cnp_fallback": proposed_parameters.get("fast_cnp_fallback"),
                 **build_identity,
                 "binary_file": str(binary),
                 "flow_sha256": sha256(flow_path),

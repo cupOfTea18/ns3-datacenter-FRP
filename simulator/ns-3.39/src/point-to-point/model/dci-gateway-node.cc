@@ -1,7 +1,7 @@
 #include "dci-gateway-node.h"
-#include "cn-header.h"
 #include "ppp-header.h"
 #include "qbb-header.h"
+#include "ns3/interface-tag.h"
 #include "ns3/ipv4-header.h"
 #include "ns3/simulator.h"
 #include <algorithm>
@@ -31,16 +31,16 @@ TypeId R5Header::GetTypeId() {
 }
 TypeId R5Header::GetInstanceTypeId() const { return GetTypeId(); }
 void R5Header::Serialize(Buffer::Iterator i) const {
-    i.WriteHtonU32(0x52350008); i.WriteHtonU16(type); i.WriteHtonU16(FIELDS);
+    i.WriteHtonU32(0x52350009); i.WriteHtonU16(type); i.WriteHtonU16(FIELDS);
     for (auto value:v) i.WriteHtonU64(value);
 }
 uint32_t R5Header::Deserialize(Buffer::Iterator i) {
-    if (i.GetRemainingSize()!=GetSerializedSize() || i.ReadNtohU32()!=0x52350008) return 0;
-    type=i.ReadNtohU16(); if (type<PROBE || type>RETIRE_ACK || i.ReadNtohU16()!=FIELDS) return 0;
+    if (i.GetRemainingSize()!=GetSerializedSize() || i.ReadNtohU32()!=0x52350009) return 0;
+    type=i.ReadNtohU16(); if (type<PROBE || type>FAST_CNP || i.ReadNtohU16()!=FIELDS) return 0;
     for (auto& value:v) value=i.ReadNtohU64();
     return GetSerializedSize();
 }
-void R5Header::Print(std::ostream& out) const { out<<"R5/v8 type="<<type; }
+void R5Header::Print(std::ostream& out) const { out<<"R5/v9 type="<<type; }
 TypeId DciGatewayNode::GetTypeId() {
     static TypeId id=TypeId("ns3::DciGatewayNode").SetParent<SwitchNode>().AddConstructor<DciGatewayNode>(); return id;
 }
@@ -213,8 +213,50 @@ bool DciGatewayNode::PrepareDataAdmission(Ptr<Packet> p,CustomHeader& h,uint32_t
     }
     if (f->source!=source || f->port!=egress || f->pg!=pg) return reject("unsupported_route_or_pg_migration");
     if (source && !BindQueue(*f)) return reject("queue_full_existing_identity");
+    InterfaceTag tag;
+    if (source && ingress!=m_wan && ingress<GetNDevices() &&
+        p->PeekPacketTag(tag) && tag.GetPortId()==ingress &&
+        f->sport==h.udp.sport && f->dport==h.udp.dport && h.GetIpv4EcnBits()==CustomHeader::ECN_CE) {
+        ++m_sourceIngressCe;
+        HandleFastCnp(*f,p,h,true);
+    }
     f->lastData=NowNs();
     return true;
+}
+bool DciGatewayNode::HandleLocalCongestion(uint32_t port,uint32_t pg,Ptr<Packet> p,CustomHeader& h) {
+    if (!m_started || port!=m_wan || h.l3Prot!=0x11) return false;
+    InterfaceTag ingress;
+    auto f=Match(p);
+    if (!p->PeekPacketTag(ingress) || ingress.GetPortId()==m_wan || ingress.GetPortId()>=GetNDevices() ||
+        !f || !f->source || f->port!=port || f->pg!=pg || f->sport!=h.udp.sport || f->dport!=h.udp.dport) return false;
+    ++m_fastCnpCandidates;
+    return HandleFastCnp(*f,p,h,false);
+}
+bool DciGatewayNode::HandleFastCnp(Flow& f,Ptr<Packet> p,CustomHeader& h,bool upstreamCe) {
+    auto registration=m_registrations.find(f.key);
+    // A successful Fast CNP covers this QP for [lastCnp, lastCnp+cnpInterval).
+    // Reusing coverage never extends it. Native CNPs cannot open this window.
+    const bool covered=!f.completed && registration!=m_registrations.end() &&
+        registration->second.confirmed && registration->second.fastCnp &&
+        f.lastCnp>=0 && NowNs()-f.lastCnp<Ns(m_config.cnpInterval);
+    if (covered) {
+        if (upstreamCe) ++m_fastCnpIngressCoalesced; else ++m_fastCnpCoalesced;
+    } else if (!SendNearCnp(f,upstreamCe ? "upstream_ce" : "local_ecn")) return false;
+    if (upstreamCe) ++m_fastCnpIngressHandled; else ++m_fastCnpReplaced;
+    if (h.GetIpv4EcnBits()==CustomHeader::ECN_CE) {
+        // This tree models 14 L2 bytes, but PppHeader serializes only the first two.
+        // Preserve the remaining bytes when rebuilding the IPv4 checksum/header.
+        std::vector<uint8_t> link(PppHeader::GetStaticSize()); p->CopyData(link.data(),link.size());
+        PppHeader ppp; Ipv4Header ip;
+        if (Node::ChecksumEnabled() || h.m_checksum) ip.EnableChecksum();
+        p->RemoveHeader(ppp); p->RemoveHeader(ip);
+        ip.SetEcn(Ipv4Header::ECN_ECT0);
+        p->AddHeader(ip); p->AddHeader(ppp);
+        std::copy(link.begin(),link.end(),p->GetBuffer());
+        h.m_tos=ip.GetTos(); h.m_checksum=Parse(p).m_checksum;
+        ++m_sourceClearedCe;
+    }
+    return true; // Both upstream CE and local ECN share this QP's fixed window.
 }
 uint32_t DciGatewayNode::Classify(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,uint32_t pg) {
     auto f=self->Match(p);
@@ -260,6 +302,12 @@ void DciGatewayNode::Dequeue(DciGatewayNode* self,uint32_t port,Ptr<const Packet
 void DciGatewayNode::Transmitted(DciGatewayNode* self,uint32_t port,Ptr<const Packet> p,bool success) {
     auto h=Parse(p);
     if (h.l3Prot==0xf9 && success) Add(self->m_controlTx,p->GetSize());
+    if (h.l3Prot==0xf9 && h.sip==ControlAddress(self->GetId()).Get()) {
+        auto copy=p->Copy(); copy->RemoveAtStart(h.GetSerializedSize()); H control;
+        if (copy->RemoveHeader(control) && control.type==H::FAST_CNP) {
+            if (success) ++self->m_fastCnpTx; else ++self->m_fastCnpTxFailed;
+        }
+    }
     auto f=self->Match(p); if (!f || f->port!=port) return;
     int64_t arrival=-1;
     if (success) {
@@ -295,19 +343,24 @@ Ptr<Packet> DciGatewayNode::ControlPacket(H h,Ipv4Address src,Ipv4Address dst) {
     ip.SetTtl(64); ip.SetPayloadSize(packet->GetSize()); packet->AddHeader(ip);
     PppHeader ppp; ppp.SetProtocol(0x0021); packet->AddHeader(ppp); return packet;
 }
-void DciGatewayNode::Send(H h,Ipv4Address destination) {
+bool DciGatewayNode::Send(H h,Ipv4Address destination) {
     h.v[H::SESSION]=m_config.session;
     auto packet=ControlPacket(h,ControlAddress(GetId()),destination);
     auto header=Parse(packet); int egress=LookupOutputPort(packet,header);
+    if (h.type==H::FAST_CNP && egress<0) return false;
     NS_ABORT_MSG_IF(egress<0,"missing R5 control route");
     const auto now=NowNs();
     m_controlTokens=std::min(double(m_config.controlBurstBytes),m_controlTokens+
         Port(m_wan)->GetDataRate().GetBitRate()/8.0*m_config.controlFraction*(now-m_controlUpdated)*1e-9);
     m_controlUpdated=now;
     if (m_controlTokens<packet->GetSize() || Port(egress)->GetQueue()->GetNBytes(0)+packet->GetSize()>m_config.controlQueueBytes) {
-        ++m_controlDropped; Event("CONTROL_DROP",h.type,packet->GetSize(),"control_budget"); return;
+        ++m_controlDropped; Event("CONTROL_DROP",h.type,packet->GetSize(),"control_budget"); return false;
     }
-    m_controlTokens-=packet->GetSize(); SendNetworkControl(packet);
+    if (h.type==H::FAST_CNP) {
+        if (!TrySendNetworkControl(packet)) return false;
+    } else SendNetworkControl(packet);
+    m_controlTokens-=packet->GetSize();
+    return true;
 }
 void DciGatewayNode::Stamp(Ptr<Packet> p) {
     auto ip=Parse(p); if (ip.l3Prot!=0xf9 || ip.sip!=ControlAddress(GetId()).Get()) return;
@@ -398,6 +451,7 @@ void DciGatewayNode::ReceiveControl(Ptr<Packet> p,const CustomHeader& ip) {
             // The source reports its configured RNIC reaction timer in the confirmation.
             if (v[H::INTERVAL_NS]>uint64_t(Ns(m_config.timeout))) { reject("host_response_timer"); return; }
             it->second.response=it->second.localRtt+v[H::INTERVAL_NS]*1e-9;
+            it->second.fastCnp=(v[H::FLAGS]&H::FAST_CNP_CAPABLE)!=0;
             it->second.confirmed=true;
             Event("REGISTER_CONFIRMED",0,it->second.response,"measured_local_round_trip");
         }
@@ -1056,17 +1110,24 @@ double DciGatewayNode::LocalCnpWait(const Flow& f) const {
     return it!=m_registrations.end() && it->second.confirmed
         ? std::max(m_config.localWait,it->second.response) : m_config.localWait;
 }
-void DciGatewayNode::SendNearCnp(Flow& f,const char* reason) {
+bool DciGatewayNode::SendNearCnp(Flow& f,const char* reason) {
     auto it=m_registrations.find(f.key);
-    if (f.completed || it==m_registrations.end() || !it->second.confirmed ||
-        (f.lastCnp>=0 && NowNs()-f.lastCnp<Ns(m_config.cnpInterval))) return;
-    CnHeader header(f.sport,f.pg,3,1,1); header.destQpn=it->second.sourceQpn;
-    auto packet=Create<Packet>(); packet->AddHeader(header);
-    Ipv4Header ip; ip.SetSource(Ipv4Address(f.key.dstIp)); ip.SetDestination(Ipv4Address(f.key.srcIp));
-    ip.SetProtocol(0xff); ip.SetTtl(64); ip.SetPayloadSize(packet->GetSize()); packet->AddHeader(ip);
-    PppHeader ppp; ppp.SetProtocol(0x0021); packet->AddHeader(ppp); SendNetworkControl(packet);
+    if (f.completed || it==m_registrations.end() || !it->second.confirmed || !it->second.fastCnp) {
+        ++m_fastCnpUnconfirmed;
+        return false;
+    }
+    if (f.lastCnp>=0 && NowNs()-f.lastCnp<Ns(m_config.cnpInterval)) {
+        ++m_fastCnpLimited;
+        return false;
+    }
+    H h; h.type=H::FAST_CNP;
+    h.v[H::SIP]=f.key.srcIp; h.v[H::DIP]=f.key.dstIp; h.v[H::QPN]=f.key.destQpn;
+    h.v[H::CONNECTION]=it->second.connection; h.v[H::SAMPLE]=NowNs();
+    if (!Send(h,Ipv4Address(f.key.srcIp))) { ++m_fastCnpSubmitFailed; return false; }
+    ++m_fastCnpSubmitted;
     f.responsePending=true; f.responseBaseline=f.supply;
     f.lastCnp=NowNs(); ++f.nearCnps; Event("NEAR_CNP",f.id,f.nearCnps,reason);
+    return true;
 }
 void DciGatewayNode::UpdateBackpressure() {
     auto now=NowNs(); if (now<=m_lastBackpressure) return;
@@ -1097,7 +1158,10 @@ void DciGatewayNode::UpdateBackpressure() {
         double contribution=double(f.in-f.previousIn)-double(f.dequeued-f.previousTx);
         if (emergency) {
             SendNearCnp(f,"emergency");
-        } else if (m_backpressureActive && !draining && contribution>=0) {
+        } else if (m_backpressureActive && !draining &&
+                   f.Queue()>m_frame && contribution>double(m_frame)) {
+            // Only this QP's accumulating backlog warrants ordinary pressure feedback.
+            // A one-frame deadband rejects zero growth and packet-boundary sampling noise.
             // Native and gateway feedback share a response wait only within this QP.
             auto last=std::max(f.lastCnp,f.lastNative);
             if (last<0 || now-last>=Ns(std::max(LocalCnpWait(f),m_config.cnpInterval)))
@@ -1156,6 +1220,15 @@ void DciGatewayNode::WriteFlowMetadata(std::ostream& out,const Flow& f,bool reti
 }
 void DciGatewayNode::WriteMetadata(std::ostream& out) const {
     out<<"{\"node\":"<<GetId()<<",\"session\":"<<m_config.session<<",\"peer\":"<<m_peer<<",\"wan_port\":"<<m_wan
+       <<",\"fast_cnp_enabled\":"<<(m_started ? "true" : "false")
+       <<",\"source_ingress_ce_packets\":"<<m_sourceIngressCe<<",\"source_cleared_ce_packets\":"<<m_sourceClearedCe
+       <<",\"fast_cnp_candidates\":"<<m_fastCnpCandidates<<",\"fast_cnp_submitted\":"<<m_fastCnpSubmitted
+       <<",\"fast_cnp_tx\":"<<m_fastCnpTx<<",\"fast_cnp_tx_failed\":"<<m_fastCnpTxFailed
+       <<",\"fast_cnp_replaced_packets\":"<<m_fastCnpReplaced<<",\"fast_cnp_rate_limited\":"<<m_fastCnpLimited
+       <<",\"fast_cnp_coalesced_packets\":"<<m_fastCnpCoalesced
+       <<",\"fast_cnp_ingress_handled_packets\":"<<m_fastCnpIngressHandled
+       <<",\"fast_cnp_ingress_coalesced_packets\":"<<m_fastCnpIngressCoalesced
+       <<",\"fast_cnp_unconfirmed\":"<<m_fastCnpUnconfirmed<<",\"fast_cnp_submit_failed\":"<<m_fastCnpSubmitFailed
        <<",\"frame_bytes\":"<<m_frame<<",\"burst_bytes\":"<<4*m_frame<<",\"flows\":[";
     bool comma=false;
     // Archive is reporting only: reclaimed identities do not remain in control memory.

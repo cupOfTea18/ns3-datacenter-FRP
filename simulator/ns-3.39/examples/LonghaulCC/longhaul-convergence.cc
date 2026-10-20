@@ -507,7 +507,7 @@ void CountDciEcn(Ptr<QbbNetDevice> dev, Ptr<const Packet> packet, uint32_t) {
 	Ptr<Packet> copy = packet->Copy();
 	CustomHeader header(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
 	copy->PeekHeader(header);
-	if (header.l3Prot == 0x11 && header.GetIpv4EcnBits() != 0) {
+	if (header.l3Prot == 0x11 && header.GetIpv4EcnBits() == CustomHeader::ECN_CE) {
 		if (dev == dci_left_device) dci_left_ecn_events++;
 		if (dev == dci_right_device) dci_right_ecn_events++;
 	}

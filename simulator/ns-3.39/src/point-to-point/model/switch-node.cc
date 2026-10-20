@@ -327,6 +327,19 @@ void SwitchNode::SendNetworkControl(Ptr<Packet> packet) {
     SendToDev(packet, header);
 }
 
+bool SwitchNode::TrySendNetworkControl(Ptr<Packet> packet) {
+    CustomHeader header(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+    packet->PeekHeader(header);
+    int port=GetOutDev(packet,header);
+    if (port<0 || !m_devices[port]->IsLinkUp()) return false;
+    auto queue=DynamicCast<QbbNetDevice>(m_devices[port])->GetQueue();
+    DoubleValue limit; queue->GetAttribute("MaxBytes",limit);
+    if (double(queue->GetNBytesTotal())+packet->GetSize()>=limit.Get()) return false;
+    // No intervening event: SwitchSend either enqueues or aborts on an invariant failure.
+    SendNetworkControl(packet);
+    return true;
+}
+
 void SwitchNode::AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx) {
 	uint32_t dip = dstAddr.Get();
 	m_rtTable[dip].push_back(intf_idx);
@@ -365,20 +378,24 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		m_mmu->RemoveFromIngressAdmission(inDev, qIndex, p->GetSize(), found);
 		m_mmu->RemoveFromEgressAdmission(ifIndex, qIndex, p->GetSize(), found);
 		m_bytes[inDev][ifIndex][qIndex] -= p->GetSize();
-        const bool suppressDataCe=m_ecnDisabledPorts.count(ifIndex) &&
-            p->GetBuffer()[PppHeader::GetStaticSize()+9]==0x11;
-        if (m_ecnEnabled && !suppressDataCe)
+        if (m_ecnEnabled)
         {
             bool egressCongested = m_mmu->ShouldSendCN(ifIndex, qIndex);
             if (egressCongested)
             {
-                PppHeader ppp;
-                Ipv4Header h;
-                p->RemoveHeader(ppp);
-                p->RemoveHeader(h);
-                h.SetEcn((Ipv4Header::EcnType)0x03);
-                p->AddHeader(h);
-                p->AddHeader(ppp);
+                CustomHeader current(CustomHeader::L2_Header | CustomHeader::L3_Header | CustomHeader::L4_Header);
+                p->PeekHeader(current);
+                if (!HandleLocalCongestion(ifIndex,qIndex,p,current)) {
+                    PppHeader ppp;
+                    Ipv4Header h;
+                    const auto* bytes=p->GetBuffer()+PppHeader::GetStaticSize();
+                    if (Node::ChecksumEnabled() || bytes[10] || bytes[11]) h.EnableChecksum();
+                    p->RemoveHeader(ppp);
+                    p->RemoveHeader(h);
+                    h.SetEcn((Ipv4Header::EcnType)0x03);
+                    p->AddHeader(h);
+                    p->AddHeader(ppp);
+                }
                 if (m_atcGateway.m_gatewayType == 1)
                 {                                    // ← 新增
                     m_atcGateway.m_congested = true; // ←

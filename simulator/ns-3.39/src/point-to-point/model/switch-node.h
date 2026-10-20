@@ -34,7 +34,6 @@ protected:
 	void DoDispose() override;
 	virtual void NotifyAdmissionDrop(uint32_t, uint32_t, Ptr<const Packet>) {}
 	bool m_ecnEnabled;
-    std::set<uint32_t> m_ecnDisabledPorts;
 	uint32_t m_ccMode;
 	uint64_t m_maxRtt;
 
@@ -120,12 +119,13 @@ public:
 	void SetEcmpSeed(uint32_t seed);
 	void AddTableEntry(Ipv4Address &dstAddr, uint32_t intf_idx);
 	void ClearTable();
-    // Suppress new CE on UDP data at this egress; preserve existing CE and control marking.
-    void DisableEcnMarking(uint32_t port) { m_ecnDisabledPorts.insert(port); }
     // Read the same ECMP decision used by forwarding; does not change routes.
     int LookupOutputPort(Ptr<const Packet> packet, CustomHeader &header);
     // Locally originated network control is routed normally in priority zero.
     void SendNetworkControl(Ptr<Packet> packet);
+    // Locally generated priority-zero control; false leaves the data feedback intact.
+    bool TrySendNetworkControl(Ptr<Packet> packet);
+    virtual bool HandleLocalCongestion(uint32_t, uint32_t, Ptr<Packet>, CustomHeader&) { return false; }
 	uint32_t GetRouteTableSize() const { return m_rtTable.size(); }
 	const std::unordered_map<uint32_t, std::vector<int>>& GetRouteTable() const { return m_rtTable; }
 	void SetSwitchRealIp(Ipv4Address ip);  // 设置交换机真实IP

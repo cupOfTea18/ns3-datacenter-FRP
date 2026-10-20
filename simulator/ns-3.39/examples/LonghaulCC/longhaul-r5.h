@@ -12,6 +12,9 @@ struct PendingRegistration {
     EventId event;
 };
 std::map<std::pair<uint32_t,uint32_t>,PendingRegistration> registrations;
+struct FastCnpHost { Ptr<RdmaHw> hw; uint32_t gateway; };
+std::map<uint32_t,FastCnpHost> fastCnpHosts;
+uint64_t fastCnpSourceRejected=0;
 Ipv4Address ControlAddress(uint32_t node) { return DciGatewayNode::ControlAddress(node); }
 void Register(std::pair<uint32_t,uint32_t> key) {
     auto it=registrations.find(key); if (it==registrations.end()) return;
@@ -29,7 +32,20 @@ void Register(std::pair<uint32_t,uint32_t> key) {
 }
 void ReceiveRegistration(Ptr<Packet> packet,const CustomHeader& ip) {
     auto copy=packet->Copy(); copy->RemoveAtStart(ip.GetSerializedSize());
-    R5Header h; if (!copy->RemoveHeader(h) || (h.type!=R5Header::REGISTER_ACK && h.type!=R5Header::COMPLETE_ACK)) return;
+    R5Header h; if (!copy->RemoveHeader(h)) return;
+    if (h.type==R5Header::FAST_CNP) {
+        auto host=fastCnpHosts.find(ip.dip);
+        if (host==fastCnpHosts.end() || ip.sip!=ControlAddress(host->second.gateway).Get() ||
+            h.v[R5Header::SESSION]!=config.session || h.v[R5Header::SIP]!=ip.dip ||
+            h.v[R5Header::DIP]>UINT32_MAX || h.v[R5Header::QPN]>0xffffff ||
+            h.v[R5Header::SAMPLE]>uint64_t(Simulator::Now().GetNanoSeconds()) ||
+            Simulator::Now().GetNanoSeconds()-h.v[R5Header::SAMPLE]>uint64_t(Seconds(config.timeout).GetNanoSeconds())) {
+            ++fastCnpSourceRejected; return;
+        }
+        host->second.hw->ReceiveFastCnp(h.v[R5Header::DIP],h.v[R5Header::QPN],h.v[R5Header::CONNECTION]);
+        return;
+    }
+    if (h.type!=R5Header::REGISTER_ACK && h.type!=R5Header::COMPLETE_ACK) return;
     auto it=registrations.find({ip.dip,uint32_t(h.v[R5Header::SRC_QPN])});
     if (it==registrations.end()) return;
     auto& r=it->second;
@@ -46,6 +62,7 @@ void ReceiveRegistration(Ptr<Packet> packet,const CustomHeader& ip) {
     if (h.type!=R5Header::REGISTER_ACK) return;
     h.type=R5Header::REGISTER_CONFIRM;
     h.v[R5Header::INTERVAL_NS]=MicroSeconds(r.hw->m_rateDecreaseInterval).GetNanoSeconds();
+    if (r.hw->m_fastCnpSupported) h.v[R5Header::FLAGS]|=R5Header::FAST_CNP_CAPABLE;
     auto confirmation=Create<Packet>(); confirmation->AddHeader(h);
     r.hw->SendControlPacket(confirmation,r.qp->sip,ControlAddress(r.gateway),0xf9);
     Simulator::Cancel(r.event); registrations.erase(it);
@@ -87,6 +104,9 @@ void Setup() {
         if (selected_cc=="proposed") {
             hw->m_controlReceive=MakeCallback(&ReceiveRegistration);
             hw->m_qpFinished=MakeCallback(&Completed);
+            hw->m_fastCnpSupported=true;
+            fastCnpHosts.emplace(serverAddress[node].Get(),FastCnpHost{hw,
+                addressPlan.dc[node]==1 ? dci_gateway_a_id : dci_gateway_b_id});
         }
     }
     if (selected_cc!="proposed") return;
@@ -97,9 +117,6 @@ void Setup() {
         auto peer=target==dci_gateway_a_id ? dci_gateway_b_id : dci_gateway_a_id;
         gateway->SetPeer(peer,nbr2if[n.Get(target)].at(n.Get(peer)).idx,
                          packet_payload_size+CustomHeader::GetStaticWholeHeaderSize());
-        // Only A's WAN egress stops adding CE; other ports and existing CE are unchanged.
-        if (target==dci_gateway_a_id)
-            gateway->DisableEcnMarking(nbr2if[n.Get(target)].at(n.Get(peer)).idx);
         CalculateRoute(n.Get(target)); auto address=ControlAddress(target);
         for (uint32_t node=0;node<n.GetN();++node) if (node!=target) {
             for (auto hop:nextHop[n.Get(node)][n.Get(target)]) {
@@ -118,7 +135,9 @@ void Setup() {
         DynamicCast<DciGatewayNode>(n.Get(target))->Start();
 }
 void WriteMetadata(std::ostream& out) {
-    out<<"  \"proposed_parameters\": {\"version\":5,\"schema_version\":4,\"wire_version\":8,\"enabled\":"
+    uint64_t fastReceived=0,fastRejected=fastCnpSourceRejected;
+    for (const auto& host:fastCnpHosts) { fastReceived+=host.second.hw->m_fastCnpReceived; fastRejected+=host.second.hw->m_fastCnpRejected; }
+    out<<"  \"proposed_parameters\": {\"version\":5,\"schema_version\":4,\"wire_version\":9,\"enabled\":"
        <<(selected_cc=="proposed" ? "true" : "false")
        <<",\"flow_key\":\"src-ip,dst-ip,dest-qpn\",\"discovery\":\"first-data-independent\""
        <<",\"queue_mode\":\"per-flow-full-rtt\""
@@ -137,9 +156,20 @@ void WriteMetadata(std::ostream& out) {
        <<",\"service_mode\":\"shared-resource-budget-max-min-injection\""
        <<",\"prediction_scope\":\"shared-physical-queue\""
        <<",\"future_supply\":\"recent-admission-window-packetized\""
-       <<",\"near_cnp_policy\":\"local-pool-hysteresis-per-qp-contributor-response-wait\""
+       <<",\"near_cnp_policy\":\"per-qp-backlog-and-net-growth-one-frame-deadband-response-wait-emergency-override\""
        <<",\"native_cnp_policy\":\"account-and-forward-unchanged\""
-       <<",\"a_wan_ecn_policy\":\"suppress-new-data-ce-preserve-existing-ce\""
+       <<",\"ecn_mode\":\""<<(selected_cc=="proposed" ? "fast-cnp" : "normal-ecn")<<"\""
+       <<",\"pressure_cnp_deadband_bytes\":"<<packet_payload_size+CustomHeader::GetStaticWholeHeaderSize()
+       <<",\"fast_cnp_format\":\"modeled-ipv4-r5-control-v9-not-ietf-ipv6-wire-format\""
+       <<",\"fast_cnp_policy_version\":4"
+       <<",\"fast_cnp_policy\":\"per-qp-fixed-window-shared-ingress-upstream-ce-and-egress-local-ecn\""
+       <<",\"fast_cnp_role_policy\":\"per-flow-lan-to-wan-source-gateway-in-either-dc\""
+       <<",\"source_gateway_ecn_policy\":\""<<(selected_cc!="proposed" ? "normal-ecn" :
+           "fast-cnp-ingress-ce-and-egress-local-ecn-shared-window")<<"\""
+       <<",\"fast_cnp_window_ns\":"<<Seconds(config.cnpInterval).GetNanoSeconds()
+       <<",\"fast_cnp_capability\":\"explicit-register-confirm-flag\""
+       <<",\"fast_cnp_fallback\":\"normal-ecn-without-valid-window-if-new-submit-fails-or-capability-unknown\""
+       <<",\"fast_cnp_received\":"<<fastReceived<<",\"fast_cnp_rejected\":"<<fastRejected
        <<",\"sample_boundary_policy\":\"clip-average-intervals-future-packets-same-ns-conservative\""
        <<",\"destination_budget_source\":\"management-nic-physical-ceiling-not-available-share\""
        <<",\"bucket_frames\":4,\"initial_bucket\":\"full\",\"zero_rate_tokens\":\"preserve\""

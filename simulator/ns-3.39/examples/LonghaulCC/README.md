@@ -29,6 +29,49 @@ runner 保存实际配置和输入副本及哈希，`--skip-build` 仅允许与�
 使用新的输出目录。有限流验收要求流全部完成；瞬态运行不能套用此要求。
 Bifrost 仅支持 PG=3；`run-longhaul-all.py --algorithms dcqcn hpcc timely bifrost proposed` 可批量运行。
 
+Proposed 固定使用 Fast CNP，不再提供 ECN 模式选择参数或配置键。
+结果保存在 `proposed-fast-cnp` 目录，其他算法沿用正常 ECN。
+
+本地/远端网关按每条流的方向确定：源 DC 的网关为本地网关，两侧均支持。
+本地网关入站发现已有 CE 时立即反馈；WAN 出队命中正常 `ShouldSendCN()` 时也进入同一处理函数。
+确认源 QP 支持并成功提交 Fast CNP 后，开启固定窗口 `[提交时间, 提交时间+cnpInterval)`，默认 50 μs。
+窗口内同 QP 的拥塞信号复用通知：已有 CE 改为 ECT(0)，出口停止新增 CE；复用不延长窗口。
+无有效窗口且提交失败、能力未确认或撤销时，保留已有 CE 和正常本地标记。
+非 CE、DSCP、载荷、包长、其他头字段及校验和保持正确；远端角色、DC 内流和控制报文不清除 CE。
+原生 ACK/NACK/CNP 仍正常转发，源端收到 Fast CNP 后由现有 DCQCN 调整速率。
+
+缓存压力反馈共用发送入口和窗口，保留全局高低水位及逐 QP 响应等待。
+**非紧急时仅反馈自身积压超过一帧、且最近采样窗口净积压增长超过一帧的 QP**；
+一帧取配置的最大数据帧长，默认采样窗口 200 μs，用来滤除零贡献和单包采样误差。
+全局进入压力状态不会直接惩罚所有流。紧急风险仍可向本轮有入站数据的 QP 反馈，保留能力核验和 50 μs 限频。
+此筛选仅影响缓存压力 CNP，不阻止上游 CE 或本地 ECN 的直接反馈。
+
+Fast CNP 使用 R5/v9 IPv4 控制报文，携带网关身份、原始接收端地址/目的 QPN/连接代号；
+端侧通过 REGISTER_CONFIRM 声明支持，只接受自身 DC 网关的通知。它是仿真格式及上游 CE 清除扩展，
+不是 IETF IPv6 线格式。成功提交不保证送达，提交、实际发送/失败和端侧接收分别计数。
+
+`metadata.json`、`r5.final.json` 和 `runner-metadata.json` 记录固定策略与构建身份。
+`fast_cnp_policy_version=4` 区分本次压力对象筛选；`near_cnp_policy` 和 `pressure_cnp_deadband_bytes` 记录规则与容限。
+`gateways[].source_ingress_ce_packets/source_cleared_ce_packets` 分别记录匹配的入站 CE 和实际清除数；
+`fast_cnp_ingress_handled_packets/ingress_coalesced_packets` 统计入站处理，
+`fast_cnp_replaced_packets/coalesced_packets` 统计出口处理；submitted/tx/tx_failed 与端侧 received/rejected 核对通知路径。
+`dci-link.csv` 的 `ecn_events` 只统计 CE。
+
+在仓库根目录直接运行：
+
+```bash
+python3 simulator/ns-3.39/examples/LonghaulCC/run-longhaul-all.py
+# 或只运行 Proposed
+python3 simulator/ns-3.39/examples/LonghaulCC/run-longhaul.py --algorithm proposed
+```
+
+针对性回归（在 ns-3 根目录）：`./ns3 build longhaul-r5-ecn-test -j2`，然后
+`./ns3 run 'longhaul-r5-ecn-test --output=/absolute/path/to/test-prefix'`。
+通过真实 Qbb 接收、排队、出队及链路检查双向网关角色、CE/ECN 共用窗口、续开、跨 QP 隔离、
+能力撤销、提交失败、报文完整性与源端 DCQCN；另以暂停不同 PG 制造积压，检查压力反馈对象与紧急保护。
+有限流运行还需检查完成率、收发闭合、丢包和残留队列。正式比较应同时观察实际发送速率、接收 goodput、
+FCT/完成率、队列、PFC、丢包及两类 CNP，吞吐或 CNP 数量单项不能说明优劣。
+
 流文件第一行为数量，随后每行是：
 
 ```text
@@ -100,7 +143,7 @@ A 每 5 µs 保存累计成功 TX 快照，按差分生成均匀到达区间；�
 D8 暂缓；周期历史按重叠区间裁剪，未来包在同纳秒采样边界仍保守包含到达，不宣称完成跨代累计核销或严格误差界。
 
 本地 CNP 只由 A 的真实缓存压力触发，普通情况选择主要积压贡献流并等待本地/原生 CNP 的响应，排空时
-停止追加；紧急情况通知当前贡献流。源 QP 关联未确认则不通知。原生 CE、CNP/ACK-CNP 和 PFC 继续生效，
+停止追加；紧急情况通知当前贡献流。源 QP 关联未确认则不通知。CE 按上述 ECN 模式处理，原生 CNP/ACK-CNP 和 PFC 继续生效，
 未改动主机 DCQCN 恢复参数。报文轮询不是任意包长下的严格字节公平。
 
 ## 有限资源与暂缓项
